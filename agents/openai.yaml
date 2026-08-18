@@ -1,0 +1,4 @@
+interface:
+  display_name: "璇玑 Mini"
+  short_description: "分析 DataWorks DQC 下载与安装链路告警"
+  default_prompt: "使用 $xuanji-mini 分析这份 DataWorks DQC 告警并进行维度下钻。"
