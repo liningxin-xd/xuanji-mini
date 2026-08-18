@@ -1,0 +1,57 @@
+{
+  "source": "dataworks_dqc",
+  "project": "tap_dw",
+  "table": "tap_dw.example_download_chain_monitor_1d",
+  "partition": "dt=2026-08-17",
+  "overall_status": "partial",
+  "investigations": [
+    {
+      "status": "completed",
+      "metric_hint": "apk下载完成->安装完成率",
+      "metric": "下载安装完成率",
+      "current_value": 0.7021,
+      "baseline_value": 0.7043,
+      "delta_bp": -22,
+      "top_findings": [
+        {
+          "dimension": "game_id",
+          "value": "demo-game-a",
+          "label": "示例游戏 A",
+          "adverse_impact_bp": 13.08,
+          "finding": "该游戏切片解释了较多不利变化，但尚不足以确认机制根因"
+        },
+        {
+          "dimension": "game_id",
+          "value": "demo-game-b",
+          "label": "示例游戏 B",
+          "adverse_impact_bp": 7.38,
+          "finding": "该游戏切片达到候选门槛"
+        },
+        {
+          "dimension": "game_id",
+          "value": "demo-game-c",
+          "label": "示例游戏 C",
+          "adverse_impact_bp": 5.01,
+          "finding": "第三项用于验证卡片只展示 Top 2"
+        }
+      ],
+      "summary": "完成率较前 7 个完整 cohort 日的池化基线下降约 22bp。",
+      "evidence_limits": [
+        "当前结果只定位影响范围，不能确认机制根因"
+      ],
+      "recommended_action": "建议继续检查规定的非游戏一级维度。",
+      "queries": [
+        {
+          "purpose": "root_metric",
+          "query_id": "demo-query-id-not-rendered"
+        }
+      ]
+    },
+    {
+      "status": "insufficient_definition",
+      "metric_hint": "沙盒下载失败率",
+      "reason": "当前指标知识库中未找到唯一对应的标准指标定义",
+      "action": "请告警或指标维护方补充或修正知识库定义"
+    }
+  ]
+}
