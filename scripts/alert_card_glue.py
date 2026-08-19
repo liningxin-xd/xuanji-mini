@@ -9,7 +9,6 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
-TEXT_LIMIT = 240
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 STATUS_LABELS = {
     "completed": "分析完成",
@@ -139,30 +138,34 @@ def _investigation_elements(investigation: dict[str, Any]) -> list[dict[str, Any
         values = _metric_values(investigation)
         if values:
             lines.append(values)
-        for finding in investigation.get("top_findings", [])[:2]:
+        if _has_text(investigation.get("summary")):
+            lines.extend(("**分析摘要**", _text(investigation["summary"])))
+        for finding in investigation.get("top_findings", []):
             if not isinstance(finding, dict):
                 continue
             label = _text(finding.get("label") or finding.get("value"), "未知切片")
             impact = _number(finding.get("adverse_impact_bp"))
             detail = _text(finding.get("finding"), "")
             impact_text = f" · {impact:g}bp" if impact is not None else ""
-            lines.append(f"- {label}{impact_text}：{detail}".rstrip("："))
+            line = f"- {label}{impact_text}"
+            lines.append(f"{line}：{detail}" if detail else line)
         counterfactual = investigation.get("counterfactual")
-        if isinstance(counterfactual, dict) and counterfactual.get("finding"):
-            lines.append(f"**反事实** {_text(counterfactual['finding'])}")
-        if investigation.get("summary"):
-            lines.append(_text(investigation["summary"]))
+        if isinstance(counterfactual, dict) and _has_text(counterfactual.get("finding")):
+            lines.extend(("**反事实**", _text(counterfactual["finding"])))
+        if _has_text(investigation.get("finding")):
+            lines.extend(("**分析结论**", _text(investigation["finding"])))
     else:
         reason = investigation.get("reason") or investigation.get("summary")
-        if reason:
-            lines.append(_text(reason))
+        if _has_text(reason):
+            lines.extend(("**当前诊断**", _text(reason)))
 
-    limits = investigation.get("evidence_limits")
-    if isinstance(limits, list) and limits:
-        lines.append(f"**证据边界** {_text(limits[0])}")
+    directions = _texts(investigation.get("evidence_limits"))
     action = investigation.get("recommended_action") or investigation.get("action")
-    if action:
-        lines.append(f"**建议** {_text(action)}")
+    if _has_text(action):
+        directions.append(_text(action))
+    if directions:
+        lines.append("**优先排查方向**")
+        lines.extend(directions)
     return [{"tag": "hr"}, {"tag": "markdown", "content": "\n".join(lines)}]
 
 
@@ -194,8 +197,17 @@ def _number(value: object) -> float | None:
 def _text(value: object, default: str = "") -> str:
     if not isinstance(value, str) or not value.strip():
         return default
-    compact = " ".join(value.split())
-    return compact if len(compact) <= TEXT_LIMIT else compact[: TEXT_LIMIT - 1] + "…"
+    return value
+
+
+def _has_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _texts(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_text(item) for item in value if _has_text(item)]
 
 
 def _post_json(url: str, payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:

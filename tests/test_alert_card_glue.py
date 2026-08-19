@@ -16,7 +16,7 @@ FIXTURE = ROOT / "fixtures" / "demo-analysis.json"
 
 
 class AlertCardGlueTest(unittest.TestCase):
-    def test_demo_analysis_renders_card_2_with_compact_summary(self) -> None:
+    def test_demo_analysis_renders_complete_analysis_without_truncation(self) -> None:
         card = build_card(load_analysis(FIXTURE))
         serialized = json.dumps(card, ensure_ascii=False)
 
@@ -24,7 +24,10 @@ class AlertCardGlueTest(unittest.TestCase):
         self.assertEqual("璇玑 Mini · DQC 分析", card["header"]["title"]["content"])
         self.assertIn("示例游戏 A", serialized)
         self.assertIn("示例游戏 B", serialized)
-        self.assertNotIn("示例游戏 C", serialized)
+        self.assertIn("示例游戏 C", serialized)
+        self.assertIn("完成率较前 7 个完整 cohort 日的池化基线下降约 22bp。", serialized)
+        self.assertIn("优先排查方向", serialized)
+        self.assertNotIn("证据边界", serialized)
         self.assertIn("指标定义不足", serialized)
         self.assertNotIn("demo-query-id-not-rendered", serialized)
 
