@@ -12,7 +12,7 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 - 只读取输入中实际存在的字段；保留未知字段但不猜含义，忽略 `$velocityCount)` 模板残留。
 - 按以下顺序回退：项目 `dqcEntityQuality.projectName -> payload.projectName`；对象表 `rule.tableName -> dqcEntityQuality.entityName`；分区 `rule.actualExpression -> dqcEntityQuality.actualExpression`；任务 ID `rule.taskId -> dqcEntityQuality.taskId`；比较符 `rule.op -> rule.operator`；阈值 `rule.expectValue`，缺失时仅把 `criticalThreshold` 或 `warningThreshold` 作为补充。
 - 优先取规则名 `【】` 内文本作为 `metric_hint`；否则只去除明显的时间、趋势和阈值修饰语。
-- 同一标准指标按“项目 + 对象表 + 实际分区 + 知识库标准指标”合并，保留全部原规则。不同指标分别分析；一个指标受阻不得阻塞其他指标。
+- 同一标准指标按“项目 + 对象表 + 实际分区 + 知识库标准指标”合并，保留全部原规则。不同指标分别分析；一个指标受阻不得阻塞其他指标。将输入 `ruleChecks` 的位置视为零基索引；每个调查通过 `rule_indexes` 原样指出自己覆盖的规则位置，不按规则名、指标名或阈值反推关联。
 - 不把所有 `checkResult` 当成业务指标值。“连续 N 周下降”等趋势规则中的值可能只是命中标志，真实值必须查询取得。
 
 ## 2. 通过指标定义门禁
@@ -24,6 +24,7 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 ```json
 {
   "status": "insufficient_definition",
+  "rule_indexes": [0],
   "metric_hint": "告警规则中提取出的指标名称",
   "alert_rules": [],
   "reason": "当前指标知识库中未找到唯一对应的标准指标定义",
@@ -61,7 +62,7 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 顶层输出固定包含 `source: "dataworks_dqc"`、项目、带项目名的对象表、原始分区、`overall_status` 和 `investigations`。`overall_status` 为：所有指标形成合法结果时 `completed`；部分完成、部分受阻时 `partial`；没有任何指标形成合法结果时 `failed`。
 
-每个调查保留 `metric_hint`、标准指标名（若命中）、全部 `alert_rules`、告警日期与实际分析日期、根指标值、合法发现、证据限制、建议动作和可用的 DView `query_id`。不要伪造缺失字段或 query ID。
+每个调查必须先写 `rule_indexes`，再保留 `metric_hint`、标准指标名（若命中）、全部 `alert_rules`、告警日期与实际分析日期、根指标值、合法发现、证据限制、建议动作和可用的 DView `query_id`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
 
 结论只描述影响范围和证据边界：使用“异常主要集中在”“剔除后异常明显缩小/仍然存在”“建议继续核查”。不得把最大候选、反事实改善、终态路由、发版或时间共现写成已确认根因。
 

@@ -7,6 +7,7 @@
   "investigations": [
     {
       "status": "completed",
+      "rule_indexes": [0],
       "metric_hint": "apk下载完成->安装完成率",
       "metric": "下载安装完成率",
       "current_value": 0.7021,
@@ -49,6 +50,7 @@
     },
     {
       "status": "insufficient_definition",
+      "rule_indexes": [1],
       "metric_hint": "沙盒下载失败率",
       "reason": "当前指标知识库中未找到唯一对应的标准指标定义",
       "action": "请告警或指标维护方补充或修正知识库定义"

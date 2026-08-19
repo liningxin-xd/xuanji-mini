@@ -926,6 +926,7 @@ failed     没有任何指标形成合法结果
 ```json
 {
   "status": "completed",
+  "rule_indexes": [0, 1],
   "metric_hint": "apk下载完成->安装完成率",
   "metric": "APK 下载安装完成率",
   "alert_rules": [
@@ -979,6 +980,7 @@ failed     没有任何指标形成合法结果
 ```json
 {
   "status": "insufficient_definition",
+  "rule_indexes": [2],
   "metric_hint": "沙盒下载失败率",
   "alert_rules": [],
   "reason": "当前指标知识库中未找到唯一对应的标准指标定义",
@@ -991,6 +993,7 @@ failed     没有任何指标形成合法结果
 ```json
 {
   "status": "no_dominant_slice",
+  "rule_indexes": [0],
   "metric_hint": "沙盒下载完成率",
   "metric": "沙盒下载完成率",
   "current_value": 0.7468,

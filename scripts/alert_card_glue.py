@@ -47,6 +47,17 @@ def load_analysis(path: Path) -> dict[str, Any]:
             raise ValueError(f"analysis.investigations[{index}] must be an object")
         if investigation.get("status") not in STATUS_LABELS:
             raise ValueError(f"analysis.investigations[{index}].status is invalid")
+        rule_indexes = investigation.get("rule_indexes")
+        if (
+            not isinstance(rule_indexes, list)
+            or not rule_indexes
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in rule_indexes)
+            or rule_indexes != sorted(set(rule_indexes))
+        ):
+            raise ValueError(
+                f"analysis.investigations[{index}].rule_indexes must be sorted unique "
+                "non-negative integers"
+            )
     return payload
 
 

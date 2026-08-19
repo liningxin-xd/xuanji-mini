@@ -35,6 +35,26 @@ class AlertCardGlueTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "status is invalid"):
                 load_analysis(path)
 
+    def test_rule_indexes_are_required_and_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis.json"
+            for rule_indexes in (None, [], [1, 0], [0, 0], [True]):
+                payload = {
+                    "source": "dataworks_dqc",
+                    "overall_status": "partial",
+                    "investigations": [
+                        {
+                            "status": "insufficient_definition",
+                            "rule_indexes": rule_indexes,
+                        }
+                    ],
+                }
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.subTest(rule_indexes=rule_indexes), self.assertRaisesRegex(
+                    ValueError, "rule_indexes"
+                ):
+                    load_analysis(path)
+
     def test_render_writes_card_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "card.json"
