@@ -42,6 +42,8 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 4. 默认基线为目标日前 7 个完整可比业务日，计算 `SUM(baseline_numerator) / SUM(baseline_denominator)`，不得简单平均逐日率。长趋势规则可扩大一次趋势查询窗口，但贡献比较仍用默认基线。
 5. 得到当前和基线分子、分母、率、`delta_bp = (current_rate - baseline_rate) * 10000`，并核对告警方向。无法解释告警值差异时停止业务下钻。
 
+任何 DView SQL 查询报错后，先读取 [SQL 快速报错排查手册](references/sql-fast-triage.md)，保留原始错误码、错误类别和错误信息，按同时匹配的报错信号与 SQL 形态选择修正规则，再重试。错误类别为 `semantic_analysis` 时必须先检查 SQL 本身并执行有依据的修正重试，不得直接结束查询。不得只凭错误码套用规则；手册没有明确匹配项时，只根据原始错误做最小修正。
+
 SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。分区缺失或合法空结果经分区检查后记 `insufficient_data`；权限不足记 `query_blocked`；两次修正后仍失败记 `query_failed`；有根指标但无合法维度数据源记 `unsupported_drilldown`。失败和空结果不得写成零。
 
 ## 4. 执行有限下钻
