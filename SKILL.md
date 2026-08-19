@@ -64,6 +64,8 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 每个调查必须先写 `rule_indexes`，再保留 `metric_hint`、标准指标名（若命中）、全部 `alert_rules`、告警日期与实际分析日期、根指标值、合法发现、证据限制、建议动作和可用的 DView `query_id`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
 
+`completed` 和 `no_dominant_slice` 调查使用卡片的规范字段名：标准指标写 `metric`，根指标写顶层 `current_value`、`baseline_value`、`delta_bp`，摘要写 `summary`，合法候选写 `top_findings` 且每项结论写 `finding`，反事实结论写 `counterfactual.finding`，建议写 `recommended_action`。只在对应证据存在时输出可选字段；不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层无法完整渲染。
+
 结论只描述影响范围和证据边界：使用“异常主要集中在”“剔除后异常明显缩小/仍然存在”“建议继续核查”。不得把最大候选、反事实改善、终态路由、发版或时间共现写成已确认根因。
 
 ## 安全边界
