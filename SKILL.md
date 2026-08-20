@@ -34,7 +34,8 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
   "status": "insufficient_definition",
   "rule_indexes": [0],
   "metric_hint": "告警规则中提取出的指标名称",
-  "alert_rules": [],
+  "alert_partition": "输入中的原始分区",
+  "alert_rules": [{"rule_name": "输入中的原始规则名"}],
   "reason": "当前指标知识库中未找到唯一对应的标准指标定义",
   "action": "请告警或指标维护方补充或修正知识库定义"
 }
@@ -75,15 +76,17 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 顶层输出固定包含 `source: "dataworks_dqc"`、项目、带项目名的对象表、原始分区、`overall_status` 和 `investigations`。`overall_status` 为：所有指标形成合法结果时 `completed`；部分完成、部分受阻时 `partial`；没有任何指标形成合法结果时 `failed`。
 
-每个调查必须先写 `rule_indexes`，再保留 `metric_hint`、标准指标名（若命中）、全部 `alert_rules`、告警日期与实际分析日期、根指标值、合法发现、证据限制、建议动作和可用的 DView `query_id`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
+每个调查必须先写 `rule_indexes`，并包含非空 `metric_hint`、原始非空 `alert_partition` 和 `alert_rules`。`alert_rules` 与 `rule_indexes` 一一对应，每项至少包含输入中的非空 `rule_name`；只有原始规则实际提供时才保留 `check_result`、`operator` 和 `threshold`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
 
-`completed` 和 `no_dominant_slice` 调查使用卡片的规范字段名：标准指标写 `metric`，根指标写顶层 `current_value`、`baseline_value`、`delta_bp`，摘要写 `summary`，建议写 `recommended_action`。只在对应证据存在时输出可选字段；不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层无法完整渲染。
+`completed` 和 `no_dominant_slice` 调查必须使用卡片的规范字段名，并包含 `YYYY-MM-DD` 的 `analysis_date`、标准指标 `metric`、有限数值 `current_value`、`baseline_value`、`delta_bp`、非空 `summary`、非空字符串数组 `evidence_limits` 和非空 `recommended_action`。其他受阻状态必须包含非空 `reason` 和 `action`；只有指标定义和日期对齐已经完成时才可附带 `analysis_date`，`insufficient_definition` 不得猜测。不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层会拒绝结果。
 
 `top_findings` 只保存实际完成贡献计算、通过闭合与质量检查并达到 Playbook 候选门槛的具体切片，不能保存整体指标变化或待执行事项。每项必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `adverse_impact_bp` 和非空 `finding`。整体变化只写入 `summary` 或顶层 `finding`。存在至少一个合法切片时才可返回 `completed`；完成规定检查但没有合法切片时返回 `no_dominant_slice` 并省略 `top_findings`；规定下钻未完成时按实际原因返回 Playbook 的受阻状态，不得返回 `completed`。
 
 `counterfactual` 只在实际执行剔除计算后输出，且必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `removal_delta_bp`、有限数值 `restoration_ratio` 和非空 `finding`。未执行、未触发或无法计算时省略整个字段，把证据边界写入 `evidence_limits`；不得用 `counterfactual.finding` 描述“尚未执行”。`no_dominant_slice` 不得包含 `counterfactual`。
 
 结论措辞严格遵守 Playbook，不得把定位结果升级为未经证实的因果结论。
+
+DView 返回真实 query ID 时，可用 `queries: [{"purpose": "...", "query_id": "..."}]` 保留；没有返回时省略 `queries`，不得伪造。
 
 ## 安全边界
 
