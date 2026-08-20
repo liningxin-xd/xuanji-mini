@@ -958,7 +958,6 @@ failed     没有任何指标形成合法结果
       "finding": "异常主要集中在该游戏样本"
     }
   ],
-  "counterfactual": null,
   "summary": "异常主要集中在……",
   "evidence_limits": [
     "当前结果只定位影响范围，不能确认机制根因"

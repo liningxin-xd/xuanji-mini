@@ -38,6 +38,61 @@ class AlertCardGlueTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "status is invalid"):
                 load_analysis(path)
 
+    def test_invalid_slice_finding_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "analysis.json"
+            payload = {
+                "source": "dataworks_dqc",
+                "overall_status": "completed",
+                "investigations": [
+                    {
+                        "status": "completed",
+                        "rule_indexes": [0],
+                        "top_findings": [
+                            {
+                                "adverse_impact_bp": 42.96,
+                                "finding": "整体指标下降",
+                            }
+                        ],
+                    }
+                ],
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "dimension"):
+                load_analysis(path)
+
+    def test_renderer_does_not_fallback_to_unknown_slice(self) -> None:
+        payload = {
+            "source": "dataworks_dqc",
+            "project": "tap_dw",
+            "table": "tap_dw.example",
+            "partition": "dt=2026-08-19",
+            "overall_status": "completed",
+            "investigations": [
+                {
+                    "status": "completed",
+                    "rule_indexes": [0],
+                    "metric": "沙盒下载完成率",
+                    "summary": "整体指标下降约 42.96bp",
+                    "top_findings": [
+                        {
+                            "adverse_impact_bp": 42.96,
+                            "finding": "这不是具体切片结论",
+                        }
+                    ],
+                    "counterfactual": {"finding": "尚未执行游戏维度反事实"},
+                }
+            ],
+        }
+
+        serialized = json.dumps(build_card(payload), ensure_ascii=False)
+
+        self.assertIn("整体指标下降约 42.96bp", serialized)
+        self.assertNotIn("未知切片", serialized)
+        self.assertNotIn("这不是具体切片结论", serialized)
+        self.assertNotIn("尚未执行游戏维度反事实", serialized)
+
     def test_rule_indexes_are_required_and_strict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "analysis.json"

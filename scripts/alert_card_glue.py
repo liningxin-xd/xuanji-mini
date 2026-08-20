@@ -46,6 +46,8 @@ def load_analysis(path: Path) -> dict[str, Any]:
             raise ValueError(f"analysis.investigations[{index}] must be an object")
         if investigation.get("status") not in STATUS_LABELS:
             raise ValueError(f"analysis.investigations[{index}].status is invalid")
+        if investigation.get("status") in {"completed", "no_dominant_slice"}:
+            _validate_render_fields(investigation, f"analysis.investigations[{index}]")
         rule_indexes = investigation.get("rule_indexes")
         if (
             not isinstance(rule_indexes, list)
@@ -143,15 +145,31 @@ def _investigation_elements(investigation: dict[str, Any]) -> list[dict[str, Any
         for finding in investigation.get("top_findings", []):
             if not isinstance(finding, dict):
                 continue
-            label = _text(finding.get("label") or finding.get("value"), "未知切片")
+            dimension = _text(finding.get("dimension"))
+            label = _text(finding.get("label")) or _text(finding.get("value"))
             impact = _number(finding.get("adverse_impact_bp"))
             detail = _text(finding.get("finding"), "")
-            impact_text = f" · {impact:g}bp" if impact is not None else ""
-            line = f"- {label}{impact_text}"
-            lines.append(f"{line}：{detail}" if detail else line)
+            if not dimension or not label or impact is None or not detail:
+                continue
+            line = f"- {label} · {impact:g}bp"
+            lines.append(f"{line}：{detail}")
         counterfactual = investigation.get("counterfactual")
-        if isinstance(counterfactual, dict) and _has_text(counterfactual.get("finding")):
-            lines.extend(("**反事实**", _text(counterfactual["finding"])))
+        if isinstance(counterfactual, dict):
+            counterfactual_dimension = _text(counterfactual.get("dimension"))
+            counterfactual_label = _text(counterfactual.get("label")) or _text(
+                counterfactual.get("value")
+            )
+            removal_delta = _number(counterfactual.get("removal_delta_bp"))
+            restoration_ratio = _number(counterfactual.get("restoration_ratio"))
+            counterfactual_finding = _text(counterfactual.get("finding"))
+            if (
+                counterfactual_dimension
+                and counterfactual_label
+                and removal_delta is not None
+                and restoration_ratio is not None
+                and counterfactual_finding
+            ):
+                lines.extend(("**反事实**", counterfactual_finding))
         if _has_text(investigation.get("finding")):
             lines.extend(("**分析结论**", _text(investigation["finding"])))
     else:
@@ -192,6 +210,68 @@ def _number(value: object) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _validate_render_fields(investigation: dict[str, Any], scope: str) -> None:
+    status = investigation["status"]
+    top_findings = investigation.get("top_findings")
+    if "top_findings" in investigation and not isinstance(top_findings, list):
+        raise ValueError(f"{scope}.top_findings must be an array")
+    if status == "completed" and not top_findings:
+        raise ValueError(f"{scope}.completed must contain at least one top_findings item")
+    if status == "no_dominant_slice" and top_findings:
+        raise ValueError(f"{scope}.no_dominant_slice must not contain top_findings")
+    if isinstance(top_findings, list):
+        for index, finding in enumerate(top_findings):
+            finding_scope = f"{scope}.top_findings[{index}]"
+            if not isinstance(finding, dict):
+                raise ValueError(f"{finding_scope} must be an object")
+            _required_text(finding.get("dimension"), f"{finding_scope}.dimension")
+            _validate_slice_label(finding, finding_scope)
+            _required_number(
+                finding.get("adverse_impact_bp"), f"{finding_scope}.adverse_impact_bp"
+            )
+            _required_text(finding.get("finding"), f"{finding_scope}.finding")
+
+    if "counterfactual" not in investigation:
+        return
+    if status != "completed":
+        raise ValueError(f"{scope}.{status} must not contain counterfactual")
+    counterfactual = investigation["counterfactual"]
+    if not isinstance(counterfactual, dict):
+        raise ValueError(f"{scope}.counterfactual must be an object when present")
+    counterfactual_scope = f"{scope}.counterfactual"
+    _required_text(
+        counterfactual.get("dimension"), f"{counterfactual_scope}.dimension"
+    )
+    _validate_slice_label(counterfactual, counterfactual_scope)
+    _required_number(
+        counterfactual.get("removal_delta_bp"),
+        f"{counterfactual_scope}.removal_delta_bp",
+    )
+    _required_number(
+        counterfactual.get("restoration_ratio"),
+        f"{counterfactual_scope}.restoration_ratio",
+    )
+    _required_text(counterfactual.get("finding"), f"{counterfactual_scope}.finding")
+
+
+def _validate_slice_label(value: dict[str, Any], scope: str) -> None:
+    if not any(_has_text(value.get(field)) for field in ("label", "value")):
+        raise ValueError(f"{scope} must contain a non-empty label or value")
+
+
+def _required_number(value: object, field: str) -> float:
+    number = _number(value)
+    if number is None:
+        raise ValueError(f"{field} must be a finite number")
+    return number
+
+
+def _required_text(value: object, field: str) -> str:
+    if not _has_text(value):
+        raise ValueError(f"{field} must be a non-empty string")
+    return str(value).strip()
 
 
 def _text(value: object, default: str = "") -> str:

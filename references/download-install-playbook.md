@@ -335,3 +335,10 @@ tap_dmp.ods_server_sync_apks
 - “建议对应团队继续核查该方向。”
 
 禁止措辞：直接断言版本、CDN、错误码、系统安装器或游戏发版是根因；把最大候选、时间共现或反事实改善当成因果确认。
+
+### 输出语义
+
+- `summary` 和顶层 `finding` 描述整体指标变化、检查范围和综合结论，不得把整体指标伪装成维度切片。
+- `top_findings` 只包含通过贡献分解、闭合、样本、占比、质量桶和候选门槛的具体切片。每项必须写 `dimension`、`label` 或 `value`、`adverse_impact_bp` 和 `finding`；缺少切片身份或只描述整体变化的项不是合法候选。
+- 至少存在一个合法切片时才返回 `completed`。完成规定的一级检查但没有合法候选时返回 `no_dominant_slice`，省略 `top_findings`，并在 `summary` 明确已经执行的检查范围。若规定下钻因数据、权限、查询或数据源限制未完成，使用对应受阻状态，不能写成“分析完成”。
+- `counterfactual` 只记录实际完成的剔除计算，必须写目标切片的 `dimension`、`label` 或 `value`、`removal_delta_bp`、`restoration_ratio` 和 `finding`。未触发、未执行或无法计算时省略该字段；原因属于 `evidence_limits`，不是反事实结论。`no_dominant_slice` 不得携带反事实。
