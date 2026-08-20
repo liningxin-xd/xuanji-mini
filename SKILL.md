@@ -12,10 +12,18 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 - 只读取输入中实际存在的字段；保留未知字段但不猜含义，忽略 `$velocityCount)` 模板残留。
 - 按以下顺序回退：项目 `dqcEntityQuality.projectName -> payload.projectName`；对象表 `rule.tableName -> dqcEntityQuality.entityName`；分区 `rule.actualExpression -> dqcEntityQuality.actualExpression`；任务 ID `rule.taskId -> dqcEntityQuality.taskId`；比较符 `rule.op -> rule.operator`；阈值 `rule.expectValue`，缺失时仅把 `criticalThreshold` 或 `warningThreshold` 作为补充。
 - 优先取规则名 `【】` 内文本作为 `metric_hint`；否则只去除明显的时间、趋势和阈值修饰语。
-- 同一标准指标按“项目 + 对象表 + 实际分区 + 知识库标准指标”合并，保留全部原规则。不同指标分别分析；一个指标受阻不得阻塞其他指标。将输入 `ruleChecks` 的位置视为零基索引；每个调查通过 `rule_indexes` 原样指出自己覆盖的规则位置，不按规则名、指标名或阈值反推关联。
+- 将输入 `ruleChecks` 的位置视为零基索引；后续每个调查通过 `rule_indexes` 原样指出自己覆盖的规则位置，不重排规则。
 - 不把所有 `checkResult` 当成业务指标值。“连续 N 周下降”等趋势规则中的值可能只是命中标志，真实值必须查询取得。
 
-## 2. 通过指标定义门禁
+## 2. 路由已注册告警
+
+对象表为 `tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d` 或省略项目名的同名表时，在指标匹配前必须完整读取 [DQC 告警路由表](references/dqc-alert-routing.md)，逐条匹配已注册档案。按路由表固定得到 APK/沙盒范围、链路阶段、规则类型、监控字段、知识库指标名和 Playbook ID；不得让调度层或模型临时推断这些映射。
+
+同一对象表中未命中注册档案的规则返回 `insufficient_definition`，不得模糊匹配到最相似档案。注册档案声明知识库定义缺失时也返回 `insufficient_definition`，不得把路由表当成指标定义。其他对象表继续执行通用知识库匹配，但只有存在明确适用的 Playbook 时才可进入归因。
+
+路由完成后，按“项目 + 对象表 + 实际分区 + 知识库标准指标 + game_type”合并同一调查，保留全部原规则及其 `rule_indexes`。同一指标的绝对值、相对过去 7 日和三周趋势规则可以合并；APK 与沙盒不得合并。不同调查串行执行，一个调查受阻不得阻塞其他调查。
+
+## 3. 通过指标定义门禁
 
 加载 `taptap-data-analysis` Skill 并按其根目录解析知识库，不依赖固定绝对路径：先读 `knowledge-base/manifest.yaml` 路由业务域，再读目标域 `_index.yaml`，按标准名、alias 或不改变业务含义的文本归一化做精确匹配，最后读取唯一命中的 metric YAML。
 
@@ -32,15 +40,17 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 }
 ```
 
-## 3. 加载分析规则
+## 4. 加载分析规则
 
-指标定义唯一命中后，在执行任何根指标复核或归因查询前，必须完整读取 [下载与安装排查 Playbook](references/download-install-playbook.md)。先根据知识库定义确认当前指标属于下载或安装链路，再执行 Playbook 中该链路的共同规则、预检、排查步骤和停止条件。
+指标定义唯一命中后，在执行任何根指标复核或归因查询前，必须完整读取路由结果指定的 Playbook。当前 `download-install` 路由读取 [下载与安装排查 Playbook](references/download-install-playbook.md)。先根据知识库定义确认当前指标属于下载或安装链路，再执行 Playbook 中该链路的共同规则、预检、排查步骤和停止条件。
 
 Playbook 是基线选择、日期语义、归因数据资产、维度顺序、贡献计算、候选门槛、反事实、二级下钻和停止条件的唯一来源。本文件不重复定义这些规则。不得依赖模型记忆、既往分析经验或本文件中的执行说明替代 Playbook，也不得因为预判没有明显归因而跳过其要求的合法检查；只有 Playbook 明确允许停止或跳过时才可结束相应步骤。
 
 指标知识库仍是指标名、方向、分子、分母、观察窗口、标准 SQL 和 caveats 的唯一来源。Playbook 不得替代或改写指标定义。
 
-## 4. 复核根指标
+## 5. 复核根指标
+
+先按已加载 Playbook 分别解析告警表分区日期和实际分析业务日期；两者可以相同，但不得默认相同。在日期关系明确前不得执行根指标或归因查询。
 
 使用当前用户权限下的只读 DView MCP。需要表结构时先 `describe_table`，不得凭记忆使用列名。
 
@@ -53,13 +63,13 @@ Playbook 是基线选择、日期语义、归因数据资产、维度顺序、�
 
 SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。分区缺失或合法空结果经分区检查后记 `insufficient_data`；权限不足记 `query_blocked`；两次修正后仍失败记 `query_failed`；有根指标但无合法维度数据源记 `unsupported_drilldown`。失败和空结果不得写成零。
 
-## 5. 执行归因
+## 6. 执行归因
 
 根指标通过后，严格按已加载 Playbook 中对应链路的顺序执行归因。需要字段结构时先 `describe_table`；每个查询完整继承知识库定义和 Playbook 要求的分析范围。
 
 不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
 
-## 6. 停止并输出
+## 7. 停止并输出
 
 使用 Playbook 的停止条件、状态和结论边界。不得选择未通过 Playbook 门槛的候选讲故事，也不得在满足停止条件后继续无方向扩展。
 
