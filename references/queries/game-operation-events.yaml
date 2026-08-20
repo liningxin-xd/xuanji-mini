@@ -1,0 +1,178 @@
+version: 2
+id: xuanji-game-operation-events
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+data_lag_days: 1
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  game_id: {type: integer}
+# Standardized event_type: 1=first release, 2=test, 3=update, 5=incident.
+# The snapshot partition is independent of business_date. Keep every matching
+# event for the selected game; do not add per-game ranking or a result limit.
+sql: |
+  WITH deduplicated_operation_events AS (
+    SELECT
+      ${business_date} AS analysis_date,
+      app_id,
+      app_title,
+      event_type,
+      CASE event_type
+        WHEN 5 THEN 3
+        WHEN 3 THEN 4
+      END AS event_priority,
+      event_title,
+      event_detail,
+      event_date0,
+      COALESCE(NULLIF(event_date1, ''), event_date0) AS event_date1,
+      apk_app_version_name,
+      source,
+      COALESCE(impact_score1, 0) AS impact_score1,
+      ROW_NUMBER() OVER (
+        PARTITION BY app_id, event_title, event_date0
+        ORDER BY updated_at DESC, announced_at DESC, apk_app_version_name DESC,
+          source DESC, event_detail DESC, event_date1 DESC, app_title DESC
+      ) AS recency_rank
+    FROM tap_bi.dwd_app_operation_events_df
+    WHERE dt = MAX_PT('tap_bi.dwd_app_operation_events_df')
+      AND deleted_at IS NULL
+      AND app_id = ${game_id}
+      AND event_type IN (5, 3)
+      AND event_date0 <= ${business_date}
+      AND COALESCE(NULLIF(event_date1, ''), event_date0) >= ${business_date}
+  ), game_snapshot AS (
+    SELECT
+      game_id,
+      game_name,
+      android_download_start_date,
+      android_playable_start_date
+    FROM tap_dw.dwt_game_detail_info_view_df
+    WHERE dt = (SELECT MAX(dt) FROM tap_dw.dwt_game_detail_info_view_df)
+      AND game_id = ${game_id}
+  ), lifecycle_events AS (
+    SELECT
+      ${business_date} AS analysis_date,
+      game_id AS app_id,
+      game_name AS app_title,
+      1 AS event_type,
+      1 AS event_priority,
+      '首发' AS event_title,
+      '安卓首次对外开放下载' AS event_detail,
+      ${business_date} AS event_date0,
+      ${business_date} AS event_date1,
+      CAST(NULL AS STRING) AS apk_app_version_name,
+      'game_detail_lifecycle' AS source,
+      0 AS impact_score1
+    FROM game_snapshot
+    WHERE android_download_start_date = ${business_date}
+    UNION ALL
+    SELECT
+      ${business_date} AS analysis_date,
+      game_id AS app_id,
+      game_name AS app_title,
+      2 AS event_type,
+      2 AS event_priority,
+      '测试' AS event_title,
+      '安卓首次可玩' AS event_detail,
+      ${business_date} AS event_date0,
+      ${business_date} AS event_date1,
+      CAST(NULL AS STRING) AS apk_app_version_name,
+      'game_detail_lifecycle' AS source,
+      0 AS impact_score1
+    FROM game_snapshot
+    WHERE android_playable_start_date = ${business_date}
+  ), event_candidates AS (
+    SELECT
+      analysis_date,
+      app_id,
+      app_title,
+      event_type,
+      event_priority,
+      event_title,
+      event_detail,
+      event_date0,
+      event_date1,
+      apk_app_version_name,
+      source,
+      impact_score1
+    FROM deduplicated_operation_events
+    WHERE recency_rank = 1
+    UNION ALL
+    SELECT
+      analysis_date,
+      app_id,
+      app_title,
+      event_type,
+      event_priority,
+      event_title,
+      event_detail,
+      event_date0,
+      event_date1,
+      apk_app_version_name,
+      source,
+      impact_score1
+    FROM lifecycle_events
+  )
+  SELECT
+    analysis_date,
+    app_id,
+    app_title,
+    event_type,
+    event_priority,
+    event_title,
+    event_detail,
+    event_date0,
+    event_date1,
+    apk_app_version_name,
+    source,
+    impact_score1
+  FROM event_candidates
+  ORDER BY event_priority ASC, impact_score1 DESC, event_date0 ASC,
+    event_title ASC, source ASC
+output:
+  date_column: analysis_date
+  dimensions: []
+  columns:
+    analysis_date: date
+    app_id: integer
+    app_title: string
+    event_type: integer
+    event_priority: integer
+    event_title: string
+    event_detail: string
+    event_date0: date
+    event_date1: date
+    apk_app_version_name: string
+    source: string
+    impact_score1: integer
+datasets:
+  - id: game_operation_events
+    allow_empty: true
+    columns:
+      - app_id
+      - app_title
+      - event_type
+      - event_priority
+      - event_title
+      - event_detail
+      - event_date0
+      - event_date1
+      - apk_app_version_name
+      - source
+      - impact_score1
+    row_key: [app_id, event_type, event_title, event_date0, source]
+    order_by:
+      - {column: event_priority, direction: asc}
+      - {column: impact_score1, direction: desc}
+      - {column: event_date0, direction: asc}
+      - {column: event_title, direction: asc}
+      - {column: source, direction: asc}
+quality:
+  require_non_empty: false
+  unique_by: [analysis_date, app_id, event_type, event_title, event_date0, source]
+  max_rows: 100
+  ranges:
+    event_priority: {min: 1, max: 4, allow_null: false}
+    impact_score1: {min: 0, allow_null: false}
