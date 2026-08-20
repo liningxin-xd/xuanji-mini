@@ -1,0 +1,475 @@
+version: 2
+id: xuanji-install-game-stage-attribution
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+# Conservative metadata for generic runners. Xuanji never derives analysis_dt
+# from this value; the Playbook binds the already resolved analysis_dt directly.
+data_lag_days: 3
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  game_type: {type: enum, allowed_values: [app, sandbox]}
+# business_date is analysis_dt, the mature download-complete cohort date.
+# This query fixes the required game_id family and reuses the same anchor rows
+# for the optional light D/T/S/C/E stage route. It never defines the metric:
+# official_* fields are the registered numerator and denominator projections.
+sql: |
+  WITH scoped_anchor_rows AS (
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      game_name,
+      install_chain_id,
+      install_round_id,
+      install_chain_id_matched,
+      ambiguous_install_round,
+      official_download_complete,
+      official_install_complete,
+      official_observation_days,
+      has_client_install_trigger,
+      has_client_install_start,
+      has_install_failed
+    FROM tap_dw.ads_report_store_platform_device_game_install_chain_attribution_1d
+    WHERE dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+      AND platform = 'ANDROID'
+      AND game_type = ${game_type}
+      AND is_metric_anchor = 1
+  ), anchor_groups AS (
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      COUNT(*) AS anchor_row_count
+    FROM scoped_anchor_rows
+    GROUP BY dt, device_id, game_id
+  ), anchor_quality_by_game AS (
+    SELECT
+      game_id,
+      SUM(CASE
+        WHEN dt = ${business_date} AND anchor_row_count > 1
+          THEN anchor_row_count - 1 ELSE 0 END
+      ) AS current_anchor_duplicate_excess,
+      SUM(CASE
+        WHEN dt < ${business_date} AND anchor_row_count > 1
+          THEN anchor_row_count - 1 ELSE 0 END
+      ) AS baseline_anchor_duplicate_excess
+    FROM anchor_groups
+    GROUP BY game_id
+  ), chain_usage AS (
+    SELECT
+      dt,
+      install_chain_id,
+      COUNT(DISTINCT CONCAT(
+        COALESCE(device_id, '__none__'), '#',
+        COALESCE(CAST(game_id AS STRING), '__none__')
+      )) AS entity_count
+    FROM scoped_anchor_rows
+    WHERE install_chain_id IS NOT NULL
+      AND TRIM(install_chain_id) <> ''
+    GROUP BY dt, install_chain_id
+  ), enriched_rows AS (
+    SELECT
+      src.*,
+      CASE WHEN COALESCE(chain.entity_count, 0) > 1 THEN 1 ELSE 0 END
+        AS link_conflict
+    FROM scoped_anchor_rows src
+    LEFT JOIN chain_usage chain
+      ON src.dt = chain.dt
+     AND src.install_chain_id = chain.install_chain_id
+  ), game_aggregates AS (
+    SELECT
+      src.game_id,
+      COALESCE(
+        MAX(CASE WHEN src.dt = ${business_date} THEN src.game_name ELSE NULL END),
+        MAX(src.game_name)
+      ) AS game_name,
+      SUM(CASE WHEN src.dt = ${business_date}
+        THEN src.official_download_complete ELSE 0 END) AS current_denominator,
+      SUM(CASE WHEN src.dt < ${business_date}
+        THEN src.official_download_complete ELSE 0 END) AS baseline_denominator,
+      SUM(CASE WHEN src.dt = ${business_date}
+        THEN src.official_install_complete ELSE 0 END) AS current_numerator,
+      SUM(CASE WHEN src.dt < ${business_date}
+        THEN src.official_install_complete ELSE 0 END) AS baseline_numerator,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_client_install_trigger, 0) = 1
+        THEN 1 ELSE 0 END) AS current_trigger_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_client_install_trigger, 0) = 1
+        THEN 1 ELSE 0 END) AS baseline_trigger_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_client_install_start, 0) = 1
+        THEN 1 ELSE 0 END) AS current_start_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_client_install_start, 0) = 1
+        THEN 1 ELSE 0 END) AS baseline_start_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_install_failed, 0) = 1
+        THEN 1 ELSE 0 END) AS current_failure_signal_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_download_complete = 1
+            AND COALESCE(src.has_install_failed, 0) = 1
+        THEN 1 ELSE 0 END) AS baseline_failure_signal_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND COALESCE(src.has_client_install_start, 0) = 1
+            AND COALESCE(src.has_client_install_trigger, 0) <> 1
+        THEN 1 ELSE 0 END) AS current_start_without_trigger_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND COALESCE(src.has_client_install_start, 0) = 1
+            AND COALESCE(src.has_client_install_trigger, 0) <> 1
+        THEN 1 ELSE 0 END) AS baseline_start_without_trigger_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_install_complete = 1
+            AND COALESCE(src.has_client_install_trigger, 0) <> 1
+        THEN 1 ELSE 0 END) AS current_complete_without_trigger_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_install_complete = 1
+            AND COALESCE(src.has_client_install_trigger, 0) <> 1
+        THEN 1 ELSE 0 END) AS baseline_complete_without_trigger_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_install_complete = 1
+            AND COALESCE(src.has_client_install_start, 0) <> 1
+        THEN 1 ELSE 0 END) AS current_complete_without_start_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_install_complete = 1
+            AND COALESCE(src.has_client_install_start, 0) <> 1
+        THEN 1 ELSE 0 END) AS baseline_complete_without_start_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND src.official_download_complete = 1
+            AND (
+              (${game_type} = 'app' AND (
+                src.install_chain_id IS NULL
+                OR TRIM(src.install_chain_id) = ''
+                OR COALESCE(src.install_chain_id_matched, 0) <> 1
+              ))
+              OR (${game_type} = 'sandbox' AND src.install_round_id IS NULL)
+            )
+        THEN 1 ELSE 0 END) AS current_missing_link_key_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND src.official_download_complete = 1
+            AND (
+              (${game_type} = 'app' AND (
+                src.install_chain_id IS NULL
+                OR TRIM(src.install_chain_id) = ''
+                OR COALESCE(src.install_chain_id_matched, 0) <> 1
+              ))
+              OR (${game_type} = 'sandbox' AND src.install_round_id IS NULL)
+            )
+        THEN 1 ELSE 0 END) AS baseline_missing_link_key_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND ${game_type} = 'app' AND src.link_conflict = 1
+        THEN 1 ELSE 0 END) AS current_link_conflict_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND ${game_type} = 'app' AND src.link_conflict = 1
+        THEN 1 ELSE 0 END) AS baseline_link_conflict_count,
+      SUM(CASE WHEN src.dt = ${business_date}
+            AND ${game_type} = 'sandbox'
+            AND COALESCE(src.ambiguous_install_round, 0) = 1
+        THEN 1 ELSE 0 END) AS current_ambiguous_round_count,
+      SUM(CASE WHEN src.dt < ${business_date}
+            AND ${game_type} = 'sandbox'
+            AND COALESCE(src.ambiguous_install_round, 0) = 1
+        THEN 1 ELSE 0 END) AS baseline_ambiguous_round_count,
+      MIN(CASE WHEN src.dt = ${business_date}
+        THEN src.official_observation_days ELSE NULL END)
+        AS current_observation_days_min,
+      MAX(CASE WHEN src.dt = ${business_date}
+        THEN src.official_observation_days ELSE NULL END)
+        AS current_observation_days_max,
+      MIN(CASE WHEN src.dt < ${business_date}
+        THEN src.official_observation_days ELSE NULL END)
+        AS baseline_observation_days_min,
+      MAX(CASE WHEN src.dt < ${business_date}
+        THEN src.official_observation_days ELSE NULL END)
+        AS baseline_observation_days_max,
+      COUNT(DISTINCT CASE WHEN src.dt < ${business_date}
+        THEN src.dt ELSE NULL END) AS game_baseline_day_count,
+      COALESCE(quality.current_anchor_duplicate_excess, 0)
+        AS current_anchor_duplicate_excess,
+      COALESCE(quality.baseline_anchor_duplicate_excess, 0)
+        AS baseline_anchor_duplicate_excess
+    FROM enriched_rows src
+    LEFT JOIN anchor_quality_by_game quality
+      ON src.game_id = quality.game_id
+    GROUP BY
+      src.game_id,
+      quality.current_anchor_duplicate_excess,
+      quality.baseline_anchor_duplicate_excess
+  ), games_with_totals AS (
+    SELECT
+      games.*,
+      SUM(current_denominator) OVER () AS total_current_denominator,
+      SUM(baseline_denominator) OVER () AS total_baseline_denominator,
+      MAX(game_baseline_day_count) OVER () AS baseline_day_count
+    FROM game_aggregates games
+  ), classified_games AS (
+    SELECT
+      games.*,
+      CASE WHEN games.game_id IS NOT NULL
+          AND (
+            games.current_denominator >= 100
+            OR games.baseline_denominator * 1.0
+              / NULLIF(games.baseline_day_count, 0) >= 100
+          )
+          AND (
+            games.current_denominator * 1.0
+              / NULLIF(games.total_current_denominator, 0) >= 0.01
+            OR games.baseline_denominator * 1.0
+              / NULLIF(games.total_baseline_denominator, 0) >= 0.01
+          )
+        THEN 'game' ELSE 'residual' END AS bucket_kind,
+      CASE WHEN games.game_id IS NOT NULL
+          AND (
+            games.current_denominator >= 100
+            OR games.baseline_denominator * 1.0
+              / NULLIF(games.baseline_day_count, 0) >= 100
+          )
+          AND (
+            games.current_denominator * 1.0
+              / NULLIF(games.total_current_denominator, 0) >= 0.01
+            OR games.baseline_denominator * 1.0
+              / NULLIF(games.total_baseline_denominator, 0) >= 0.01
+          )
+        THEN CAST(games.game_id AS STRING)
+        ELSE '__other_below_threshold__' END AS dimension_value
+    FROM games_with_totals games
+  ), bucketed_games AS (
+    SELECT
+      bucket_kind,
+      dimension_value,
+      CASE WHEN bucket_kind = 'game' THEN MAX(game_name)
+        ELSE '__other_below_threshold__' END AS dimension_label,
+      MAX(baseline_day_count) AS baseline_day_count,
+      SUM(current_denominator) AS current_denominator,
+      SUM(baseline_denominator) AS baseline_denominator,
+      SUM(current_numerator) AS current_numerator,
+      SUM(baseline_numerator) AS baseline_numerator,
+      SUM(current_trigger_count) AS current_trigger_count,
+      SUM(baseline_trigger_count) AS baseline_trigger_count,
+      SUM(current_start_count) AS current_start_count,
+      SUM(baseline_start_count) AS baseline_start_count,
+      SUM(current_failure_signal_count) AS current_failure_signal_count,
+      SUM(baseline_failure_signal_count) AS baseline_failure_signal_count,
+      SUM(current_start_without_trigger_count) AS current_start_without_trigger_count,
+      SUM(baseline_start_without_trigger_count) AS baseline_start_without_trigger_count,
+      SUM(current_complete_without_trigger_count) AS current_complete_without_trigger_count,
+      SUM(baseline_complete_without_trigger_count) AS baseline_complete_without_trigger_count,
+      SUM(current_complete_without_start_count) AS current_complete_without_start_count,
+      SUM(baseline_complete_without_start_count) AS baseline_complete_without_start_count,
+      SUM(current_missing_link_key_count) AS current_missing_link_key_count,
+      SUM(baseline_missing_link_key_count) AS baseline_missing_link_key_count,
+      SUM(current_link_conflict_count) AS current_link_conflict_count,
+      SUM(baseline_link_conflict_count) AS baseline_link_conflict_count,
+      SUM(current_ambiguous_round_count) AS current_ambiguous_round_count,
+      SUM(baseline_ambiguous_round_count) AS baseline_ambiguous_round_count,
+      MIN(current_observation_days_min) AS current_observation_days_min,
+      MAX(current_observation_days_max) AS current_observation_days_max,
+      MIN(baseline_observation_days_min) AS baseline_observation_days_min,
+      MAX(baseline_observation_days_max) AS baseline_observation_days_max,
+      SUM(current_anchor_duplicate_excess) AS current_anchor_duplicate_excess,
+      SUM(baseline_anchor_duplicate_excess) AS baseline_anchor_duplicate_excess
+    FROM classified_games
+    GROUP BY bucket_kind, dimension_value
+  ), all_buckets AS (
+    SELECT * FROM bucketed_games
+    UNION ALL
+    SELECT
+      'overall' AS bucket_kind,
+      '__overall__' AS dimension_value,
+      '全部游戏' AS dimension_label,
+      MAX(games.baseline_day_count) AS baseline_day_count,
+      SUM(games.current_denominator) AS current_denominator,
+      SUM(games.baseline_denominator) AS baseline_denominator,
+      SUM(games.current_numerator) AS current_numerator,
+      SUM(games.baseline_numerator) AS baseline_numerator,
+      SUM(games.current_trigger_count) AS current_trigger_count,
+      SUM(games.baseline_trigger_count) AS baseline_trigger_count,
+      SUM(games.current_start_count) AS current_start_count,
+      SUM(games.baseline_start_count) AS baseline_start_count,
+      SUM(games.current_failure_signal_count) AS current_failure_signal_count,
+      SUM(games.baseline_failure_signal_count) AS baseline_failure_signal_count,
+      SUM(games.current_start_without_trigger_count) AS current_start_without_trigger_count,
+      SUM(games.baseline_start_without_trigger_count) AS baseline_start_without_trigger_count,
+      SUM(games.current_complete_without_trigger_count) AS current_complete_without_trigger_count,
+      SUM(games.baseline_complete_without_trigger_count) AS baseline_complete_without_trigger_count,
+      SUM(games.current_complete_without_start_count) AS current_complete_without_start_count,
+      SUM(games.baseline_complete_without_start_count) AS baseline_complete_without_start_count,
+      SUM(games.current_missing_link_key_count) AS current_missing_link_key_count,
+      SUM(games.baseline_missing_link_key_count) AS baseline_missing_link_key_count,
+      SUM(games.current_link_conflict_count) AS current_link_conflict_count,
+      SUM(games.baseline_link_conflict_count) AS baseline_link_conflict_count,
+      SUM(games.current_ambiguous_round_count) AS current_ambiguous_round_count,
+      SUM(games.baseline_ambiguous_round_count) AS baseline_ambiguous_round_count,
+      MIN(games.current_observation_days_min) AS current_observation_days_min,
+      MAX(games.current_observation_days_max) AS current_observation_days_max,
+      MIN(games.baseline_observation_days_min) AS baseline_observation_days_min,
+      MAX(games.baseline_observation_days_max) AS baseline_observation_days_max,
+      SUM(games.current_anchor_duplicate_excess) AS current_anchor_duplicate_excess,
+      SUM(games.baseline_anchor_duplicate_excess) AS baseline_anchor_duplicate_excess
+    FROM games_with_totals games
+  )
+  SELECT
+    ${business_date} AS analysis_date,
+    ${game_type} AS game_type,
+    bucket_kind,
+    dimension_value,
+    dimension_label,
+    baseline_day_count,
+    current_denominator,
+    baseline_denominator,
+    current_numerator,
+    baseline_numerator,
+    current_trigger_count,
+    baseline_trigger_count,
+    current_start_count,
+    baseline_start_count,
+    current_failure_signal_count,
+    baseline_failure_signal_count,
+    current_start_without_trigger_count,
+    baseline_start_without_trigger_count,
+    current_complete_without_trigger_count,
+    baseline_complete_without_trigger_count,
+    current_complete_without_start_count,
+    baseline_complete_without_start_count,
+    current_missing_link_key_count,
+    baseline_missing_link_key_count,
+    current_link_conflict_count,
+    baseline_link_conflict_count,
+    current_ambiguous_round_count,
+    baseline_ambiguous_round_count,
+    current_observation_days_min,
+    current_observation_days_max,
+    baseline_observation_days_min,
+    baseline_observation_days_max,
+    current_anchor_duplicate_excess,
+    baseline_anchor_duplicate_excess
+  FROM all_buckets
+  ORDER BY
+    CASE bucket_kind WHEN 'overall' THEN 1 WHEN 'game' THEN 2 ELSE 3 END,
+    current_denominator DESC,
+    dimension_value ASC
+output:
+  date_column: analysis_date
+  dimensions: [game_type, bucket_kind, dimension_value]
+  columns:
+    analysis_date: date
+    game_type: string
+    bucket_kind: string
+    dimension_value: string
+    dimension_label: string
+    baseline_day_count: integer
+    current_denominator: integer
+    baseline_denominator: integer
+    current_numerator: integer
+    baseline_numerator: integer
+    current_trigger_count: integer
+    baseline_trigger_count: integer
+    current_start_count: integer
+    baseline_start_count: integer
+    current_failure_signal_count: integer
+    baseline_failure_signal_count: integer
+    current_start_without_trigger_count: integer
+    baseline_start_without_trigger_count: integer
+    current_complete_without_trigger_count: integer
+    baseline_complete_without_trigger_count: integer
+    current_complete_without_start_count: integer
+    baseline_complete_without_start_count: integer
+    current_missing_link_key_count: integer
+    baseline_missing_link_key_count: integer
+    current_link_conflict_count: integer
+    baseline_link_conflict_count: integer
+    current_ambiguous_round_count: integer
+    baseline_ambiguous_round_count: integer
+    current_observation_days_min: integer
+    current_observation_days_max: integer
+    baseline_observation_days_min: integer
+    baseline_observation_days_max: integer
+    current_anchor_duplicate_excess: integer
+    baseline_anchor_duplicate_excess: integer
+datasets:
+  - id: install_game_stage_attribution
+    columns:
+      - game_type
+      - bucket_kind
+      - dimension_value
+      - dimension_label
+      - baseline_day_count
+      - current_denominator
+      - baseline_denominator
+      - current_numerator
+      - baseline_numerator
+      - current_trigger_count
+      - baseline_trigger_count
+      - current_start_count
+      - baseline_start_count
+      - current_failure_signal_count
+      - baseline_failure_signal_count
+      - current_start_without_trigger_count
+      - baseline_start_without_trigger_count
+      - current_complete_without_trigger_count
+      - baseline_complete_without_trigger_count
+      - current_complete_without_start_count
+      - baseline_complete_without_start_count
+      - current_missing_link_key_count
+      - baseline_missing_link_key_count
+      - current_link_conflict_count
+      - baseline_link_conflict_count
+      - current_ambiguous_round_count
+      - baseline_ambiguous_round_count
+      - current_observation_days_min
+      - current_observation_days_max
+      - baseline_observation_days_min
+      - baseline_observation_days_max
+      - current_anchor_duplicate_excess
+      - baseline_anchor_duplicate_excess
+    row_key: [game_type, bucket_kind, dimension_value]
+    order_by:
+      - {column: bucket_kind, direction: asc}
+      - {column: current_denominator, direction: desc}
+      - {column: dimension_value, direction: asc}
+quality:
+  require_non_empty: true
+  unique_by: [analysis_date, game_type, bucket_kind, dimension_value]
+  max_rows: 250
+  ranges:
+    baseline_day_count: {min: 0, max: 7, allow_null: false}
+    current_denominator: {min: 0, allow_null: false}
+    baseline_denominator: {min: 0, allow_null: false}
+    current_numerator: {min: 0, allow_null: false}
+    baseline_numerator: {min: 0, allow_null: false}
+    current_trigger_count: {min: 0, allow_null: false}
+    baseline_trigger_count: {min: 0, allow_null: false}
+    current_start_count: {min: 0, allow_null: false}
+    baseline_start_count: {min: 0, allow_null: false}
+    current_failure_signal_count: {min: 0, allow_null: false}
+    baseline_failure_signal_count: {min: 0, allow_null: false}
+    current_start_without_trigger_count: {min: 0, allow_null: false}
+    baseline_start_without_trigger_count: {min: 0, allow_null: false}
+    current_complete_without_trigger_count: {min: 0, allow_null: false}
+    baseline_complete_without_trigger_count: {min: 0, allow_null: false}
+    current_complete_without_start_count: {min: 0, allow_null: false}
+    baseline_complete_without_start_count: {min: 0, allow_null: false}
+    current_missing_link_key_count: {min: 0, allow_null: false}
+    baseline_missing_link_key_count: {min: 0, allow_null: false}
+    current_link_conflict_count: {min: 0, allow_null: false}
+    baseline_link_conflict_count: {min: 0, allow_null: false}
+    current_ambiguous_round_count: {min: 0, allow_null: false}
+    baseline_ambiguous_round_count: {min: 0, allow_null: false}
+    # Entrant/exit games legitimately have no observation window on the absent side.
+    # The Playbook requires the present side and __overall__ to match app=3/sandbox=1.
+    current_observation_days_min: {min: 1, max: 3, allow_null: true}
+    current_observation_days_max: {min: 1, max: 3, allow_null: true}
+    baseline_observation_days_min: {min: 1, max: 3, allow_null: true}
+    baseline_observation_days_max: {min: 1, max: 3, allow_null: true}
+    current_anchor_duplicate_excess: {min: 0, allow_null: false}
+    baseline_anchor_duplicate_excess: {min: 0, allow_null: false}

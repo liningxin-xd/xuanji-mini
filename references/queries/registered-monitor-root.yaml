@@ -1,0 +1,121 @@
+version: 2
+id: xuanji-registered-monitor-root
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+data_lag_days: 1
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  game_type: {type: enum, allowed_values: [app, sandbox]}
+# business_date is the alert-table partition date (alert_dt), not analysis_dt.
+# Select the registered fields as a fixed superset; the DQC routing registry
+# decides which field applies to each alert rule.
+sql: |
+  SELECT
+    ${business_date} AS alert_date,
+    platform,
+    game_type,
+    game_download_device_num_1d,
+    game_download_complete_device_num_1d,
+    game_download_complete_rate_1d,
+    avg_game_download_complete_rate_prev_7d,
+    wave_game_download_complete_rate_prev_7d,
+    avg_game_download_complete_rate_7d,
+    avg_game_download_complete_rate_prev_1w_7d,
+    avg_game_download_complete_rate_prev_2w_7d,
+    avg_game_download_complete_rate_prev_3w_7d,
+    is_game_download_complete_rate_7d_trend_down,
+    game_download_complete_prev_2d_device_num_1d,
+    game_download_complete_and_install_complete_prev_2d_device_num_p3d,
+    game_download_complete_and_install_complete_prev_2d_rate_p3d,
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d,
+    wave_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d,
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d,
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_1w_7d,
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_2w_7d,
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_3w_7d,
+    is_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d_trend_down
+  FROM tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+  WHERE dt = ${business_date}
+    AND platform = 'ANDROID'
+    AND game_type = ${game_type}
+output:
+  date_column: alert_date
+  dimensions: [platform, game_type]
+  columns:
+    alert_date: date
+    platform: string
+    game_type: string
+    game_download_device_num_1d: integer
+    game_download_complete_device_num_1d: integer
+    game_download_complete_rate_1d: number
+    avg_game_download_complete_rate_prev_7d: number
+    wave_game_download_complete_rate_prev_7d: number
+    avg_game_download_complete_rate_7d: number
+    avg_game_download_complete_rate_prev_1w_7d: number
+    avg_game_download_complete_rate_prev_2w_7d: number
+    avg_game_download_complete_rate_prev_3w_7d: number
+    is_game_download_complete_rate_7d_trend_down: integer
+    game_download_complete_prev_2d_device_num_1d: integer
+    game_download_complete_and_install_complete_prev_2d_device_num_p3d: integer
+    game_download_complete_and_install_complete_prev_2d_rate_p3d: number
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d: number
+    wave_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d: number
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d: number
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_1w_7d: number
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_2w_7d: number
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_3w_7d: number
+    is_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d_trend_down: integer
+datasets:
+  - id: registered_monitor_root
+    columns:
+      - platform
+      - game_type
+      - game_download_device_num_1d
+      - game_download_complete_device_num_1d
+      - game_download_complete_rate_1d
+      - avg_game_download_complete_rate_prev_7d
+      - wave_game_download_complete_rate_prev_7d
+      - avg_game_download_complete_rate_7d
+      - avg_game_download_complete_rate_prev_1w_7d
+      - avg_game_download_complete_rate_prev_2w_7d
+      - avg_game_download_complete_rate_prev_3w_7d
+      - is_game_download_complete_rate_7d_trend_down
+      - game_download_complete_prev_2d_device_num_1d
+      - game_download_complete_and_install_complete_prev_2d_device_num_p3d
+      - game_download_complete_and_install_complete_prev_2d_rate_p3d
+      - avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d
+      - wave_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d
+      - avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d
+      - avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_1w_7d
+      - avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_2w_7d
+      - avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_3w_7d
+      - is_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d_trend_down
+    row_key: [platform, game_type]
+quality:
+  require_non_empty: true
+  unique_by: [alert_date, platform, game_type]
+  max_rows: 1
+  ranges:
+    game_download_device_num_1d: {min: 0, allow_null: false}
+    game_download_complete_device_num_1d: {min: 0, allow_null: false}
+    game_download_complete_rate_1d: {min: 0, max: 1, allow_null: false}
+    avg_game_download_complete_rate_prev_7d: {min: 0, max: 1, allow_null: true}
+    wave_game_download_complete_rate_prev_7d: {min: 0, allow_null: true}
+    avg_game_download_complete_rate_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_rate_prev_1w_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_rate_prev_2w_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_rate_prev_3w_7d: {min: 0, max: 1, allow_null: true}
+    is_game_download_complete_rate_7d_trend_down: {min: 0, max: 1, allow_null: true}
+    game_download_complete_prev_2d_device_num_1d: {min: 0, allow_null: false}
+    game_download_complete_and_install_complete_prev_2d_device_num_p3d: {min: 0, allow_null: false}
+    game_download_complete_and_install_complete_prev_2d_rate_p3d: {min: 0, max: 1, allow_null: false}
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d: {min: 0, max: 1, allow_null: true}
+    wave_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d: {min: 0, allow_null: true}
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_1w_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_2w_7d: {min: 0, max: 1, allow_null: true}
+    avg_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_3w_7d: {min: 0, max: 1, allow_null: true}
+    is_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d_trend_down: {min: 0, max: 1, allow_null: true}
