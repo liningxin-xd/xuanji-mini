@@ -11,15 +11,22 @@ parameters:
   game_type: {type: enum, allowed_values: [app, sandbox]}
 # business_date is the alert-table partition date (alert_dt), not analysis_dt.
 # Select the registered fields as a fixed superset; the DQC routing registry
-# decides which field applies to each alert rule.
+# decides which rate or signal field and which numerator/denominator pair apply.
 sql: |
   SELECT
     ${business_date} AS alert_date,
     platform,
     game_type,
     game_download_device_num_1d,
+    game_download_cnt_1d,
     game_download_complete_device_num_1d,
+    game_download_failed_device_num_1d,
+    game_download_failed_cnt_1d,
+    game_download_stop_device_num_1d,
     game_download_complete_rate_1d,
+    game_download_failed_rate_1d,
+    game_download_failed_pv_rate_1d,
+    game_download_stop_rate_1d,
     avg_game_download_complete_rate_prev_7d,
     wave_game_download_complete_rate_prev_7d,
     avg_game_download_complete_rate_7d,
@@ -49,8 +56,15 @@ output:
     platform: string
     game_type: string
     game_download_device_num_1d: integer
+    game_download_cnt_1d: integer
     game_download_complete_device_num_1d: integer
+    game_download_failed_device_num_1d: integer
+    game_download_failed_cnt_1d: integer
+    game_download_stop_device_num_1d: integer
     game_download_complete_rate_1d: number
+    game_download_failed_rate_1d: number
+    game_download_failed_pv_rate_1d: number
+    game_download_stop_rate_1d: number
     avg_game_download_complete_rate_prev_7d: number
     wave_game_download_complete_rate_prev_7d: number
     avg_game_download_complete_rate_7d: number
@@ -74,8 +88,15 @@ datasets:
       - platform
       - game_type
       - game_download_device_num_1d
+      - game_download_cnt_1d
       - game_download_complete_device_num_1d
+      - game_download_failed_device_num_1d
+      - game_download_failed_cnt_1d
+      - game_download_stop_device_num_1d
       - game_download_complete_rate_1d
+      - game_download_failed_rate_1d
+      - game_download_failed_pv_rate_1d
+      - game_download_stop_rate_1d
       - avg_game_download_complete_rate_prev_7d
       - wave_game_download_complete_rate_prev_7d
       - avg_game_download_complete_rate_7d
@@ -100,8 +121,15 @@ quality:
   max_rows: 1
   ranges:
     game_download_device_num_1d: {min: 0, allow_null: false}
+    game_download_cnt_1d: {min: 0, allow_null: false}
     game_download_complete_device_num_1d: {min: 0, allow_null: false}
+    game_download_failed_device_num_1d: {min: 0, allow_null: false}
+    game_download_failed_cnt_1d: {min: 0, allow_null: false}
+    game_download_stop_device_num_1d: {min: 0, allow_null: false}
     game_download_complete_rate_1d: {min: 0, max: 1, allow_null: false}
+    game_download_failed_rate_1d: {min: 0, max: 1, allow_null: false}
+    game_download_failed_pv_rate_1d: {min: 0, allow_null: false}
+    game_download_stop_rate_1d: {min: 0, max: 1, allow_null: false}
     avg_game_download_complete_rate_prev_7d: {min: 0, max: 1, allow_null: true}
     wave_game_download_complete_rate_prev_7d: {min: 0, allow_null: true}
     avg_game_download_complete_rate_7d: {min: 0, max: 1, allow_null: true}

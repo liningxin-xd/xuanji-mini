@@ -1,0 +1,195 @@
+version: 2
+id: xuanji-download-stop-rate-game-attribution
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+data_lag_days: 1
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  game_type: {type: enum, allowed_values: [app, sandbox]}
+# Dedicated to 下载人为停止率. Keep its projection isolated from completion,
+# failure-rate, and failed-PV queries so MaxCompute scans only required fields.
+sql: |
+  WITH scoped_rows AS (
+    SELECT
+      dt,
+      game_id,
+      game_name,
+      download_sample_flag,
+      is_human_stop
+    FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    WHERE dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+      AND platform = 'ANDROID'
+      AND game_type = ${game_type}
+  ), bucket_aggregates AS (
+    SELECT
+      COALESCE(CAST(game_id AS STRING), '__none__') AS dimension_value,
+      COALESCE(MAX(game_name), '__none__') AS dimension_label,
+      COUNT(DISTINCT CASE WHEN dt < ${business_date} THEN dt END)
+        AS bucket_baseline_day_count,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN download_sample_flag ELSE 0 END) AS current_denominator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN download_sample_flag ELSE 0 END) AS baseline_denominator,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN is_human_stop ELSE 0 END) AS current_numerator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN is_human_stop ELSE 0 END) AS baseline_numerator,
+      SUM(CASE WHEN download_sample_flag IS NULL
+            OR download_sample_flag <> 1
+            OR is_human_stop IS NULL
+            OR is_human_stop NOT IN (0, 1)
+          THEN 1 ELSE 0 END) AS invalid_metric_row_count
+    FROM scoped_rows
+    GROUP BY COALESCE(CAST(game_id AS STRING), '__none__')
+  ), buckets_with_totals AS (
+    SELECT
+      bucket_aggregates.*,
+      MAX(bucket_baseline_day_count) OVER () AS baseline_day_count,
+      SUM(current_denominator) OVER () AS overall_current_denominator,
+      SUM(baseline_denominator) OVER () AS overall_baseline_denominator,
+      SUM(current_numerator) OVER () AS overall_current_numerator,
+      SUM(baseline_numerator) OVER () AS overall_baseline_numerator
+    FROM bucket_aggregates
+  ), classified_buckets AS (
+    SELECT
+      CASE
+        WHEN dimension_value = '__none__' THEN 'quality'
+        WHEN (
+          current_denominator >= 100
+          OR baseline_denominator * 1.0
+            / NULLIF(baseline_day_count, 0) >= 100
+        ) AND (
+          current_denominator * 1.0
+            / NULLIF(overall_current_denominator, 0) >= 0.01
+          OR baseline_denominator * 1.0
+            / NULLIF(overall_baseline_denominator, 0) >= 0.01
+        ) THEN 'game'
+        ELSE 'residual'
+      END AS bucket_kind,
+      CASE
+        WHEN dimension_value = '__none__' THEN '__none__'
+        WHEN (
+          current_denominator >= 100
+          OR baseline_denominator * 1.0
+            / NULLIF(baseline_day_count, 0) >= 100
+        ) AND (
+          current_denominator * 1.0
+            / NULLIF(overall_current_denominator, 0) >= 0.01
+          OR baseline_denominator * 1.0
+            / NULLIF(overall_baseline_denominator, 0) >= 0.01
+        ) THEN dimension_value
+        ELSE '__other_below_threshold__'
+      END AS output_dimension_value,
+      dimension_label,
+      baseline_day_count,
+      current_denominator,
+      baseline_denominator,
+      current_numerator,
+      baseline_numerator,
+      overall_current_denominator,
+      overall_baseline_denominator,
+      overall_current_numerator,
+      overall_baseline_numerator,
+      invalid_metric_row_count
+    FROM buckets_with_totals
+  ), collapsed_buckets AS (
+    SELECT
+      bucket_kind,
+      output_dimension_value AS dimension_value,
+      CASE WHEN bucket_kind = 'game' THEN MAX(dimension_label)
+        ELSE MAX(output_dimension_value) END AS dimension_label,
+      MAX(baseline_day_count) AS baseline_day_count,
+      SUM(current_denominator) AS current_denominator,
+      SUM(baseline_denominator) AS baseline_denominator,
+      SUM(current_numerator) AS current_numerator,
+      SUM(baseline_numerator) AS baseline_numerator,
+      MAX(overall_current_denominator) AS overall_current_denominator,
+      MAX(overall_baseline_denominator) AS overall_baseline_denominator,
+      MAX(overall_current_numerator) AS overall_current_numerator,
+      MAX(overall_baseline_numerator) AS overall_baseline_numerator,
+      SUM(invalid_metric_row_count) AS invalid_metric_row_count
+    FROM classified_buckets
+    GROUP BY bucket_kind, output_dimension_value
+  )
+  SELECT
+    ${business_date} AS analysis_date,
+    ${game_type} AS game_type,
+    bucket_kind,
+    dimension_value,
+    dimension_label,
+    baseline_day_count,
+    current_denominator,
+    baseline_denominator,
+    current_numerator,
+    baseline_numerator,
+    overall_current_denominator,
+    overall_baseline_denominator,
+    overall_current_numerator,
+    overall_baseline_numerator,
+    invalid_metric_row_count
+  FROM collapsed_buckets
+  ORDER BY
+    CASE bucket_kind WHEN 'game' THEN 1 WHEN 'residual' THEN 2 ELSE 3 END,
+    current_denominator DESC,
+    dimension_value ASC
+output:
+  date_column: analysis_date
+  dimensions: [game_type, bucket_kind, dimension_value]
+  columns:
+    analysis_date: date
+    game_type: string
+    bucket_kind: string
+    dimension_value: string
+    dimension_label: string
+    baseline_day_count: integer
+    current_denominator: integer
+    baseline_denominator: integer
+    current_numerator: integer
+    baseline_numerator: integer
+    overall_current_denominator: integer
+    overall_baseline_denominator: integer
+    overall_current_numerator: integer
+    overall_baseline_numerator: integer
+    invalid_metric_row_count: integer
+datasets:
+  - id: download_stop_rate_game_attribution
+    columns:
+      - game_type
+      - bucket_kind
+      - dimension_value
+      - dimension_label
+      - baseline_day_count
+      - current_denominator
+      - baseline_denominator
+      - current_numerator
+      - baseline_numerator
+      - overall_current_denominator
+      - overall_baseline_denominator
+      - overall_current_numerator
+      - overall_baseline_numerator
+      - invalid_metric_row_count
+    row_key: [game_type, bucket_kind, dimension_value]
+    order_by:
+      - {column: bucket_kind, direction: asc}
+      - {column: current_denominator, direction: desc}
+      - {column: dimension_value, direction: asc}
+quality:
+  require_non_empty: true
+  unique_by: [analysis_date, game_type, bucket_kind, dimension_value]
+  max_rows: 250
+  ranges:
+    baseline_day_count: {min: 0, max: 7, allow_null: false}
+    current_denominator: {min: 0, allow_null: false}
+    baseline_denominator: {min: 0, allow_null: false}
+    current_numerator: {min: 0, allow_null: false}
+    baseline_numerator: {min: 0, allow_null: false}
+    overall_current_denominator: {min: 0, allow_null: false}
+    overall_baseline_denominator: {min: 0, allow_null: false}
+    overall_current_numerator: {min: 0, allow_null: false}
+    overall_baseline_numerator: {min: 0, allow_null: false}
+    invalid_metric_row_count: {min: 0, allow_null: false}

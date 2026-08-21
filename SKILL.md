@@ -17,7 +17,7 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 
 ## 2. 路由已注册告警
 
-对象表为 `tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d` 或省略项目名的同名表时，在指标匹配前必须完整读取 [DQC 告警路由表](references/dqc-alert-routing.md)，逐条匹配已注册档案。按路由表固定得到 APK/沙盒范围、链路阶段、规则类型、监控字段、知识库指标名和 Playbook ID；不得让调度层或模型临时推断这些映射。
+对象表为 `tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d` 或省略项目名的同名表时，在指标匹配前必须完整读取 [DQC 告警路由表](references/dqc-alert-routing.md)，逐条匹配已注册档案。按路由表固定得到 APK/沙盒范围、链路阶段、规则类型、监控字段、监控分子/分母字段、知识库指标名和 Playbook ID；不得让调度层或模型临时推断这些映射。
 
 同一对象表中未命中注册档案的规则返回 `insufficient_definition`，不得模糊匹配到最相似档案。注册档案声明知识库定义缺失时也返回 `insufficient_definition`，不得把路由表当成指标定义。其他对象表继续执行通用知识库匹配，但只有存在明确适用的 Playbook 时才可进入归因。
 

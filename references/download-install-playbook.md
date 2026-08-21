@@ -47,7 +47,7 @@ DQC 规则名中的“最近 1 天”表示当前选择的最新告警分区，�
 根指标按以下顺序复核：
 
 1. 先解析 `alert_dt` 和 `analysis_dt`，日期关系未确定时不查询。
-2. 对已注册监控表，完整读取 [注册监控根值 QuerySpec](queries/registered-monitor-root.yaml)，绑定 `business_date=alert_dt` 和路由档案的 `game_type`，按固定 `platform=ANDROID` 与 APK/沙盒行复现 DQC 当前值。正常加载本 Playbook 时不得预读该 QuerySpec，其他对象表不得路由到它。QuerySpec 固定返回全部已注册下载完成率和下载安装完成率字段；每条规则仍只使用路由档案声明的 `monitor_field`，不得按非空值或相似名称改选字段。该表是告警口径的事实源。
+2. 对已注册监控表，完整读取 [注册监控根值 QuerySpec](queries/registered-monitor-root.yaml)，绑定 `business_date=alert_dt` 和路由档案的 `game_type`，按固定 `platform=ANDROID` 与 APK/沙盒行复现 DQC 当前值。正常加载本 Playbook 时不得预读该 QuerySpec，其他对象表不得路由到它。QuerySpec 固定返回全部已注册指标的当前率或命中信号及其监控分子、分母字段；每条规则仍只使用路由档案声明的 `monitor_field`、`monitor_numerator_field` 和 `monitor_denominator_field`，不得按非空值或相似名称改选字段。该表是告警口径的事实源。
 3. 只有对账确有必要时，才在标准指标表的 `analysis_dt` 分区复算；先汇总分子、分母再相除，并按监控表的 4 位小数精度比较。
 4. 根指标通过后，所有基线和归因查询都以 `analysis_dt` 为目标日；基线日期也相对 `analysis_dt` 选择。
 
@@ -151,7 +151,16 @@ dt + platform + game_type + device_id + game_id
 
 `dt` 是下载业务日。首次下载上下文只取同一业务日、同一设备、游戏和游戏类型内的首条下载事件。非互斥过程标记不得相加成总样本。
 
-执行下载 `game_id` 一级归因时完整读取 [下载游戏归因 QuerySpec](queries/download-game-attribution.yaml)，绑定 `business_date=analysis_dt` 和当前 `game_type`，不得重新手写或改组其 SQL。执行 `is_reserve_auto_download` 或后续低基数家族前完整读取 [下载一级归因 SQL 模板](queries/download-primary-attribution-template.md)；每次只能选择一个 Playbook 已登记的维度家族替换模板中的维度表达式。QuerySpec 和模板固定正式宽表、日期、平台、APK/沙盒范围、分子分母和“分桶聚合后再用窗口总量”的 CTE 结构，但不替代知识库指标定义、数据完整性门禁、候选门槛或贡献计算。
+先用路由后经知识库确认的标准指标严格选择一组专用查询资产：
+
+| 标准指标 | `game_id` QuerySpec | 低基数维度模板 |
+|---|---|---|
+| `下载完成率` | [下载完成率游戏归因 QuerySpec](queries/download-game-attribution.yaml) | [下载完成率一级归因模板](queries/download-primary-attribution-template.md) |
+| `下载失败率` | [下载失败率游戏归因 QuerySpec](queries/download-failed-rate-game-attribution.yaml) | [下载失败率一级归因模板](queries/download-failed-rate-primary-attribution-template.md) |
+| `下载失败次数比率` | [下载失败次数比率游戏归因 QuerySpec](queries/download-failed-pv-rate-game-attribution.yaml) | [下载失败次数比率一级归因模板](queries/download-failed-pv-rate-primary-attribution-template.md) |
+| `下载人为停止率` | [下载人为停止率游戏归因 QuerySpec](queries/download-stop-rate-game-attribution.yaml) | [下载人为停止率一级归因模板](queries/download-stop-rate-primary-attribution-template.md) |
+
+执行下载 `game_id` 一级归因时只完整读取当前标准指标绑定的 QuerySpec，绑定 `business_date=analysis_dt` 和当前 `game_type`，不得读取其他指标的 QuerySpec、重新手写或改组 SQL。执行 `is_reserve_auto_download` 或后续低基数家族前，同样只读取当前指标绑定的模板；每次只能选择一个 Playbook 已登记的维度家族替换模板中的维度表达式。标准指标不在上表时停止，不得改绑最相似指标。每组专用资产固定正式宽表、日期、平台、APK/沙盒范围、分子分母和“分桶聚合后再用窗口总量”的 CTE 结构，但不替代知识库指标定义、数据完整性门禁、候选门槛或贡献计算。
 
 ### 一级顺序
 
