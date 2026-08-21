@@ -10,8 +10,9 @@ parameters:
   business_date: {type: date}
   game_id: {type: integer}
 # Standardized event_type: 1=first release, 2=test, 3=update, 5=incident.
-# The snapshot partition is independent of business_date. Keep every matching
-# event for the selected game; do not add per-game ranking or a result limit.
+# The operation-event snapshot partition is independent of business_date. The
+# game-detail lifecycle partition is business_date. Keep every matching event
+# for the selected game; do not add per-game ranking or a result limit.
 sql: |
   WITH deduplicated_operation_events AS (
     SELECT
@@ -49,7 +50,7 @@ sql: |
       android_download_start_date,
       android_playable_start_date
     FROM tap_dw.dwt_game_detail_info_view_df
-    WHERE dt = (SELECT MAX(dt) FROM tap_dw.dwt_game_detail_info_view_df)
+    WHERE dt = ${business_date}
       AND game_id = ${game_id}
   ), lifecycle_events AS (
     SELECT

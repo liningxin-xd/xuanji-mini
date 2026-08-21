@@ -393,7 +393,7 @@ APK/沙盒
 
 仅当游戏候选明确主导时，才完整读取 [游戏运营事件 QuerySpec](queries/game-operation-events.yaml) 并按需查询。正常加载本 Playbook 时不得预读该 QuerySpec，也不得在触发前扫描其中登记的数据源。
 
-QuerySpec 每次只绑定一个已经通过候选门槛的 `game_id`，并将本调查已经确定的 `analysis_dt` 绑定为 QuerySpec 的 `business_date`；查询结果仍以 `analysis_date` 返回该日期。其中运营事件表和游戏详情表的 `dt` 是最新快照分区，不得改写为 `analysis_dt`；事件业务时间分别使用 `event_date0/event_date1` 和已登记的生命周期日期。执行前仍须通过 `describe_table` 核实字段与类型，除有明确 SQL 报错并按快速排查手册修正外，不得改写 QuerySpec 的数据源、过滤、事件类型或修订去重语义。
+QuerySpec 每次只绑定一个已经通过候选门槛的 `game_id`，并将本调查已经确定的 `analysis_dt` 绑定为 QuerySpec 的 `business_date`；查询结果仍以 `analysis_date` 返回该日期。运营事件表的 `dt` 使用最新快照分区，事件业务时间使用 `event_date0/event_date1`；游戏详情表的 `dt` 必须使用 `business_date`，并通过已登记的生命周期日期筛选事件。不得用无分区约束的 `MAX(dt)` 查询游戏详情表，也不得把运营事件表的快照分区改写为 `analysis_dt`。执行前仍须通过 `describe_table` 核实字段与类型，除有明确 SQL 报错并按快速排查手册修正外，不得改写 QuerySpec 的数据源、过滤、事件类型或修订去重语义。
 
 查询保留该游戏在 `analysis_date` 命中的全部合法运营和生命周期事件。只去除同一事件的重复修订，不得增加日报展示使用的每游戏 `game_rank = 1`、跨游戏 Top、下载量排序或 `LIMIT`。QuerySpec 的 `max_rows` 只用于识别异常结果量，超过时停止使用这批背景结果，不得截断后继续。合法空结果只表示未找到登记事件，不得写成没有发生业务变化；将这一证据边界写入 `evidence_limits`。
 
