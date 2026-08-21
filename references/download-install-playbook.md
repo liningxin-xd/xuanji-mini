@@ -4,6 +4,7 @@
 
 - [共同规则](#共同规则)
 - [告警分区与业务日期](#告警分区与业务日期)
+- [MaxCompute SQL 门禁](#maxcompute-sql-门禁)
 - [数据完整性](#数据完整性)
 - [告警新增性](#告警新增性)
 - [下载链路](#下载链路)
@@ -81,6 +82,12 @@ analysis_dt = 2026-08-17
 4. Android、APK/沙盒、下载/安装和观察窗口一致。
 5. 当前值与告警方向一致，或差异可由趋势命中标志、cohort 日期、成熟窗口、四舍五入或已知合法口径差异解释。
 
+### MaxCompute SQL 门禁
+
+任何 MaxCompute 查询在首次执行前必须检查 SQL 形态。禁止使用 `CROSS JOIN`、逗号连接、`JOIN ... ON 1 = 1` 或其他笛卡尔积写法，包括把预期单行的总体汇总 CTE 连接回分桶结果。需要在分桶行携带总体分子、分母时，先完成分桶聚合，再在下一层 CTE 使用 `SUM(...) OVER ()`；聚合函数和窗口函数不得写在同一表达式层级。
+
+不得为了减少查询次数临时把总体、多个维度家族、质量检查或贡献计算拼成一条复杂 SQL。优先一次只执行一个已经登记的维度家族，使每条查询都能独立验证分区、范围、粒度、分子分母和闭合；不同家族的结果不得横向连接或相加。若已存在 QuerySpec 或 SQL 模板，必须从模板组装，不得重新手写等价组合 SQL。只有模板不能覆盖当前已登记口径时才可做最小扩展，并在首次执行前重新检查本门禁。
+
 ### 数据完整性
 
 根指标查询必须在同一次聚合中完成以下检查，不因这些检查新增维度查询：
@@ -143,6 +150,8 @@ dt + platform + game_type + device_id + game_id
 ```
 
 `dt` 是下载业务日。首次下载上下文只取同一业务日、同一设备、游戏和游戏类型内的首条下载事件。非互斥过程标记不得相加成总样本。
+
+执行下载 `game_id` 一级归因时完整读取 [下载游戏归因 QuerySpec](queries/download-game-attribution.yaml)，绑定 `business_date=analysis_dt` 和当前 `game_type`，不得重新手写或改组其 SQL。执行 `is_reserve_auto_download` 或后续低基数家族前完整读取 [下载一级归因 SQL 模板](queries/download-primary-attribution-template.md)；每次只能选择一个 Playbook 已登记的维度家族替换模板中的维度表达式。QuerySpec 和模板固定正式宽表、日期、平台、APK/沙盒范围、分子分母和“分桶聚合后再用窗口总量”的 CTE 结构，但不替代知识库指标定义、数据完整性门禁、候选门槛或贡献计算。
 
 ### 一级顺序
 
@@ -393,7 +402,7 @@ APK/沙盒
 
 仅当游戏候选明确主导时，才完整读取 [游戏运营事件 QuerySpec](queries/game-operation-events.yaml) 并按需查询。正常加载本 Playbook 时不得预读该 QuerySpec，也不得在触发前扫描其中登记的数据源。
 
-QuerySpec 每次只绑定一个已经通过候选门槛的 `game_id`，并将本调查已经确定的 `analysis_dt` 绑定为 QuerySpec 的 `business_date`；查询结果仍以 `analysis_date` 返回该日期。其中运营事件表和游戏详情表的 `dt` 是最新快照分区，不得改写为 `analysis_dt`；事件业务时间分别使用 `event_date0/event_date1` 和已登记的生命周期日期。执行前仍须通过 `describe_table` 核实字段与类型，除有明确 SQL 报错并按快速排查手册修正外，不得改写 QuerySpec 的数据源、过滤、事件类型或修订去重语义。
+QuerySpec 每次只绑定一个已经通过候选门槛的 `game_id`，并将本调查已经确定的 `analysis_dt` 绑定为 QuerySpec 的 `business_date`；查询结果仍以 `analysis_date` 返回该日期。运营事件表的 `dt` 使用最新快照分区，事件业务时间使用 `event_date0/event_date1`；游戏详情表的 `dt` 必须使用 `business_date`，并通过已登记的生命周期日期筛选事件。不得用无分区约束的 `MAX(dt)` 查询游戏详情表，也不得把运营事件表的快照分区改写为 `analysis_dt`。执行前仍须通过 `describe_table` 核实字段与类型，除有明确 SQL 报错并按快速排查手册修正外，不得改写 QuerySpec 的数据源、过滤、事件类型或修订去重语义。
 
 查询保留该游戏在 `analysis_date` 命中的全部合法运营和生命周期事件。只去除同一事件的重复修订，不得增加日报展示使用的每游戏 `game_rank = 1`、跨游戏 Top、下载量排序或 `LIMIT`。QuerySpec 的 `max_rows` 只用于识别异常结果量，超过时停止使用这批背景结果，不得截断后继续。合法空结果只表示未找到登记事件，不得写成没有发生业务变化；将这一证据边界写入 `evidence_limits`。
 

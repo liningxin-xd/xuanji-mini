@@ -55,6 +55,8 @@ Playbook 是基线选择、日期语义、归因数据资产、维度顺序、�
 
 使用当前用户权限下的只读 DView MCP。需要表结构时先 `describe_table`，不得凭记忆使用列名。
 
+调用 `describe_table` 时，`schema` 与 `table` 的表名限定方式二选一：显式传 `schema` 时，`table` 只能传不含 schema/project 前缀的裸表名；若 `table` 传 `schema.table` 完整名，则必须省略 `schema`。例如使用 `schema: tap_dw` 时传 `table: ads_example_1d`，不得同时传 `table: tap_dw.ads_example_1d`。参数校验失败时先按此规则修正后重试；该重试不属于 SQL 执行或 SQL 修正次数，也不得改变后续分析结果。
+
 1. 若告警对象表直接含有且能唯一识别目标指标，优先用它复现当前值和历史值。
 2. 否则使用 metric YAML 的标准 SQL、标准结果表及 caveats。只有对账或解释差异确有必要时才同时查询两种来源。
 3. 按已加载 Playbook 执行全部根指标预检，复核当前值、基线和告警方向。不得自行简化其范围、日期、样本、口径或对齐要求。
@@ -74,7 +76,17 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 使用 Playbook 的停止条件、状态和结论边界。不得选择未通过 Playbook 门槛的候选讲故事，也不得在满足停止条件后继续无方向扩展。
 
-顶层输出固定包含 `source: "dataworks_dqc"`、项目、带项目名的对象表、原始分区、`overall_status` 和 `investigations`。`overall_status` 为：所有指标形成合法结果时 `completed`；部分完成、部分受阻时 `partial`；没有任何指标形成合法结果时 `failed`。
+顶层输出固定使用精确字段名 `source: "dataworks_dqc"`、`project`、
+`table`、`partition`、`overall_status` 和 `investigations`。
+`project` 是从输入解析出的原始项目名，`table` 是带项目名的原始 DQC
+对象表，`partition` 是原始 DQC 分区表达式；三者都必须是非空字符串，不能
+改名为 `project_name`、`object_table`、`alert_partition` 或放进
+`investigations`。这些字段属于返回 JSON 根节点，即后续 Host 信封的
+`analysis` 对象内部顶层；`investigations[].alert_partition` 仍须按调查
+单独输出，不能替代根节点 `partition`。输入确实无法解析出任一必填审计字段时
+不得猜测，调用方不能把该返回包装成成功结果。`overall_status` 为：所有指标
+形成合法结果时 `completed`；部分完成、部分受阻时 `partial`；没有任何指标
+形成合法结果时 `failed`。
 
 每个调查必须先写 `rule_indexes`，并包含非空 `metric_hint`、原始非空 `alert_partition` 和 `alert_rules`。`alert_rules` 与 `rule_indexes` 一一对应，每项至少包含输入中的非空 `rule_name`；只有原始规则实际提供时才保留 `check_result`、`operator` 和 `threshold`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
 
