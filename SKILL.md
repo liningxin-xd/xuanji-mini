@@ -55,6 +55,8 @@ Playbook 是基线选择、日期语义、归因数据资产、维度顺序、�
 
 使用当前用户权限下的只读 DView MCP。需要表结构时先 `describe_table`，不得凭记忆使用列名。
 
+调用 `describe_table` 时，`schema` 与 `table` 的表名限定方式二选一：显式传 `schema` 时，`table` 只能传不含 schema/project 前缀的裸表名；若 `table` 传 `schema.table` 完整名，则必须省略 `schema`。例如使用 `schema: tap_dw` 时传 `table: ads_example_1d`，不得同时传 `table: tap_dw.ads_example_1d`。参数校验失败时先按此规则修正后重试；该重试不属于 SQL 执行或 SQL 修正次数，也不得改变后续分析结果。
+
 1. 若告警对象表直接含有且能唯一识别目标指标，优先用它复现当前值和历史值。
 2. 否则使用 metric YAML 的标准 SQL、标准结果表及 caveats。只有对账或解释差异确有必要时才同时查询两种来源。
 3. 按已加载 Playbook 执行全部根指标预检，复核当前值、基线和告警方向。不得自行简化其范围、日期、样本、口径或对齐要求。
