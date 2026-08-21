@@ -76,6 +76,8 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 使用 Playbook 的停止条件、状态和结论边界。不得选择未通过 Playbook 门槛的候选讲故事，也不得在满足停止条件后继续无方向扩展。
 
+结构化事实冻结后、撰写任何用户可见字段前，必须完整读取 [告警诊断文案规范](references/diagnosis-writing-policy.md)。文案规范只调整 `summary`、各类 `finding`、`evidence_limits`、`recommended_action`、`reason` 和 `action` 的表达，不得改变 Playbook 已确定的状态、对象、数值、证据强度或输出协议，也不得执行独立的二次润色。最终输出前按文案规范完成独立可读性与措辞自检。
+
 顶层输出固定使用精确字段名 `source: "dataworks_dqc"`、`project`、
 `table`、`partition`、`overall_status` 和 `investigations`。
 `project` 是从输入解析出的原始项目名，`table` 是带项目名的原始 DQC
@@ -96,7 +98,7 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 `counterfactual` 只在实际执行剔除计算后输出，且必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `removal_delta_bp`、有限数值 `restoration_ratio` 和非空 `finding`。未执行、未触发或无法计算时省略整个字段，把证据边界写入 `evidence_limits`；不得用 `counterfactual.finding` 描述“尚未执行”。`no_dominant_slice` 不得包含 `counterfactual`。
 
-结论措辞严格遵守 Playbook，不得把定位结果升级为未经证实的因果结论。
+结论的证据边界严格遵守 Playbook，用户可见措辞严格遵守文案规范；不得把定位结果升级为未经证实的因果结论。
 
 DView 返回真实 query ID 时，可用 `queries: [{"purpose": "...", "query_id": "..."}]` 保留；没有返回时省略 `queries`，不得伪造。
 
