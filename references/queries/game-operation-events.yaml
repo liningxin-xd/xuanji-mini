@@ -9,10 +9,10 @@ retention_days: 45
 parameters:
   business_date: {type: date}
   game_id: {type: integer}
-# Standardized event_type: 1=first release, 2=test, 3=update, 5=incident.
-# The operation-event snapshot partition is independent of business_date. The
-# game-detail lifecycle partition is business_date. Keep every matching event
-# for the selected game; do not add per-game ranking or a result limit.
+# Operation events use their latest registered snapshot and are selected when
+# their business interval overlaps the root comparison window. Lifecycle facts
+# use the comparison window plus one guard snapshot so observed state changes
+# are distinct from registered dates and scheduled future dates are not emitted.
 sql: |
   WITH deduplicated_operation_events AS (
     SELECT
@@ -24,12 +24,39 @@ sql: |
         WHEN 5 THEN 3
         WHEN 3 THEN 4
       END AS event_priority,
+      CASE event_type
+        WHEN 5 THEN 'incident'
+        WHEN 3 THEN 'update'
+      END AS event_kind,
       event_title,
       event_detail,
       event_date0,
       COALESCE(NULLIF(event_date1, ''), event_date0) AS event_date1,
+      DATEDIFF(TO_DATE(${business_date}), TO_DATE(event_date0))
+        AS days_before_analysis,
+      CASE
+        WHEN event_date0 < TO_CHAR(
+          DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+        ) THEN 'active_from_before_baseline'
+        WHEN event_date0 = ${business_date} THEN 'same_day'
+        WHEN event_date0 = TO_CHAR(
+          DATEADD(TO_DATE(${business_date}), -1, 'dd'), 'yyyy-mm-dd'
+        ) THEN 'one_day_before'
+        ELSE 'within_baseline'
+      END AS temporal_relation,
+      'operation_event' AS transition_evidence,
+      CAST(NULL AS STRING) AS game_status,
+      CAST(NULL AS BIGINT) AS is_android_download_enable,
+      CAST(NULL AS BIGINT) AS is_android_reserve_enable,
+      CAST(NULL AS BIGINT) AS reserve_auto_download_enabled,
+      CAST(NULL AS BIGINT) AS is_game_package_preheat,
+      CAST(NULL AS BIGINT) AS game_package_id,
+      CAST(NULL AS STRING) AS game_package_app_version,
+      CAST(NULL AS BIGINT) AS game_package_app_version_code,
+      CAST(NULL AS BIGINT) AS game_package_size,
       apk_app_version_name,
       source,
+      dt AS source_snapshot_dt,
       COALESCE(impact_score1, 0) AS impact_score1,
       ROW_NUMBER() OVER (
         PARTITION BY app_id, event_title, event_date0
@@ -42,48 +69,224 @@ sql: |
       AND app_id = ${game_id}
       AND event_type IN (5, 3)
       AND event_date0 <= ${business_date}
-      AND COALESCE(NULLIF(event_date1, ''), event_date0) >= ${business_date}
-  ), game_snapshot AS (
+      AND COALESCE(NULLIF(event_date1, ''), event_date0) >= TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      )
+  ), game_history AS (
     SELECT
+      dt,
       game_id,
       game_name,
+      game_status,
+      is_android_download_enable,
+      is_android_reserve_enable,
+      is_android_triali,
+      CASE
+        WHEN is_android_download_enable = 1 OR is_android_triali = 1 THEN 1
+        WHEN is_android_download_enable = 0 AND is_android_triali = 0 THEN 0
+        ELSE NULL
+      END AS playable_enable,
       android_download_start_date,
-      android_playable_start_date
+      android_reserve_start_date,
+      android_playable_start_date,
+      CASE
+        WHEN add_map['reserve_auto_download'] = '1' THEN 1
+        WHEN add_map['reserve_auto_download'] = '0' THEN 0
+        ELSE NULL
+      END AS reserve_auto_download_enabled,
+      is_game_package_preheat,
+      game_package_id,
+      game_package_app_version,
+      game_package_app_version_code,
+      game_package_size
     FROM tap_dw.dwt_game_detail_info_view_df
-    WHERE dt = ${business_date}
+    WHERE dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -8, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
       AND game_id = ${game_id}
+  ), game_history_with_previous AS (
+    SELECT
+      game_history.*,
+      LAG(dt) OVER (
+        PARTITION BY game_id ORDER BY dt
+      ) AS previous_snapshot_dt,
+      LAG(is_android_download_enable) OVER (
+        PARTITION BY game_id ORDER BY dt
+      ) AS previous_download_enable,
+      LAG(is_android_reserve_enable) OVER (
+        PARTITION BY game_id ORDER BY dt
+      ) AS previous_reserve_enable,
+      LAG(playable_enable) OVER (
+        PARTITION BY game_id ORDER BY dt
+      ) AS previous_playable_enable
+    FROM game_history
+  ), game_history_with_transition_context AS (
+    SELECT
+      game_history_with_previous.*,
+      CASE
+        WHEN previous_snapshot_dt = TO_CHAR(
+          DATEADD(TO_DATE(dt), -1, 'dd'), 'yyyy-mm-dd'
+        ) THEN 1
+        ELSE 0
+      END AS has_contiguous_previous
+    FROM game_history_with_previous
+  ), lifecycle_event_seeds AS (
+    SELECT
+      game_history_with_transition_context.*,
+      1 AS event_type,
+      1 AS event_priority,
+      'download_open' AS event_kind,
+      '安卓开放下载' AS event_title,
+      '安卓首次对外开放下载' AS event_detail,
+      android_download_start_date AS lifecycle_event_date,
+      'registered_lifecycle_date_only' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE dt = android_download_start_date
+      AND is_android_download_enable = 1
+      AND CASE
+        WHEN has_contiguous_previous = 1
+          AND previous_download_enable = 0 THEN 0
+        ELSE 1
+      END = 1
+      AND android_download_start_date BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+    UNION ALL
+    SELECT
+      game_history_with_transition_context.*,
+      1 AS event_type,
+      1 AS event_priority,
+      'download_open' AS event_kind,
+      '安卓开放下载' AS event_title,
+      '安卓下载开关由关闭切换为开启' AS event_detail,
+      dt AS lifecycle_event_date,
+      'observed_state_transition' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE has_contiguous_previous = 1
+      AND previous_download_enable = 0
+      AND is_android_download_enable = 1
+      AND dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+    UNION ALL
+    SELECT
+      game_history_with_transition_context.*,
+      2 AS event_type,
+      2 AS event_priority,
+      'reservation_open' AS event_kind,
+      '安卓开放预约' AS event_title,
+      '安卓首次对外开放预约' AS event_detail,
+      android_reserve_start_date AS lifecycle_event_date,
+      'registered_lifecycle_date_only' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE dt = android_reserve_start_date
+      AND is_android_reserve_enable = 1
+      AND CASE
+        WHEN has_contiguous_previous = 1
+          AND previous_reserve_enable = 0 THEN 0
+        ELSE 1
+      END = 1
+      AND android_reserve_start_date BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+    UNION ALL
+    SELECT
+      game_history_with_transition_context.*,
+      2 AS event_type,
+      2 AS event_priority,
+      'reservation_open' AS event_kind,
+      '安卓开放预约' AS event_title,
+      '安卓预约开关由关闭切换为开启' AS event_detail,
+      dt AS lifecycle_event_date,
+      'observed_state_transition' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE has_contiguous_previous = 1
+      AND previous_reserve_enable = 0
+      AND is_android_reserve_enable = 1
+      AND dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+    UNION ALL
+    SELECT
+      game_history_with_transition_context.*,
+      2 AS event_type,
+      2 AS event_priority,
+      'playable_open' AS event_kind,
+      '安卓首次可玩' AS event_title,
+      '安卓首次开放下载或试玩' AS event_detail,
+      android_playable_start_date AS lifecycle_event_date,
+      'registered_lifecycle_date_only' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE dt = android_playable_start_date
+      AND playable_enable = 1
+      AND CASE
+        WHEN has_contiguous_previous = 1
+          AND previous_playable_enable = 0 THEN 0
+        ELSE 1
+      END = 1
+      AND CASE
+        WHEN android_playable_start_date = android_download_start_date
+          AND is_android_download_enable = 1 THEN 0
+        ELSE 1
+      END = 1
+      AND android_playable_start_date BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+    UNION ALL
+    SELECT
+      game_history_with_transition_context.*,
+      2 AS event_type,
+      2 AS event_priority,
+      'playable_open' AS event_kind,
+      '安卓试玩可玩状态开启' AS event_title,
+      '安卓试玩状态由关闭切换为开启' AS event_detail,
+      dt AS lifecycle_event_date,
+      'observed_state_transition' AS transition_evidence
+    FROM game_history_with_transition_context
+    WHERE has_contiguous_previous = 1
+      AND previous_playable_enable = 0
+      AND playable_enable = 1
+      AND COALESCE(is_android_download_enable, 0) <> 1
+      AND dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
   ), lifecycle_events AS (
     SELECT
       ${business_date} AS analysis_date,
       game_id AS app_id,
       game_name AS app_title,
-      1 AS event_type,
-      1 AS event_priority,
-      '首发' AS event_title,
-      '安卓首次对外开放下载' AS event_detail,
-      ${business_date} AS event_date0,
-      ${business_date} AS event_date1,
+      event_type,
+      event_priority,
+      event_kind,
+      event_title,
+      event_detail,
+      lifecycle_event_date AS event_date0,
+      lifecycle_event_date AS event_date1,
+      DATEDIFF(
+        TO_DATE(${business_date}), TO_DATE(lifecycle_event_date)
+      ) AS days_before_analysis,
+      CASE
+        WHEN lifecycle_event_date = ${business_date} THEN 'same_day'
+        WHEN lifecycle_event_date = TO_CHAR(
+          DATEADD(TO_DATE(${business_date}), -1, 'dd'), 'yyyy-mm-dd'
+        ) THEN 'one_day_before'
+        ELSE 'within_baseline'
+      END AS temporal_relation,
+      transition_evidence,
+      game_status,
+      is_android_download_enable,
+      is_android_reserve_enable,
+      reserve_auto_download_enabled,
+      is_game_package_preheat,
+      game_package_id,
+      game_package_app_version,
+      game_package_app_version_code,
+      game_package_size,
       CAST(NULL AS STRING) AS apk_app_version_name,
       'game_detail_lifecycle' AS source,
+      dt AS source_snapshot_dt,
       0 AS impact_score1
-    FROM game_snapshot
-    WHERE android_download_start_date = ${business_date}
-    UNION ALL
-    SELECT
-      ${business_date} AS analysis_date,
-      game_id AS app_id,
-      game_name AS app_title,
-      2 AS event_type,
-      2 AS event_priority,
-      '测试' AS event_title,
-      '安卓首次可玩' AS event_detail,
-      ${business_date} AS event_date0,
-      ${business_date} AS event_date1,
-      CAST(NULL AS STRING) AS apk_app_version_name,
-      'game_detail_lifecycle' AS source,
-      0 AS impact_score1
-    FROM game_snapshot
-    WHERE android_playable_start_date = ${business_date}
+    FROM lifecycle_event_seeds
   ), event_candidates AS (
     SELECT
       analysis_date,
@@ -91,12 +294,26 @@ sql: |
       app_title,
       event_type,
       event_priority,
+      event_kind,
       event_title,
       event_detail,
       event_date0,
       event_date1,
+      days_before_analysis,
+      temporal_relation,
+      transition_evidence,
+      game_status,
+      is_android_download_enable,
+      is_android_reserve_enable,
+      reserve_auto_download_enabled,
+      is_game_package_preheat,
+      game_package_id,
+      game_package_app_version,
+      game_package_app_version_code,
+      game_package_size,
       apk_app_version_name,
       source,
+      source_snapshot_dt,
       impact_score1
     FROM deduplicated_operation_events
     WHERE recency_rank = 1
@@ -107,12 +324,26 @@ sql: |
       app_title,
       event_type,
       event_priority,
+      event_kind,
       event_title,
       event_detail,
       event_date0,
       event_date1,
+      days_before_analysis,
+      temporal_relation,
+      transition_evidence,
+      game_status,
+      is_android_download_enable,
+      is_android_reserve_enable,
+      reserve_auto_download_enabled,
+      is_game_package_preheat,
+      game_package_id,
+      game_package_app_version,
+      game_package_app_version_code,
+      game_package_size,
       apk_app_version_name,
       source,
+      source_snapshot_dt,
       impact_score1
     FROM lifecycle_events
   )
@@ -122,15 +353,29 @@ sql: |
     app_title,
     event_type,
     event_priority,
+    event_kind,
     event_title,
     event_detail,
     event_date0,
     event_date1,
+    days_before_analysis,
+    temporal_relation,
+    transition_evidence,
+    game_status,
+    is_android_download_enable,
+    is_android_reserve_enable,
+    reserve_auto_download_enabled,
+    is_game_package_preheat,
+    game_package_id,
+    game_package_app_version,
+    game_package_app_version_code,
+    game_package_size,
     apk_app_version_name,
     source,
+    source_snapshot_dt,
     impact_score1
   FROM event_candidates
-  ORDER BY event_priority ASC, impact_score1 DESC, event_date0 ASC,
+  ORDER BY event_priority ASC, event_date0 DESC, impact_score1 DESC,
     event_title ASC, source ASC
 output:
   date_column: analysis_date
@@ -141,12 +386,26 @@ output:
     app_title: string
     event_type: integer
     event_priority: integer
+    event_kind: string
     event_title: string
     event_detail: string
     event_date0: date
     event_date1: date
+    days_before_analysis: integer
+    temporal_relation: string
+    transition_evidence: string
+    game_status: string
+    is_android_download_enable: integer
+    is_android_reserve_enable: integer
+    reserve_auto_download_enabled: integer
+    is_game_package_preheat: integer
+    game_package_id: integer
+    game_package_app_version: string
+    game_package_app_version_code: integer
+    game_package_size: integer
     apk_app_version_name: string
     source: string
+    source_snapshot_dt: date
     impact_score1: integer
 datasets:
   - id: game_operation_events
@@ -156,24 +415,39 @@ datasets:
       - app_title
       - event_type
       - event_priority
+      - event_kind
       - event_title
       - event_detail
       - event_date0
       - event_date1
+      - days_before_analysis
+      - temporal_relation
+      - transition_evidence
+      - game_status
+      - is_android_download_enable
+      - is_android_reserve_enable
+      - reserve_auto_download_enabled
+      - is_game_package_preheat
+      - game_package_id
+      - game_package_app_version
+      - game_package_app_version_code
+      - game_package_size
       - apk_app_version_name
       - source
+      - source_snapshot_dt
       - impact_score1
-    row_key: [app_id, event_type, event_title, event_date0, source]
+    row_key: [app_id, event_kind, event_title, event_date0, source]
     order_by:
       - {column: event_priority, direction: asc}
+      - {column: event_date0, direction: desc}
       - {column: impact_score1, direction: desc}
-      - {column: event_date0, direction: asc}
       - {column: event_title, direction: asc}
       - {column: source, direction: asc}
 quality:
   require_non_empty: false
-  unique_by: [analysis_date, app_id, event_type, event_title, event_date0, source]
+  unique_by: [analysis_date, app_id, event_kind, event_title, event_date0, source]
   max_rows: 100
   ranges:
     event_priority: {min: 1, max: 4, allow_null: false}
+    days_before_analysis: {min: 0, allow_null: false}
     impact_score1: {min: 0, allow_null: false}

@@ -31,6 +31,11 @@ sql: |
       COALESCE(MAX(game_name), '__none__') AS dimension_label,
       COUNT(DISTINCT CASE WHEN dt < ${business_date} THEN dt END)
         AS bucket_baseline_day_count,
+      COUNT(DISTINCT CASE
+        WHEN dt < ${business_date}
+          AND download_sample_flag = 1
+          AND is_human_stop IN (0, 1)
+        THEN dt END) AS bucket_baseline_active_day_count,
       SUM(CASE WHEN dt = ${business_date}
         THEN download_sample_flag ELSE 0 END) AS current_denominator,
       SUM(CASE WHEN dt < ${business_date}
@@ -86,6 +91,7 @@ sql: |
         ELSE '__other_below_threshold__'
       END AS output_dimension_value,
       dimension_label,
+      bucket_baseline_active_day_count,
       baseline_day_count,
       current_denominator,
       baseline_denominator,
@@ -103,6 +109,7 @@ sql: |
       output_dimension_value AS dimension_value,
       CASE WHEN bucket_kind = 'game' THEN MAX(dimension_label)
         ELSE MAX(output_dimension_value) END AS dimension_label,
+      MAX(bucket_baseline_active_day_count) AS bucket_baseline_active_day_count,
       MAX(baseline_day_count) AS baseline_day_count,
       SUM(current_denominator) AS current_denominator,
       SUM(baseline_denominator) AS baseline_denominator,
@@ -122,6 +129,7 @@ sql: |
     bucket_kind,
     dimension_value,
     dimension_label,
+    bucket_baseline_active_day_count,
     baseline_day_count,
     current_denominator,
     baseline_denominator,
@@ -146,6 +154,7 @@ output:
     bucket_kind: string
     dimension_value: string
     dimension_label: string
+    bucket_baseline_active_day_count: integer
     baseline_day_count: integer
     current_denominator: integer
     baseline_denominator: integer
@@ -163,6 +172,7 @@ datasets:
       - bucket_kind
       - dimension_value
       - dimension_label
+      - bucket_baseline_active_day_count
       - baseline_day_count
       - current_denominator
       - baseline_denominator
@@ -183,6 +193,7 @@ quality:
   unique_by: [analysis_date, game_type, bucket_kind, dimension_value]
   max_rows: 250
   ranges:
+    bucket_baseline_active_day_count: {min: 0, max: 7, allow_null: false}
     baseline_day_count: {min: 0, max: 7, allow_null: false}
     current_denominator: {min: 0, allow_null: false}
     baseline_denominator: {min: 0, allow_null: false}

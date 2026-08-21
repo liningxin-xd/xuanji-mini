@@ -147,10 +147,10 @@ class MetricRouteContractTest(unittest.TestCase):
             for required_field in ("业务口径", "技术口径", "sql"):
                 self.assertTrue(metric_definition[required_field], canonical_metric)
 
-    def test_completion_attribution_assets_remain_byte_identical(self):
+    def test_completion_attribution_assets_match_reviewed_hashes(self):
         expected_hashes = {
             DOWNLOAD_ATTRIBUTION_PATH: (
-                "0d20e991593ae4fb91356033d70a9f40791ff5a1e0d3a6c7f5b8e581150bdd62"
+                "c73b7be9248bb5a1b247a9d9cf3e1415892bdca7cbf9db413d887e76acedb3ca"
             ),
             DOWNLOAD_PRIMARY_TEMPLATE_PATH: (
                 "2bf43bef2cc3e6288c552c33fe1704b9bcc53a0cf6ce5dee04bbef9a81e15699"
