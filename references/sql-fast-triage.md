@@ -1,14 +1,6 @@
 # SQL 快速报错排查手册
 
-只在 DView SQL 查询返回错误后读取本手册。保留原始错误码、错误类别、错误信息、query ID 或 trace ID；只有报错信号与 SQL 形态同时匹配时才应用规则。修正不得改变指标定义、日期范围、平台、APK/沙盒范围、分子分母或关键过滤，并计入当前 SQL 最多两次修正。
-
-## 执行预算与终态
-
-- 每条 SQL 最多执行 3 次：首次执行加最多两次有依据修正。
-- 单次 DView 查询默认最多等待 5 分钟，单个维度家族默认最多 15 分钟，单份 analysis request 默认最多 45 分钟；调用基础设施提供更短的硬上限时从其限制。
-- `semantic_analysis`、字段/别名/类型/聚合/连接/函数错误、超时、限流、资源不足或服务暂时不可用都不是业务阻塞。修正次数或时间预算耗尽时结束当前 analysis attempt，由外层重新调用，不得包装为 `query_blocked`、`unsupported_drilldown` 或“未发现原因”。
-- `query_blocked` 只接受 MaxCompute/DView 明确返回的权限或授权错误；`unsupported_drilldown` 只接受 [告警查询登记表](queries/alert-query-registry.yaml) 中正式共享数据源不存在或不可访问。两者必须保留 provider 原始错误码、类别、信息及非空 query ID/trace ID，并由独立 reviewer 实际执行调用方生成的登记 source probe，取得不与 executor 重叠的新 query/trace ID 和同类错误。probe 成功、SQL/参数/源表/fingerprint 不匹配、错误消息未指向登记源表，或只影响局部查询时都不是 blocker，必须重试。
-- 查询成功但正确分区、成熟窗口或样本确实不足属于 `insufficient_data`，必须由成功的分区/样本检查结果证明，不属于 blocked。
+只在 DView SQL 查询返回错误后读取本手册。保留原始错误码、错误类别和错误信息；只有报错信号与 SQL 形态同时匹配时才应用规则。修正不得改变指标定义、日期范围、平台、APK/沙盒范围、分子分母或关键过滤，并计入当前 SQL 最多两次修正。
 
 ## 规则 1：MaxCompute 拒绝笛卡尔积
 
@@ -67,4 +59,4 @@ FROM with_totals
 
 根据明确问题做最小修正并重试。错误信息不具体时，从最内层 CTE 开始分段验证 SQL，再逐层恢复聚合、窗口和排序；不得通过删除分区、平台、日期、APK/沙盒或指标口径过滤来换取成功。
 
-只有完成有依据的检查和最多两次修正后仍失败，才结束当前 SQL attempt；整个调查必须由外层重新调用，不能把 SQL 编写失败提交为业务终态。
+只有完成有依据的检查和最多两次修正后仍失败，才返回 `query_failed`。
