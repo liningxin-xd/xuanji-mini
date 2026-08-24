@@ -105,7 +105,7 @@ analysis_dt = 2026-08-17
 - 维度数据覆盖完整根范围，分子、分母和行数能回勾根调查，该家族能闭合到大盘变化。
 - APK 安装家族还要比较当前与基线的 `chain_id` 非空率、唯一性和跨设备/游戏冲突率；沙盒同样检查 `install_round_id` 的覆盖与歧义。
 
-家族门禁不通过时不得从该家族产生候选。该家族若是本轮规定归因必须完成的路径，按无合法下钻数据源处理；只有 Playbook 明确允许跳过的家族才可继续，并把真实边界写入 `evidence_limits`。这些是一级及后续归因的家族门禁，不是判断既有异常延续的前置查询。
+家族门禁不通过时不得从该家族产生候选。局部字段、分桶或闭合问题只使当前家族无效，必须记录失败并继续后续独立家族；不得因为一个家族失败就宣告整条链路无法下钻。只有 MaxCompute/DView 明确证明所有剩余家族共享的正式数据源不存在或无权访问时，才按可验证的全局阻塞停止。字段、别名、类型、聚合、连接、函数或其他 SQL 编写错误不是数据源阻塞，必须按快速排查手册修正或进入外层分析重试。这些是一级及后续归因的家族门禁，不是判断既有异常延续的前置查询。
 
 ### 告警新增性
 
@@ -175,17 +175,17 @@ is_reserve_auto_download
 
 两个规定家族的合法结果必须分别保留到候选选择结束，不能因为 `game_id` 已经达到反事实主导条件而省略或丢弃 `is_reserve_auto_download` 家族。两者都形成合法候选且达到后文跨维度候选重叠门槛时，必须执行一次完整四象限验证；该验证只校准共享范围，不创建交叉候选，也不改变两个原始贡献。
 
-游戏不能充分解释或剔除后异常仍明显时，再检查：
+完成两个规定一级家族后，若两者均未形成足以停止的合法候选，或已触发的剔除反事实显示异常仍明显，再按以下固定顺序逐项检查：
 
 ```text
-apk_size_tier
+device_brand
 channel_group
 app_major_version
 os_major_version
-device_brand
+apk_size_tier
 ```
 
-实际执行时按 `apk_size_tier -> channel_group -> app_major_version -> os_major_version -> device_brand` 的稳定顺序即可；候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
+实际执行时按 `device_brand -> channel_group -> app_major_version -> os_major_version -> apk_size_tier` 的稳定顺序；每个家族查询成功但没有合法候选时必须进入下一项。候选最终按单项全局不利影响排序。只有全部适用家族都实际执行成功并分别形成可信的 `no_candidate|candidate_insufficient` 后仍无候选，才可返回 `no_dominant_slice`。任一家族因局部数据质量不足未形成可信结果时仍须继续完整计划，结束后返回 `insufficient_data`；带外部凭据且阻止所有剩余家族的权限或共享数据源问题分别返回 `query_blocked` 或 `unsupported_drilldown`。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
 
 ### 终态路由
 
@@ -564,11 +564,11 @@ peer 与焦点同方向变化且绝对变化达到焦点的 50% 时，降低实�
 2. 正确映射后的目标或基线分区、样本或成熟窗口不足：`insufficient_data`。
 3. 告警日期与分析日期映射、分子、分母、方向或范围无法可靠确定：`insufficient_definition`。
 4. 按正确日期、范围和精度复核后，当前值仍与告警无法对齐且无法解释：`insufficient_definition`。
-5. 权限阻止根指标或规定归因查询：`query_blocked`。
-6. 根指标或规定归因 SQL 修正两次仍失败：`query_failed`。
-7. 根指标存在但无合法下钻数据源：`unsupported_drilldown`。
+5. MaxCompute/DView 返回带原始错误码、类别、信息及 query/trace ID 的权限错误，且阻止根指标或所有剩余规定归因查询；调用方的独立 reviewer 再用查询登记表中的固定正式源 probe 取得新 query/trace ID 的同类失败：`query_blocked`。
+6. 根指标或规定归因 SQL 在首次执行和两次有依据修正后仍失败：当前分析 attempt 不得形成业务终态，返回调用方重试；外层重试耗尽后由调用方记录 `analysis_retry_exhausted`。
+7. MaxCompute/DView 返回带原始错误凭据，证明所有剩余家族共享的登记正式数据源不存在或不可访问，并由独立 reviewer 的固定 source probe 复现：`unsupported_drilldown`。
 8. 告警新增性判为既有异常延续且没有达到 5bp 的实质性新增恶化：`no_dominant_slice`。
-9. 一级没有非质量候选达到 5bp：`no_dominant_slice`。
+9. 按固定顺序完成全部适用维度家族后，没有非质量候选达到 5bp：`no_dominant_slice`。
 10. 一级、按条件执行的反事实和最多一次二级均已完成或合法跳过，且没有命中方向增强触发条件。
 11. 已执行两个需要新增查询的方向增强模块，或继续验证不会改变排查方向。
 
@@ -583,8 +583,23 @@ peer 与焦点同方向变化且绝对变化达到焦点的 50% 时，降低实�
 
 ### 输出语义
 
+每个调查的 `drilldown_trace` 使用以下低自由度契约：
+
+- `chain` 只能是 `download`、`install` 或 `none`。`none` 只用于在查询前结束的 `insufficient_definition`。
+- `planned_dimensions` 必须逐字使用完整注册计划：下载为 `game_id -> is_reserve_auto_download -> device_brand -> channel_group -> app_major_version -> os_major_version -> apk_size_tier`；安装为 `game_id -> apk_size_tier -> app_major_version -> os_major_version -> device_brand -> storage_headroom_tier`。不得只写实际执行前缀。
+- `steps` 必须从 `root_metric` 开始，后续维度是上述计划的无缺口前缀。每步只含 `dimension`、`outcome` 和非空 `query_attempts`。根步骤可用 `succeeded`、`existing_anomaly`、`insufficient_data`、`permission_blocked` 或 `source_blocked`；维度步骤必须明确使用 `no_candidate`、`candidate_insufficient`、`candidate_found`、`insufficient_data`、`permission_blocked` 或 `source_blocked`，不得只写模糊的 `succeeded`。
+- `query_attempts` 最多三项且从 1 连续编号。每项记录非空 `template_id`、执行 SQL 及绑定参数的 64 位小写 SHA-256 `sql_fingerprint`、非负整数 `elapsed_ms` 和 `succeeded|failed`；第二、三次还必须记录非空 `correction`。真实存在时原样记录 `query_id`、`trace_id`。
+- 失败 SQL attempt 必须记录 `error={provider:"maxcompute", code, category, message}`。只有最终 attempt 是真实失败且带非空 query/trace ID 时，步骤才能记 `permission_blocked` 或 `source_blocked`；权限类别限定为 `permission_denied|authorization_failed|access_denied|access_control`，数据源类别限定为 `source_unavailable|data_source_unavailable|object_not_found|table_not_found`。`semantic_analysis` 不能归入其中。
+- `stop_reason` 只按终态填写：合法候选为 `candidate_found`，既有异常延续为 `existing_anomaly`，完整穷尽为 `all_dimensions_exhausted`，定义或数据不足为对应状态名，权限或数据源阻塞为 `permission_blocked|source_blocked`。
+- `completed` 至少有一个 `candidate_found`，且每个该状态的维度必须原样保留到 `top_findings`，其中每项全局不利影响至少 5bp。下载即使在 `game_id` 找到候选，也必须继续并成功完成 `is_reserve_auto_download`，之后才能停止；后续维度在第一个足以停止的合法候选处结束。
+- `no_dominant_slice` 若非既有异常延续，必须成功执行完整维度计划且每个家族都明确形成 `no_candidate|candidate_insufficient`，不能包含模糊的 `succeeded`、未解决查询或数据失败。
+- `insufficient_data` 只能停在根指标，或在至少一个家族出现局部数据质量不足后继续完整个计划再结束；后一种情况不要求最后一个家族也数据不足，但不得已经形成合法候选，不能用它跳过中间维度。
+- 下载 `top_findings` 同时包含 `game_id` 和 `is_reserve_auto_download`，且较弱者不利影响达到 `max(5bp, abs(delta_bp) * 0.25)` 时，增加 `overlap_validation={dimensions:["game_id","is_reserve_auto_download"], outcome:"succeeded", query_attempts:[...]}`。四象限查询失败时本次 analysis attempt 不得形成最终 JSON。
+
+`query_failed`、普通调用失败和 `incomplete_analysis` 都不是本协议的调查终态。SQL 修正预算耗尽时把本次 attempt 交还调用方外层重试，不得编造 `drilldown_trace` 通过门禁。
+
 - `summary` 和顶层 `finding` 描述整体指标变化、告警新增性、检查范围和综合结论，不得把整体指标伪装成维度切片。
 - `top_findings` 只包含通过贡献分解、闭合、样本、占比、质量桶和候选门槛的具体切片。每项必须写 `dimension`、`label` 或 `value`、`adverse_impact_bp` 和 `finding`；缺少切片身份或只描述整体变化的项不是合法候选。`entrant/exit` 候选的 `finding` 必须明确是新增或退出流量的结构影响，不得表述为该切片自身完成率恶化。方向增强结果可以校准 `finding` 的排查范围和特异性，但不得创建新切片、改变原贡献或写入辅助模块自身的整体结果。
-- 至少存在一个合法切片时才返回 `completed`。告警新增性已经确认是既有异常延续，或完成规定的一级检查但没有合法候选时，返回 `no_dominant_slice` 并省略 `top_findings`；`summary` 必须分别明确“因无实质性新增恶化而停止”或已经执行的一级检查范围。若根指标或规定归因下钻因数据、权限、查询或数据源限制未完成，使用对应受阻状态，不能写成“分析完成”。
+- 至少存在一个合法切片时才返回 `completed`。告警新增性已经确认是既有异常延续，或按固定顺序成功完成完整维度计划且每个家族都明确没有充分候选时，返回 `no_dominant_slice` 并省略 `top_findings`；`summary` 必须分别明确“因无实质性新增恶化而停止”或已经执行的完整检查范围。完整计划中存在局部数据质量不足时返回 `insufficient_data`；出现带 MaxCompute 外部凭据的全局权限或共享数据源阻塞时返回对应 blocker。不能把任何未验证范围写成“分析完成”或“未发现原因”。
 - 方向增强模块没有触发时不输出占位说明；触发后受阻、失败或证据不足时，把真实边界写入 `evidence_limits`，不覆盖已有合法定位状态。增强结果通过全部门禁时，使用现有 `summary`、`top_findings[].finding`、`evidence_limits` 和 `recommended_action` 表达，不新增接口字段。
 - `counterfactual` 只记录实际完成的剔除计算，必须写目标切片的 `dimension`、`label` 或 `value`、`removal_delta_bp`、`restoration_ratio` 和 `finding`。未触发、未执行或无法计算时省略该字段；原因属于 `evidence_limits`，不是反事实结论。`no_dominant_slice` 不得携带反事实。
