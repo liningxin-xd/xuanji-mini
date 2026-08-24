@@ -43,11 +43,11 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 
 ## 4. 加载分析规则
 
-指标定义唯一命中后，在执行任何根指标复核或归因查询前，必须完整读取路由结果指定的 Playbook。当前 `download-install` 路由读取 [下载与安装排查 Playbook](references/download-install-playbook.md)。先根据知识库定义确认当前指标属于下载或安装链路，再执行 Playbook 中该链路的共同规则、预检、排查步骤和停止条件。
+指标定义唯一命中后，在执行任何根指标复核或归因查询前，必须完整读取路由结果指定的 Playbook。当前 `download-install` 路由读取 [下载与安装排查 Playbook](references/download-install-playbook.md)，并读取 machine-readable [告警查询登记表](references/queries/alert-query-registry.yaml)。先根据知识库定义确认当前指标属于下载或安装链路，再执行 Playbook 中该链路的共同规则、预检、排查步骤和停止条件。
 
 Playbook 是基线选择、日期语义、归因数据资产、维度顺序、贡献计算、候选门槛、反事实、二级下钻和停止条件的唯一来源。本文件不重复定义这些规则。不得依赖模型记忆、既往分析经验或本文件中的执行说明替代 Playbook，也不得因为预判没有明显归因而跳过其要求的合法检查；只有 Playbook 明确允许停止或跳过时才可结束相应步骤。
 
-指标知识库仍是指标名、方向、分子、分母、观察窗口、标准 SQL 和 caveats 的唯一来源。Playbook 不得替代或改写指标定义。
+指标知识库仍是指标名、方向、分子、分母、观察窗口、标准 SQL 和 caveats 的唯一来源。Playbook 不得替代或改写指标定义。查询登记表只约束“哪些正式查询及共享数据源可以证明全局 blocker”，不补充不存在的业务归因 SQL；未登记的后续维度仍按 Playbook 执行，但其 SQL 失败只能结束当前 attempt 并交给外层重试，不能形成 blocker。
 
 ## 5. 复核根指标
 
@@ -64,13 +64,13 @@ Playbook 是基线选择、日期语义、归因数据资产、维度顺序、�
 
 任何 DView SQL 查询报错后，先读取 [SQL 快速报错排查手册](references/sql-fast-triage.md)，保留原始错误码、错误类别和错误信息，按同时匹配的报错信号与 SQL 形态选择修正规则，再重试。错误类别为 `semantic_analysis` 时必须先检查 SQL 本身并执行有依据的修正重试，不得直接结束查询。不得只凭错误码套用规则；手册没有明确匹配项时，只根据原始错误做最小修正。
 
-SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。分区缺失或合法空结果经分区检查后记 `insufficient_data`；权限不足记 `query_blocked`；两次修正后仍失败记 `query_failed`；有根指标但无合法维度数据源记 `unsupported_drilldown`。失败和空结果不得写成零。
+SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。单次查询、维度家族和整份 request 遵守快速排查手册的墙钟预算。分区缺失或合法空结果经成功的分区检查后记 `insufficient_data`。只有 MaxCompute/DView 返回带错误码、类别、信息及 query/trace ID 的明确权限错误才可提出 `query_blocked`；只有查询登记表中的正式共享数据源不存在或不可访问并带同等级外部凭据时才可提出 `unsupported_drilldown`。提出 blocker 时必须向调用方保留登记 query ID、exact SQL、规范参数、SQL fingerprint、正式源表、错误回执和全部 remaining dimensions；最终状态还要由独立 reviewer 执行调用方提供的固定 source probe 复现后才能批准。SQL 编写错误、`semantic_analysis`、超时、限流、资源不足、服务暂时不可用或两次修正后仍失败都结束当前 analysis attempt，由调用方重新调用，不得伪装为业务阻塞。失败和空结果不得写成零。
 
 ## 6. 执行归因
 
 根指标通过后，严格按已加载 Playbook 中对应链路的顺序执行归因。需要字段结构时先 `describe_table`；每个查询完整继承知识库定义和 Playbook 要求的分析范围。
 
-不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
+不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。下载链路必须先完成并保留 `game_id` 与 `is_reserve_auto_download` 两个规定一级家族；不能因为 `game_id` 已达到主导条件而省略另一家族。规定一级不能充分解释时，必须按固定顺序继续全部适用维度，直到找到合法候选、全部执行完仍无候选，或出现带外部凭据的全局阻塞。某一步的局部数据问题不能阻断后续独立家族，不得用猜测补足证据。
 
 ## 7. 停止并输出
 
@@ -100,7 +100,9 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 结论的证据边界严格遵守 Playbook，用户可见措辞严格遵守文案规范；不得把定位结果升级为未经证实的因果结论。
 
-DView 返回真实 query ID 时，可用 `queries: [{"purpose": "...", "query_id": "..."}]` 保留；没有返回时省略 `queries`，不得伪造。
+每个调查必须按 Playbook 的“输出轨迹契约”输出 `drilldown_trace`，记录链路、完整固定维度计划、实际执行的连续步骤、每次 SQL 的模板 ID、SQL fingerprint、耗时、结果以及真实 provider 错误凭据。`completed` 必须停在产生合法候选的计划前缀，但下载仍须完成两个规定一级家族；`no_dominant_slice` 必须覆盖全部计划；符合门槛的 `game_id` 与 `is_reserve_auto_download` 候选必须记录四象限验证。`query_blocked` 和 `unsupported_drilldown` 必须由最后一步的 MaxCompute 外部错误凭据证明。SQL 编写失败、下钻未完成或 `incomplete_analysis` 不是合法最终 JSON，调用方必须重新调用。
+
+DView 返回真实 query ID 或 trace ID 时原样保留；权限或数据源阻塞必须至少包含其中一个。没有返回时不得伪造，也不得将结果包装成阻塞终态。
 
 ## 安全边界
 
