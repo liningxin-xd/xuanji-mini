@@ -105,6 +105,8 @@ analysis_dt = 2026-08-17
 - 维度数据覆盖完整根范围，分子、分母和行数能回勾根调查，该家族能闭合到大盘变化。
 - 安装家族的官方分子分母投影只以 `is_metric_anchor=1`、`official_download_complete` 和 `official_install_complete` 检查唯一性与闭合。APK 的 `chain_id` 非空率、唯一性和跨设备/游戏冲突率，以及沙盒 `install_round_id` 的覆盖与歧义，只门禁依赖链路键的阶段或增强诊断；链路键与阶段质量不得作为官方投影的前置门禁。
 
+低基数一级模板返回的维度匹配率、`unmatched` 桶和安装观察窗口是随业务结果输出的风险证据，不新增通过率阈值，也不构成拒绝当前结果或停止后续维度的硬门禁。匹配失败样本必须留在完整根范围内，不能过滤或回填旧标签；`unmatched` 只作为不可候选质量桶，其占比或变化写入 `evidence_limits`。安装观察窗口偏离知识库期望时保留已经查询到的分桶结果并说明成熟度风险，继续固定队列；不得仅凭这些辅助字段返回 `unsupported_drilldown`。
+
 家族门禁不通过时不得从该家族产生候选，并把家族名和真实限制写入 `evidence_limits`。只要根范围的正式分子分母仍合法，单个家族的缺字段、空桶、重复、覆盖不足、回勾失败或贡献不闭合都不能证明整个归因数据源不可用；必须继续下一个已登记维度家族。只有完整根范围本身无法从归因数据源复现，或按对应链路的固定顺序尝试后没有任何已登记家族可执行时，才按真实原因返回 `insufficient_data`、`query_blocked`、`query_failed` 或 `unsupported_drilldown`。这些是一级及后续归因的家族门禁，不是判断既有异常延续的前置查询。
 
 ### 告警新增性
@@ -178,14 +180,14 @@ is_reserve_auto_download
 完成两个快判家族后，满足任一条件都必须进入后续低基数一级：任一快判家族未形成合法结果、两个家族都没有合法候选、游戏不能充分解释，或剔除后异常仍明显。随后检查：
 
 ```text
-apk_size_tier
+device_brand
 channel_group
 app_major_version
 os_major_version
-device_brand
+apk_size_tier
 ```
 
-实际执行固定按 `apk_size_tier -> channel_group -> app_major_version -> os_major_version -> device_brand` 的稳定顺序，逐个尝试完上述五个家族；单个家族查询、完整性或闭合失败只淘汰该家族并继续下一个，不能提前返回 `unsupported_drilldown`。候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
+实际执行固定按 `device_brand -> channel_group -> app_major_version -> os_major_version -> apk_size_tier` 的稳定顺序，逐个尝试完上述五个家族；单个家族查询、完整性或闭合失败只淘汰该家族并继续下一个，不能提前返回 `unsupported_drilldown`。候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
 
 ### 终态路由
 
@@ -209,9 +211,11 @@ device_brand
 
 ### 合法二级关系
 
+下列列表只登记允许的父子关系，不是另一套执行顺序；一级固定队列仍以上文顺序为准。需要从 `game_id` 选择二级子维度时，列表按一级业务优先级排列。
+
 ```text
-game_id -> apk_size_tier, channel_group, app_major_version,
-           os_major_version, device_brand
+game_id -> device_brand, channel_group, app_major_version,
+           os_major_version, apk_size_tier
 apk_size_tier -> game_id, channel_group, device_brand, os_major_version
 channel_group -> game_id, app_major_version, device_brand
 app_major_version -> device_brand, os_major_version
@@ -255,13 +259,13 @@ game_id
 `game_id` 未形成合法结果、没有合法候选、解释不足或剔除后异常仍明显时，在阶段拆解之后完整读取 [安装低基数一级归因模板](queries/install-primary-attribution-template.md)，再检查官方完整分母可用的维度：
 
 ```text
-apk_size_tier
-os_major_version
 device_brand
 storage_headroom_tier
+os_major_version
+apk_size_tier
 ```
 
-固定按 `apk_size_tier -> os_major_version -> device_brand -> storage_headroom_tier` 的顺序逐个尝试完上述四个家族。单个家族缺字段、查询失败、完整性不足或贡献不闭合时，记录该家族限制并继续下一个；只要官方根投影合法，就不得把单个家族失败升级为整个安装下钻不支持。阶段拆解显示 `S -> C` 同向不利变化达到 5bp 时，另按后文规则检查安装事件版本；不得把该版本检查插到 `game_id` 之前，也不得让它替代上述官方投影家族。
+固定按 `device_brand -> storage_headroom_tier -> os_major_version -> apk_size_tier` 的顺序逐个尝试完上述四个家族。单个家族缺字段、查询失败、完整性不足或贡献不闭合时，记录该家族限制并继续下一个；只要官方根投影合法，就不得把单个家族失败升级为整个安装下钻不支持。阶段拆解显示 `S -> C` 同向不利变化达到 5bp 时，另按后文规则检查安装事件版本；不得把该版本检查插到 `game_id` 之前，也不得让它替代上述官方投影家族。
 
 人工解释顺序为 APK/沙盒、游戏贡献、游戏包版本/包大小、是否进入 `installStart`、完成/失败及失败原因、安装器类型/客户端版本、机型/OS/剩余存储。下载专属的预约自动下载、首次下载网络和地域不进入安装一级归因。
 
@@ -297,9 +301,11 @@ APK 链路键缺失与跨实体冲突、沙盒轮次缺失与歧义，以及 `T/
 
 ### 合法二级关系
 
+下列列表只登记允许的父子关系，不是另一套执行顺序；一级固定队列仍以上文顺序为准。需要从 `game_id` 选择二级子维度时，列表按一级业务优先级排列。
+
 ```text
-game_id -> apk_size_tier, os_major_version, device_brand,
-           storage_headroom_tier
+game_id -> device_brand, storage_headroom_tier, os_major_version,
+           apk_size_tier
 apk_size_tier -> game_id, device_brand, storage_headroom_tier
 os_major_version -> device_brand, storage_headroom_tier
 device_brand -> device_model, os_major_version, storage_headroom_tier
@@ -355,7 +361,7 @@ abs(sum(total_impact) - (overall_current_rate - overall_baseline_rate))
 - 当前或基线父范围占比不少于 1%；
 - 对大盘不利影响不少于 `0.0005`，即 5bp；
 - 非质量桶；
-- 维度家族闭合且覆盖率足以支撑结论。
+- 维度家族闭合，候选来自非质量业务桶。
 
 候选按单项全局不利影响排序。非游戏一级最多保留 Top 3。没有候选达到 5bp 时返回 `no_dominant_slice`，不能选择最大但不达标的桶。
 
@@ -375,7 +381,7 @@ __other__
 __other_below_threshold__
 ```
 
-质量桶不能成为业务候选；其占比突然扩大可以作为数据质量发现。高基数长尾需要合并时使用闭合残差桶，并保持其不可候选属性。
+质量桶不能成为业务候选；其占比突然扩大可以作为数据质量发现。维度匹配率和安装观察窗口没有新增的硬阈值，风险只限制措辞强度，不阻止其他已闭合业务桶按现有门槛形成候选，也不阻止继续下一个维度。高基数长尾需要合并时使用闭合残差桶，并保持其不可候选属性。
 
 ## 剔除反事实
 

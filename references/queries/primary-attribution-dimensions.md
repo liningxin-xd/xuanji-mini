@@ -4,23 +4,26 @@
 
 ## 通用替换
 
-每次从下方白名单选择一个逻辑维度及其源字段 `FIELD`，先替换模板的源字段占位符，再逐字替换两个表达式占位符：
+每次从下方白名单选择一个逻辑维度、源字段 `FIELD` 和质量匹配表达式 `QUALITY_EXPR`，先替换模板的两个源表达式占位符，再逐字替换两个分桶表达式占位符：
 
 ```sql
 __DIMENSION_SOURCE_FIELD__ = FIELD
+__DIMENSION_QUALITY_SOURCE_EXPR__ = QUALITY_EXPR
 __DIMENSION_VALUE_EXPR__ = CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source IS NULL
     OR TRIM(CAST(dimension_source AS STRING)) = '' THEN '__none__'
   ELSE CAST(dimension_source AS STRING)
 END
 __DIMENSION_LABEL_EXPR__ = MAX(CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source IS NULL
     OR TRIM(CAST(dimension_source AS STRING)) = '' THEN '__none__'
   ELSE CAST(dimension_source AS STRING)
 END)
 ```
 
-`GROUP BY` 必须使用与 `__DIMENSION_VALUE_EXPR__` 逐字相同的非聚合表达式。不得同时选择两个字段，不得拼接组合维度。
+`GROUP BY` 必须使用与 `__DIMENSION_VALUE_EXPR__` 逐字相同的非聚合表达式。不得同时选择两个字段，不得拼接组合维度。质量匹配为 0、NULL 或其他非 1 值时保留为 `unmatched`，不得过滤、回填旧值或直接结束当前调查。
 
 ## 下载白名单
 
@@ -28,23 +31,34 @@ END)
 
 ```text
 is_reserve_auto_download
-apk_size_tier
+device_brand
 channel_group
 app_major_version
 os_major_version
-device_brand
+apk_size_tier
 ```
+
+| 逻辑维度 | 质量匹配表达式 |
+|---|---|
+| `is_reserve_auto_download` | `1` |
+| `device_brand` | `device_dimension_matched` |
+| `channel_group` | `1` |
+| `app_major_version` | `1` |
+| `os_major_version` | `active_os_matched` |
+| `apk_size_tier` | `1` |
 
 `is_reserve_auto_download` 使用专用表达式：
 
 ```sql
 __DIMENSION_VALUE_EXPR__ = CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source IN (0, 1)
     THEN CAST(dimension_source AS STRING)
   WHEN dimension_source IS NULL THEN '__none__'
   ELSE CONCAT('invalid_', CAST(dimension_source AS STRING))
 END
 __DIMENSION_LABEL_EXPR__ = MAX(CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source = 1 THEN 'reserve_auto_download'
   WHEN dimension_source = 0 THEN 'other_download'
   WHEN dimension_source IS NULL THEN '__none__'
@@ -57,13 +71,20 @@ END)
 固定按以下顺序使用。左侧为 Playbook 逻辑维度，右侧为已通过 `describe_table` 核实的安装宽表源字段：
 
 ```text
-apk_size_tier          -> apk_size_tier
-os_major_version       -> os_major_version
 device_brand           -> device_brand
 storage_headroom_tier  -> storage_headroom_tier
+os_major_version       -> os_major_version
+apk_size_tier          -> apk_size_tier
 ```
 
-安装维度全部使用通用替换。模板只使用官方锚点的正式分子分母；链路键和阶段字段不参与这些维度家族的候选门禁。`install_event_app_major_version` 不在安装官方分母白名单中，因为没有安装事件的下载完成样本天然取不到该字段；它只能按 Playbook 使用独立的开始后版本模板拆 `S -> C`。
+| 逻辑维度 | 质量匹配表达式 |
+|---|---|
+| `device_brand` | `device_dimension_matched` |
+| `storage_headroom_tier` | `device_dimension_matched` |
+| `os_major_version` | `active_os_matched` |
+| `apk_size_tier` | `1` |
+
+安装维度全部使用通用替换。模板只使用官方锚点的正式分子分母；链路键和阶段字段不参与这些维度家族的候选门禁。`install_event_app_major_version` 不在安装官方分母白名单中，因为没有安装事件的下载完成样本天然取不到该字段；它只能按 Playbook 使用独立的开始后版本模板拆 `S -> C`。质量匹配表达式只生成 `unmatched` 风险桶和匹配率证据，不是停止后续维度的硬门禁。
 
 ## 二级下钻替换
 

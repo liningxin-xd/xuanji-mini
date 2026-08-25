@@ -153,7 +153,7 @@ class MetricRouteContractTest(unittest.TestCase):
                 "c73b7be9248bb5a1b247a9d9cf3e1415892bdca7cbf9db413d887e76acedb3ca"
             ),
             DOWNLOAD_PRIMARY_TEMPLATE_PATH: (
-                "94f15c5c3b7cff0212504ff284ece34086febdfe7e5f024395fc2756239910ec"
+                "5ff30996477405be18e4d1f3986d0a71d8b8cbdb42a727bf3946257d1e1ac161"
             ),
         }
 

@@ -8,7 +8,7 @@
 - 禁止 `CROSS JOIN`、逗号连接、`JOIN ... ON 1 = 1`，也禁止把总体汇总 CTE 连接回分桶结果。
 - 总体数值通过分桶聚合后的窗口函数获得。不要把聚合函数与窗口函数写在同一 CTE 层级。
 - `business_date` 绑定已经确定的 `analysis_dt`；基线固定为此前 7 个完整业务日。
-- 模板中的 `__DIMENSION_SOURCE_FIELD__`、`__DIMENSION_VALUE_EXPR__` 和 `__DIMENSION_LABEL_EXPR__` 必须按 [一级归因维度登记](primary-attribution-dimensions.md) 为同一维度家族成组替换后才能执行。每次只选择当前家族的一个源字段，不得把占位符原样提交给 DView。
+- 模板中的 `__DIMENSION_SOURCE_FIELD__`、`__DIMENSION_QUALITY_SOURCE_EXPR__`、`__DIMENSION_VALUE_EXPR__` 和 `__DIMENSION_LABEL_EXPR__` 必须按 [一级归因维度登记](primary-attribution-dimensions.md) 为同一维度家族成组替换后才能执行。每次只选择当前家族的一个源字段，不得把占位符原样提交给 DView。
 - 模板不负责高基数截断。结果可能超过门禁时，按 Playbook 的样本、占比和质量规则增加 `__other_below_threshold__` 闭合残差桶；禁止使用业务 Top 或 `LIMIT` 截断后继续归因。
 
 ## 固定骨架
@@ -18,6 +18,7 @@ WITH scoped_rows AS (
   SELECT
     dt,
     __DIMENSION_SOURCE_FIELD__ AS dimension_source,
+    __DIMENSION_QUALITY_SOURCE_EXPR__ AS dimension_quality_matched,
     download_sample_flag,
     is_download_complete
   FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
@@ -40,6 +41,18 @@ WITH scoped_rows AS (
       THEN is_download_complete ELSE 0 END) AS current_numerator,
     SUM(CASE WHEN dt < ${business_date}
       THEN is_download_complete ELSE 0 END) AS baseline_numerator,
+    SUM(CASE WHEN dt = ${business_date}
+          AND COALESCE(dimension_quality_matched, 0) = 1
+      THEN download_sample_flag ELSE 0 END) AS current_dimension_matched_denominator,
+    SUM(CASE WHEN dt < ${business_date}
+          AND COALESCE(dimension_quality_matched, 0) = 1
+      THEN download_sample_flag ELSE 0 END) AS baseline_dimension_matched_denominator,
+    SUM(CASE WHEN dt = ${business_date}
+          AND COALESCE(dimension_quality_matched, 0) <> 1
+      THEN download_sample_flag ELSE 0 END) AS current_dimension_unmatched_denominator,
+    SUM(CASE WHEN dt < ${business_date}
+          AND COALESCE(dimension_quality_matched, 0) <> 1
+      THEN download_sample_flag ELSE 0 END) AS baseline_dimension_unmatched_denominator,
     SUM(CASE WHEN download_sample_flag IS NULL
           OR download_sample_flag <> 1
           OR is_download_complete IS NULL
@@ -54,7 +67,15 @@ WITH scoped_rows AS (
     SUM(current_denominator) OVER () AS overall_current_denominator,
     SUM(baseline_denominator) OVER () AS overall_baseline_denominator,
     SUM(current_numerator) OVER () AS overall_current_numerator,
-    SUM(baseline_numerator) OVER () AS overall_baseline_numerator
+    SUM(baseline_numerator) OVER () AS overall_baseline_numerator,
+    SUM(current_dimension_matched_denominator) OVER ()
+      AS overall_current_dimension_matched_denominator,
+    SUM(baseline_dimension_matched_denominator) OVER ()
+      AS overall_baseline_dimension_matched_denominator,
+    SUM(current_dimension_unmatched_denominator) OVER ()
+      AS overall_current_dimension_unmatched_denominator,
+    SUM(baseline_dimension_unmatched_denominator) OVER ()
+      AS overall_baseline_dimension_unmatched_denominator
   FROM bucket_aggregates
 )
 SELECT
@@ -71,6 +92,14 @@ SELECT
   overall_baseline_denominator,
   overall_current_numerator,
   overall_baseline_numerator,
+  overall_current_dimension_matched_denominator,
+  overall_baseline_dimension_matched_denominator,
+  overall_current_dimension_unmatched_denominator,
+  overall_baseline_dimension_unmatched_denominator,
+  overall_current_dimension_matched_denominator * 1.0
+    / NULLIF(overall_current_denominator, 0) AS overall_current_dimension_match_rate,
+  overall_baseline_dimension_matched_denominator * 1.0
+    / NULLIF(overall_baseline_denominator, 0) AS overall_baseline_dimension_match_rate,
   invalid_metric_row_count
 FROM buckets_with_totals
 ORDER BY current_denominator DESC, dimension_value ASC
@@ -82,12 +111,14 @@ ORDER BY current_denominator DESC, dimension_value ASC
 
 ```sql
 __DIMENSION_VALUE_EXPR__ = CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source IN (0, 1)
     THEN CAST(dimension_source AS STRING)
   WHEN dimension_source IS NULL THEN '__none__'
   ELSE CONCAT('invalid_', CAST(dimension_source AS STRING))
 END
 __DIMENSION_LABEL_EXPR__ = MAX(CASE
+  WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
   WHEN dimension_source = 1 THEN 'reserve_auto_download'
   WHEN dimension_source = 0 THEN 'other_download'
   WHEN dimension_source IS NULL THEN '__none__'
@@ -95,4 +126,4 @@ __DIMENSION_LABEL_EXPR__ = MAX(CASE
 END)
 ```
 
-维度替换后先静态确认：两个占位符均已消失、`GROUP BY` 与 `dimension_value` 使用逐字相同的非聚合表达式、SQL 不含任何笛卡尔积形态。查询成功后仍须按 Playbook 检查正式粒度唯一性、7 日基线完整性、分子是分母子集、各桶回勾总体以及贡献闭合；模板本身不能证明这些门禁通过。
+维度替换后先静态确认：四个占位符均已消失、`GROUP BY` 与 `dimension_value` 使用逐字相同的非聚合表达式、SQL 不含任何笛卡尔积形态。查询成功后仍须按 Playbook 检查正式粒度唯一性、7 日基线完整性、分子是分母子集、各桶回勾总体以及贡献闭合；匹配率和 `unmatched` 桶只用于提示维度来源风险，不阻止当前结果输出或后续维度继续执行。

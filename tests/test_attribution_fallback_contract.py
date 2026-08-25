@@ -40,8 +40,8 @@ class AttributionFallbackContractTest(unittest.TestCase):
 
     def test_download_fallback_order_is_mandatory_after_fast_family_failure(self):
         expected_order = (
-            "`apk_size_tier -> channel_group -> app_major_version -> "
-            "os_major_version -> device_brand`"
+            "`device_brand -> channel_group -> app_major_version -> "
+            "os_major_version -> apk_size_tier`"
         )
         self.assertIn(expected_order, self.playbook)
         self.assertIn("任一快判家族未形成合法结果", self.playbook)
@@ -51,7 +51,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
         fast_families = self.playbook.index("先并行快判两个独立维度家族")
         game_id = self.playbook.index("game_id", fast_families)
         reserve = self.playbook.index("is_reserve_auto_download", game_id)
-        fallback = self.playbook.index("apk_size_tier", reserve)
+        fallback = self.playbook.index("device_brand", reserve)
         self.assertLess(game_id, fallback)
         self.assertLess(reserve, fallback)
         self.assertIn("两个规定家族的合法结果必须分别保留", self.playbook)
@@ -60,6 +60,29 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertIn("链路键与阶段质量不得作为官方投影的前置门禁", self.playbook)
         self.assertIn("逐个尝试完上述四个家族", self.playbook)
         self.assertIn("install-primary-attribution-template.md", self.playbook)
+
+    def test_install_fallback_order_prioritizes_brand_and_storage(self):
+        expected_order = (
+            "`device_brand -> storage_headroom_tier -> "
+            "os_major_version -> apk_size_tier`"
+        )
+        self.assertIn(expected_order, self.playbook)
+
+    def test_secondary_relationships_do_not_override_primary_order(self):
+        self.assertEqual(
+            2,
+            self.playbook.count("下列列表只登记允许的父子关系，不是另一套执行顺序"),
+        )
+        self.assertIn(
+            "game_id -> device_brand, channel_group, app_major_version,\n"
+            "           os_major_version, apk_size_tier",
+            self.playbook,
+        )
+        self.assertIn(
+            "game_id -> device_brand, storage_headroom_tier, os_major_version,\n"
+            "           apk_size_tier",
+            self.playbook,
+        )
 
     def test_install_keeps_game_first_and_stage_second(self):
         game_step = self.playbook.index("第一优先级固定完整读取")
@@ -96,7 +119,41 @@ class AttributionFallbackContractTest(unittest.TestCase):
                 self.assertIn(
                     "__DIMENSION_SOURCE_FIELD__ AS dimension_source", content
                 )
+                self.assertIn(
+                    "__DIMENSION_QUALITY_SOURCE_EXPR__ AS "
+                    "dimension_quality_matched",
+                    content,
+                )
+                for field in (
+                    "overall_current_dimension_matched_denominator",
+                    "overall_baseline_dimension_matched_denominator",
+                    "overall_current_dimension_unmatched_denominator",
+                    "overall_baseline_dimension_unmatched_denominator",
+                    "overall_current_dimension_match_rate",
+                    "overall_baseline_dimension_match_rate",
+                ):
+                    self.assertIn(field, content)
+                self.assertNotIn("official_observation_days", content)
+                self.assertNotIn("grain_row_count", content)
                 self.assertIn("每次只选择当前家族的一个源字段", content)
+
+        expected_registry_order = (
+            "is_reserve_auto_download\n"
+            "device_brand\n"
+            "channel_group\n"
+            "app_major_version\n"
+            "os_major_version\n"
+            "apk_size_tier"
+        )
+        self.assertIn(expected_registry_order, registry)
+        for mapping in (
+            "| `device_brand` | `device_dimension_matched` |",
+            "| `os_major_version` | `active_os_matched` |",
+            "| `channel_group` | `1` |",
+            "| `app_major_version` | `1` |",
+            "| `apk_size_tier` | `1` |",
+        ):
+            self.assertIn(mapping, registry)
 
     def test_install_template_registers_every_fallback_dimension(self):
         content = INSTALL_PRIMARY_TEMPLATE.read_text(encoding="utf-8")
@@ -111,10 +168,38 @@ class AttributionFallbackContractTest(unittest.TestCase):
                 self.assertIn(dimension, registry)
         self.assertIn("primary-attribution-dimensions.md", content)
         self.assertIn("__DIMENSION_SOURCE_FIELD__ AS dimension_source", content)
+        self.assertIn(
+            "__DIMENSION_QUALITY_SOURCE_EXPR__ AS dimension_quality_matched",
+            content,
+        )
         self.assertIn("official_download_complete", content)
         self.assertIn("official_install_complete", content)
+        self.assertIn("official_observation_days", content)
         self.assertIn("is_metric_anchor = 1", content)
         self.assertIn("禁止选择 `install_event_app_major_version`", content)
+        for field in (
+            "overall_current_dimension_match_rate",
+            "overall_baseline_dimension_match_rate",
+            "overall_current_observation_days_min",
+            "overall_current_observation_days_max",
+            "overall_baseline_observation_days_min",
+            "overall_baseline_observation_days_max",
+        ):
+            self.assertIn(field, content)
+        self.assertNotIn("grain_row_count", content)
+
+        expected_registry_order = (
+            "device_brand           -> device_brand\n"
+            "storage_headroom_tier  -> storage_headroom_tier\n"
+            "os_major_version       -> os_major_version\n"
+            "apk_size_tier          -> apk_size_tier"
+        )
+        self.assertIn(expected_registry_order, registry)
+
+    def test_primary_risk_evidence_never_stops_the_dimension_queue(self):
+        self.assertIn("不构成拒绝当前结果或停止后续维度的硬门禁", self.playbook)
+        self.assertIn("不得仅凭这些辅助字段返回 `unsupported_drilldown`", self.playbook)
+        self.assertIn("风险只限制措辞强度", self.playbook)
 
     def test_install_stage_query_has_fixed_d_s_c_decomposition(self):
         content = INSTALL_STAGE_QUERY.read_text(encoding="utf-8")
