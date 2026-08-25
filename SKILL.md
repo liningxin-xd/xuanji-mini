@@ -72,6 +72,8 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。单个维度家族失败是家族级限制：该家族不得产生候选，但只要根指标和归因数据源的完整根范围仍合法，就必须记录限制并按 Playbook 继续后续已登记家族，不得直接结束整个调查。只有根范围或全部已登记归因数据源不可用时才返回受阻状态。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
 
+已注册下载/安装告警通过根指标预检后，必须按 Playbook 生成 `attribution_execution`。进入归因时先冻结完整 `steps` 顺序，每完成一步立即写入其真实 `status`、`candidate_count` 或 `reason`，不能等到撰写结论时根据已有候选反推执行记录。单步失败仍保留在原位置并继续；不得省略失败项、重排步骤、把未执行写成成功，或因已经找到游戏候选而截断固定队列。
+
 ## 7. 停止并输出
 
 使用 Playbook 的停止条件、状态和结论边界。不得选择未通过 Playbook 门槛的候选讲故事，也不得在满足停止条件后继续无方向扩展。
@@ -91,6 +93,8 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 形成合法结果时 `failed`。
 
 每个调查必须先写 `rule_indexes`，并包含非空 `metric_hint`、原始非空 `alert_partition` 和 `alert_rules`。`alert_rules` 与 `rule_indexes` 一一对应，每项至少包含输入中的非空 `rule_name`；只有原始规则实际提供时才保留 `check_result`、`operator` 和 `threshold`。`rule_indexes` 是非空、升序、无重复的零基整数数组；每个下标必须落在本次输入的 `ruleChecks` 内，不同调查不得重复使用下标，全部调查合起来必须恰好覆盖每条输入规则。合并同一标准指标时，一个调查可以包含多个下标。不要伪造缺失字段或 query ID。
+
+已注册告警中，除知识库或路由尚未建立的 `insufficient_definition` 外，调查必须包含 Playbook 定义的 `attribution_execution`。`completed` 和完成归因后的 `no_dominant_slice` 使用 `mode=full_queue`；既有异常延续使用 `mode=existing_anomaly_stop`；根指标或归因根范围发生数据、权限或查询失败时使用 `mode=root_precheck_failed`；完整归因根范围无法复现时才可使用 `mode=root_scope_failed`。进入家族查询后，任何受阻状态都必须保留完整队列。该字段是 writer 的提交门禁，缺失、顺序不完整或状态矛盾时不得把结果包装为成功。
 
 `completed` 和 `no_dominant_slice` 调查必须使用卡片的规范字段名，并包含 `YYYY-MM-DD` 的 `analysis_date`、标准指标 `metric`、有限数值 `current_value`、`baseline_value`、`delta_bp`、非空 `summary`、非空字符串数组 `evidence_limits` 和非空 `recommended_action`。其他受阻状态必须包含非空 `reason` 和 `action`；只有指标定义和日期对齐已经完成时才可附带 `analysis_date`，`insufficient_definition` 不得猜测。不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层会拒绝结果。
 

@@ -207,6 +207,8 @@ ORDER BY
 
 ## 安装骨架
 
+安装观察窗口的 min/max 只在 `metric_denominator = official_download_complete = 1` 的官方分母样本中统计。分母外锚点即使携带默认或其他观察窗口值，也不得改变当前或基线的成熟度证据。
+
 ```sql
 WITH raw_scoped_rows AS (
   SELECT
@@ -287,15 +289,19 @@ WITH raw_scoped_rows AS (
     SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
       AS baseline_row_count,
     MIN(CASE WHEN dt = ${business_date}
+          AND metric_denominator = 1
       THEN official_observation_days ELSE NULL END)
       AS current_observation_days_min,
     MAX(CASE WHEN dt = ${business_date}
+          AND metric_denominator = 1
       THEN official_observation_days ELSE NULL END)
       AS current_observation_days_max,
     MIN(CASE WHEN dt < ${business_date}
+          AND metric_denominator = 1
       THEN official_observation_days ELSE NULL END)
       AS baseline_observation_days_min,
     MAX(CASE WHEN dt < ${business_date}
+          AND metric_denominator = 1
       THEN official_observation_days ELSE NULL END)
       AS baseline_observation_days_max,
     SUM(CASE WHEN grain_row_count > 1 THEN 1 ELSE 0 END)

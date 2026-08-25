@@ -18,6 +18,7 @@ INSTALL_STAGE_QUERY = QUERY_ROOT / "install-stage-loss-decomposition.yaml"
 INSTALL_POST_START_VERSION_TEMPLATE = (
     QUERY_ROOT / "install-post-start-version-template.md"
 )
+SECONDARY_ATTRIBUTION_TEMPLATE = QUERY_ROOT / "secondary-attribution-template.md"
 DIMENSION_REGISTRY = QUERY_ROOT / "primary-attribution-dimensions.md"
 
 
@@ -38,14 +39,31 @@ class AttributionFallbackContractTest(unittest.TestCase):
             self.playbook,
         )
 
-    def test_download_fallback_order_is_mandatory_after_fast_family_failure(self):
+    def test_download_full_queue_order_is_mandatory_after_fast_families(self):
         expected_order = (
             "`device_brand -> channel_group -> app_major_version -> "
             "os_major_version -> apk_size_tier`"
         )
         self.assertIn(expected_order, self.playbook)
-        self.assertIn("任一快判家族未形成合法结果", self.playbook)
+        self.assertIn("无论是否已经形成游戏候选", self.playbook)
         self.assertIn("逐个尝试完上述五个家族", self.playbook)
+
+    def test_registered_attribution_emits_machine_checkable_full_queue(self):
+        self.assertIn("`attribution_execution`", self.skill)
+        self.assertIn("不能等到撰写结论时根据已有候选反推执行记录", self.skill)
+        self.assertIn("## 归因执行清单", self.playbook)
+        self.assertIn("writer 将拒绝缺少步骤、顺序不符", self.playbook)
+        self.assertIn(
+            "game_id -> is_reserve_auto_download -> device_brand -> channel_group\n"
+            "-> app_major_version -> os_major_version -> apk_size_tier",
+            self.playbook,
+        )
+        self.assertIn(
+            "game_id -> install_stage -> device_brand -> storage_headroom_tier\n"
+            "-> os_major_version -> apk_size_tier",
+            self.playbook,
+        )
+        self.assertIn("已经找到游戏候选而截断固定队列", self.skill)
 
     def test_download_keeps_game_and_reserve_as_first_priority(self):
         fast_families = self.playbook.index("先并行快判两个独立维度家族")
@@ -87,9 +105,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
     def test_install_keeps_game_first_and_stage_second(self):
         game_step = self.playbook.index("第一优先级固定完整读取")
         stage_step = self.playbook.index("游戏家族完成后第二步")
-        fallback_step = self.playbook.index(
-            "阶段拆解之后完整读取 [安装低基数一级归因模板]"
-        )
+        fallback_step = self.playbook.index("阶段拆解之后，无论 `game_id` 是否已经形成候选")
         self.assertLess(game_step, stage_step)
         self.assertLess(stage_step, fallback_step)
         self.assertIn("无论 `game_id` 是否形成候选", self.playbook)
@@ -208,8 +224,12 @@ class AttributionFallbackContractTest(unittest.TestCase):
             "has_client_install_start",
             "official_install_complete",
             "current_no_observed_start_count",
+            "current_pre_start_unfinished_count",
+            "current_pre_start_unfinished_rate",
             "current_started_not_complete_count",
+            "current_started_complete_count",
             "current_post_start_completion_rate",
+            "current_official_loss_closure_gap",
             "current_complete_without_start_count",
             "current_start_without_download_count",
             "current_anchor_duplicate_excess",
@@ -220,9 +240,68 @@ class AttributionFallbackContractTest(unittest.TestCase):
                 self.assertIn(required, content)
         self.assertIn("is_metric_anchor = 1", content)
         self.assertIn("install-stage-loss-decomposition.yaml", self.playbook)
-        self.assertIn("未观测到进入 installStart", self.playbook)
+        self.assertIn("未观测到 installStart 且最终未完成", self.playbook)
         self.assertIn("`S=0` 不是质量失败", self.playbook)
-        self.assertIn("`C/S` 保持未定义且不得填零", self.playbook)
+        self.assertIn("开始后安装完成率保持未定义且不得填零", self.playbook)
+        self.assertIn("C_started = D ∩ S ∩ C", self.playbook)
+        self.assertIn("两个未完成集合必须闭合到官方损耗 `D - C`", self.playbook)
+        self.assertIn(
+            "current_started_complete_count * 1.0 / NULLIF(current_start_count, 0)",
+            content,
+        )
+        self.assertNotIn(
+            "current_complete_count * 1.0 / NULLIF(current_start_count, 0)",
+            content,
+        )
+
+    def test_sandbox_skips_apk_install_start_stage(self):
+        content = INSTALL_STAGE_QUERY.read_text(encoding="utf-8")
+        self.assertIn("allowed_values: [app]", content)
+        self.assertIn("该阶段只适用于 `game_type=app`", self.playbook)
+        self.assertIn("`skipped_not_applicable`", self.playbook)
+        self.assertIn("不得执行本 QuerySpec", self.playbook)
+
+    def test_historical_apk_stage_sets_close_to_official_loss(self):
+        download_count = 1_476_380
+        start_count = 1_339_162
+        complete_count = 1_033_718
+        complete_without_start_count = 6_383
+        started_complete_count = complete_count - complete_without_start_count
+        started_not_complete_count = start_count - started_complete_count
+        pre_start_unfinished_count = (
+            download_count - complete_count - started_not_complete_count
+        )
+
+        self.assertEqual(311_827, started_not_complete_count)
+        self.assertEqual(130_835, pre_start_unfinished_count)
+        self.assertEqual(
+            download_count - complete_count,
+            pre_start_unfinished_count + started_not_complete_count,
+        )
+        self.assertEqual(
+            download_count - start_count,
+            pre_start_unfinished_count + complete_without_start_count,
+        )
+
+    def test_install_secondary_observation_window_uses_official_denominator(self):
+        content = SECONDARY_ATTRIBUTION_TEMPLATE.read_text(encoding="utf-8")
+        install_content = content.split("## 安装骨架", 1)[1]
+        for date_predicate in (
+            "dt = ${business_date}",
+            "dt < ${business_date}",
+        ):
+            for aggregate in ("MIN", "MAX"):
+                expected = (
+                    f"{aggregate}(CASE WHEN {date_predicate}\n"
+                    "          AND metric_denominator = 1\n"
+                    "      THEN official_observation_days ELSE NULL END)"
+                )
+                with self.subTest(aggregate=aggregate, date_predicate=date_predicate):
+                    self.assertIn(expected, install_content)
+        self.assertIn(
+            "只在 `metric_denominator = official_download_complete = 1`",
+            install_content,
+        )
 
     def test_install_event_version_is_post_start_only(self):
         registry = DIMENSION_REGISTRY.read_text(encoding="utf-8")

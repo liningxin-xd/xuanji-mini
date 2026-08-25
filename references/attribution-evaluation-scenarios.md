@@ -54,15 +54,15 @@
 | ID | 输入或历史现象 | 目标行为 | 当前状态 |
 |---|---|---|---|
 | `H-DL-01` | 2026-08-23 沙盒下载完成率绝对阈值与三周趋势同时命中 | 合并为一个调查；保留 `game_id` 和预约自动下载结果；允许反事实与重叠校准 | `passed_history` |
-| `H-DL-02` | 2026-08-24 沙盒下载失败率只比七日基线上升约 1.33bp，游戏和预约均无 5bp 候选 | 继续尝试 `brand -> channel -> app version -> OS -> apk_size`；至少一个家族合法后才可 `no_dominant_slice` | `known_gap_runner` |
+| `H-DL-02` | 2026-08-24 沙盒下载失败率只比七日基线上升约 1.33bp，游戏和预约均无 5bp 候选 | 继续尝试 `brand -> channel -> app version -> OS -> apk_size`；至少一个家族合法后才可 `no_dominant_slice` | `covered_by_writer` |
 | `H-DL-03` | 2026-08-24 沙盒下载完成率定位 `paid_sem` 和两个包体档位 | 新顺序先尝试品牌；最终候选仍按全局不利影响排序，不能因执行顺序改变候选数值 | `replay_required` |
 | `H-DL-04` | 2026-08-22 沙盒下载完成率因游戏与预约结果未同时通过而拒绝下钻 | 淘汰失败家族并继续五个低基数维度；不得返回组合门禁式 `unsupported_drilldown` | `regression_required` |
 | `H-DL-05` | 2026-08-22 APK 人为停止率约 6.04%，游戏与预约结果未同时通过 | 使用停止率专用 QuerySpec/模板并继续固定低基数队列 | `regression_required` |
 | `H-IN-01` | 2026-08-21 APK 安装完成率仍低于阈值，但较七日基线改善约 27bp | 判为既有异常延续并返回 `no_dominant_slice`；不为了给方向而强行下钻 | `passed_history` |
 | `H-IN-02` | 2026-08-22 APK 安装完成率下降约 121bp，定位诡秘之主和 Android 16 | 游戏优先结论必须保留；阶段质量不能否定游戏或 OS 二级结果 | `passed_history` |
 | `H-IN-03` | 2026-08-20 APK 安装曾因官方锚点、chain 覆盖和游戏闭合组合门禁而拒绝 | 官方游戏投影、阶段拆解和低基数家族相互独立；chain 只约束依赖 chain 的诊断 | `regression_required` |
-| `H-IN-04` | APK 每日存在完成但未观测 start 的样本 | 用集合交集拆阶段；`C且非S` 单列覆盖风险，不能拒绝全部阶段结果 | `known_gap_stage` |
-| `H-IN-05` | 沙盒安装 `S=0` 且 `C>0` | 明确跳过 APK 专属 `D/S/C`，继续游戏和官方低基数维度 | `known_gap_sandbox_stage` |
+| `H-IN-04` | APK 每日存在完成但未观测 start 的样本 | 用集合交集拆阶段；`C且非S` 单列覆盖风险，不能拒绝全部阶段结果 | `fixed_stage_v3` |
+| `H-IN-05` | 沙盒安装 `S=0` 且 `C>0` | 明确跳过 APK 专属 `D/S/C`，继续游戏和官方低基数维度 | `fixed_sandbox_route` |
 
 ## 路由覆盖清单
 
@@ -136,9 +136,9 @@ writer 或测评器至少断言：
 6. 沙盒安装不执行 APK `installStart` 阶段。
 7. 维度执行顺序不改变最终按不利影响排序的候选数值。
 
-## 当前已知缺口
+## 本轮修复状态
 
-- `known_gap_runner`：仓库只有 Markdown 合同和字符串测试，没有可验证固定队列覆盖的执行记录。
-- `known_gap_stage`：APK 阶段查询仍会因 `C且非S>0` 省略全部阶段率。
-- `known_gap_sandbox_stage`：沙盒仍被要求执行不适用的 `installStart` 阶段。
-- 安装二级模板的观察窗口应只统计 `official_download_complete=1` 的分母存在侧。
+- `covered_by_writer`：`attribution_execution.steps` 固化下载与安装的完整顺序；daily-push companion branch `codex/attribution-execution-validation` 在新写入注册告警时校验覆盖、顺序、合法跳过和最终状态。
+- `fixed_stage_v3`：APK 阶段 QuerySpec v3 使用集合交集拆出开始前未完成、开始后未完成和已开始且完成；两类损耗闭合到 `D-C`，`C且非S` 只作为覆盖风险。
+- `fixed_sandbox_route`：沙盒 `install_stage` 固定记录为 `skipped_not_applicable`，不执行 APK QuerySpec，后续官方维度队列仍必须完整执行。
+- 安装二级模板的观察窗口 min/max 已限定到 `official_download_complete=1` 的官方分母样本。

@@ -177,7 +177,7 @@ is_reserve_auto_download
 
 两个规定家族的合法结果必须分别保留到候选选择结束，不能因为 `game_id` 已经达到反事实主导条件而省略或丢弃 `is_reserve_auto_download` 家族。两者都形成合法候选且达到后文跨维度候选重叠门槛时，必须执行一次完整四象限验证；该验证只校准共享范围，不创建交叉候选，也不改变两个原始贡献。
 
-完成两个快判家族后，满足任一条件都必须进入后续低基数一级：任一快判家族未形成合法结果、两个家族都没有合法候选、游戏不能充分解释，或剔除后异常仍明显。随后检查：
+完成两个快判家族后，无论是否已经形成游戏候选，都继续执行后续低基数一级。游戏候选仍保持最高业务优先级，其他家族用于补充风险范围和交叉校准，不能覆盖或降级已经合法的游戏结论。随后检查：
 
 ```text
 device_brand
@@ -187,7 +187,7 @@ os_major_version
 apk_size_tier
 ```
 
-实际执行固定按 `device_brand -> channel_group -> app_major_version -> os_major_version -> apk_size_tier` 的稳定顺序，逐个尝试完上述五个家族；单个家族查询、完整性或闭合失败只淘汰该家族并继续下一个，不能提前返回 `unsupported_drilldown`。候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
+实际执行固定按 `device_brand -> channel_group -> app_major_version -> os_major_version -> apk_size_tier` 的稳定顺序，逐个尝试完上述五个家族；单个家族查询、完整性或闭合失败只淘汰该家族并继续下一个，不能提前返回 `unsupported_drilldown`。候选最终按单项全局不利影响排序，同等证据下优先呈现游戏候选。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
 
 ### 终态路由
 
@@ -256,7 +256,7 @@ game_id
 
 无论 `game_id` 是否形成候选，游戏家族完成后第二步都必须执行后文独立的 `D/S/C` 安装阶段拆解。阶段拆解不得移动到游戏归因之前，也不得因为游戏候选显著而省略；它只回答损耗主要发生在安装开始前还是开始后，不覆盖游戏优先结论。
 
-`game_id` 未形成合法结果、没有合法候选、解释不足或剔除后异常仍明显时，在阶段拆解之后完整读取 [安装低基数一级归因模板](queries/install-primary-attribution-template.md)，再检查官方完整分母可用的维度：
+阶段拆解之后，无论 `game_id` 是否已经形成候选，都完整读取 [安装低基数一级归因模板](queries/install-primary-attribution-template.md)，再检查官方完整分母可用的维度。游戏候选仍保持最高业务优先级，其他维度用于补充风险范围和交叉校准：
 
 ```text
 device_brand
@@ -275,21 +275,24 @@ apk_size_tier
 
 阶段 QuerySpec 只使用 `is_metric_anchor=1` 的官方锚点行。下载完成分母固定为 `D = official_download_complete`，已观测安装开始固定为分母实体中 `has_client_install_start=1` 的 `S`，正式安装完成固定为 `C = official_install_complete`；诊断字段不得替代正式分子。它返回目标日和此前 7 个完整业务日的池化基线计数、损耗率、观察窗口与质量计数，不按游戏或其他维度分桶。
 
-阶段结果只在以下门禁全部通过时有效：`baseline_day_count=7`；当前与基线官方下载分母 `D` 均为正；官方锚点无重复；正式分子、分母和开始标记均非空且为二值；不存在开始却没有下载完成、完成却没有开始、或开始事件无法匹配诊断事件的行；满足 `C <= S <= D`；`app` 当前与基线观察窗口均严格为 3 天，`sandbox` 均严格为 1 天。`S=0` 不是质量失败：该侧仍可报告 `D-S` 和 `(S-C)/D`，但 `C/S` 保持未定义且不得填零。任何真正的门禁失败都省略阶段率，在 `evidence_limits` 精确记录“installStart 覆盖/时序不足”或对应质量事实；不得改写为整个安装归因不支持，也不得否定已经合法的游戏或其他官方投影家族。
+该阶段只适用于 `game_type=app`。沙盒没有适用的客户端 `installStart` 语义，必须把阶段步骤记为 `skipped_not_applicable`，不得执行本 QuerySpec，也不得因此停止后续官方维度队列。
+
+APK 阶段结果只在以下门禁全部通过时有效：`baseline_day_count=7`；当前与基线官方下载分母 `D` 均为正；官方锚点无重复；正式分子、分母和下载分母内的开始标记均非空且为二值；满足 `C <= D`、`S <= D`；当前与基线观察窗口均严格为 3 天。`S=0` 不是质量失败：该侧仍可报告开始前未完成损耗，但开始后安装完成率保持未定义且不得填零。`C` 中未观测到 `S`、下载分母外观测到 `S`、或 `S` 与诊断事件匹配标记不一致，只作为覆盖/时序风险单列，不使合法集合拆解整体失效。任何真正的门禁失败都省略阶段率，在 `evidence_limits` 精确记录对应质量事实；不得改写为整个安装归因不支持，也不得否定已经合法的游戏或其他官方投影家族。
 
 APK 链路键缺失与跨实体冲突、沙盒轮次缺失与歧义，以及 `T/S/C/E` 覆盖和子集关系只约束阶段或增强诊断，不否定已经闭合的官方 `game_id` 或低基数家族分子分母投影。任一阶段门禁失败时省略对应阶段计算、继续合法的维度贡献分解，并在 `evidence_limits` 记录具体限制；不能改用未登记事件源，也不能输出“官方安装锚点、链路键覆盖与 game_id 必须同时完成”的合并门禁。
 
-先按知识库正式口径确定下载完成分母 `D` 和最终安装完成 `C`，再使用已确认字段聚合安装开始 `S`。只有上述固定门禁通过时才计算：
+先按知识库正式口径确定下载完成分母 `D` 和最终安装完成 `C`，再使用已确认字段聚合安装开始 `S`。阶段损耗使用集合交集，不要求所有官方完成样本都观测到开始事件：
 
 ```text
-开始前未观测损耗 = D - S
-开始后未完成   = S - C
-开始前未观测损耗率 = (D - S) / D
-开始后未完成占下载分母比例 = (S - C) / D
-开始后安装完成率 = C / S
+C_started = D ∩ S ∩ C
+开始前未完成 = D ∩ non-S ∩ non-C
+开始后未完成 = D ∩ S ∩ non-C
+开始前未完成率 = count(D ∩ non-S ∩ non-C) / count(D)
+开始后未完成占下载分母比例 = count(D ∩ S ∩ non-C) / count(D)
+开始后安装完成率 = count(C_started) / count(S)
 ```
 
-用户可见文案必须称 `D - S` 为“未观测到进入 installStart”的样本，不能直接称“没有进入安装”或“用户没有开始安装”，因为事件未上报与真实未发生无法仅凭该字段区分。任一下游状态在缺少上游状态时出现，必须单列为时序/覆盖质量问题，不得为了得到正数损耗而强行设为零或重排事件。
+两个未完成集合必须闭合到官方损耗 `D - C`。`C ∩ non-S` 单列为“官方完成但未观测到 installStart”的覆盖风险，不混入任一损耗桶，也不进入 `C_started / S`。用户可见文案必须称开始前桶为“未观测到 installStart 且最终未完成”的样本，不能直接称“没有进入安装”或“用户没有开始安装”，因为事件未上报与真实未发生无法仅凭该字段区分。任一下游状态在缺少上游状态时出现，必须单列为时序/覆盖质量问题，不得为了得到正数损耗而强行设为零或重排事件。
 
 若需要继续拆安装触发 `T` 或失败信号 `E`，只能在阶段结果已经合法且后文方向增强条件触发时使用已登记事件语义；不得把它们加入固定阶段 QuerySpec 的有效性前置门禁。`E` 只是曾出现失败信号的样本，不默认为最终失败。
 
@@ -311,6 +314,47 @@ os_major_version -> device_brand, storage_headroom_tier
 device_brand -> device_model, os_major_version, storage_headroom_tier
 storage_headroom_tier -> apk_size_tier, device_brand, os_major_version
 ```
+
+## 归因执行清单
+
+注册告警通过根指标预检后，每个调查都必须在 `attribution_execution` 中留下可机读的执行清单。该字段用于 writer 和测评器验证真实覆盖，不是用户可见结论，不能只在 `summary` 或 `evidence_limits` 中用自然语言代替。
+
+告警新增性判为既有异常延续时使用：
+
+```json
+{
+  "mode": "existing_anomaly_stop",
+  "chain": "download",
+  "game_type": "app",
+  "reason": "前一日和七日基线均在同一告警侧，且没有达到 5bp 的新增恶化",
+  "steps": []
+}
+```
+
+进入归因时使用 `mode=full_queue`，并严格按以下清单执行和记录：
+
+```text
+下载 app/sandbox:
+game_id -> is_reserve_auto_download -> device_brand -> channel_group
+-> app_major_version -> os_major_version -> apk_size_tier
+
+APK 安装:
+game_id -> install_stage -> device_brand -> storage_headroom_tier
+-> os_major_version -> apk_size_tier
+
+沙盒安装:
+game_id -> install_stage(skipped_not_applicable) -> device_brand
+-> storage_headroom_tier -> os_major_version -> apk_size_tier
+```
+
+每个 `steps[]` 项固定包含 `step` 和 `status`：
+
+- 候选家族成功时使用 `status=succeeded`，并写非负整数 `candidate_count`；没有候选也写 `candidate_count=0`。
+- 查询、字段、完整性或闭合失败时使用 `status=failed` 和非空 `reason`，随后继续下一步。
+- 只有沙盒的 `install_stage` 可以使用 `status=skipped_not_applicable`，并写非空 `reason`。
+- DView 返回真实 query ID 时可写 `query_id`；没有时省略，不得伪造。质量风险可写为去重后的非空 `warning_codes` 数组。
+
+`completed` 必须使用完整队列且至少一个候选家族成功；`no_dominant_slice` 必须是 `existing_anomaly_stop`，或完整队列中至少一个候选家族成功但没有合法候选。单个步骤失败不能缩短数组。`insufficient_data`、`query_blocked` 和 `query_failed` 若发生在根指标或归因根范围预检，使用 `mode=root_precheck_failed`、非空 `reason` 和空 `steps`；若发生在归因家族，则必须使用完整队列且所有候选家族均为 `failed`。`unsupported_drilldown` 只允许两种执行证据：完整根范围无法从归因源复现时使用 `mode=root_scope_failed`、非空 `reason` 和空 `steps`；或使用完整队列且所有候选家族均为 `failed`。writer 将拒绝缺少步骤、顺序不符、非法跳过或与最终状态矛盾的新结果。
 
 ## 贡献分解
 

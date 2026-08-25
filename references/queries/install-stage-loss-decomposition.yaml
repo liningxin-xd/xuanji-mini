@@ -1,4 +1,4 @@
-version: 2
+version: 3
 id: xuanji-install-stage-loss-decomposition
 domain: android-download-install
 provider: taptap-data-query
@@ -8,9 +8,10 @@ data_lag_days: 3
 retention_days: 45
 parameters:
   business_date: {type: date}
-  game_type: {type: enum, allowed_values: [app, sandbox]}
+  game_type: {type: enum, allowed_values: [app]}
 # business_date is the mature download-complete cohort date. This QuerySpec
-# runs after game_id attribution and never changes the official C / D metric.
+# runs after game_id attribution for APK only and never changes the official
+# C / D metric. Sandbox has no applicable client installStart stage.
 sql: |
   WITH scoped_anchor_rows AS (
     SELECT
@@ -50,9 +51,29 @@ sql: |
             AND has_client_install_start = 1
         THEN 1 ELSE 0 END), 0) AS baseline_start_count,
       COALESCE(SUM(CASE WHEN dt = ${business_date}
+            AND official_download_complete = 1
+            AND COALESCE(has_client_install_start, 0) <> 1
+            AND official_install_complete = 0
+        THEN 1 ELSE 0 END), 0) AS current_pre_start_unfinished_count,
+      COALESCE(SUM(CASE WHEN dt < ${business_date}
+            AND official_download_complete = 1
+            AND COALESCE(has_client_install_start, 0) <> 1
+            AND official_install_complete = 0
+        THEN 1 ELSE 0 END), 0) AS baseline_pre_start_unfinished_count,
+      COALESCE(SUM(CASE WHEN dt = ${business_date}
         THEN official_install_complete ELSE 0 END), 0) AS current_complete_count,
       COALESCE(SUM(CASE WHEN dt < ${business_date}
         THEN official_install_complete ELSE 0 END), 0) AS baseline_complete_count,
+      COALESCE(SUM(CASE WHEN dt = ${business_date}
+            AND official_download_complete = 1
+            AND has_client_install_start = 1
+            AND official_install_complete = 1
+        THEN 1 ELSE 0 END), 0) AS current_started_complete_count,
+      COALESCE(SUM(CASE WHEN dt < ${business_date}
+            AND official_download_complete = 1
+            AND has_client_install_start = 1
+            AND official_install_complete = 1
+        THEN 1 ELSE 0 END), 0) AS baseline_started_complete_count,
       COALESCE(SUM(CASE WHEN dt = ${business_date}
             AND official_download_complete = 1
             AND has_client_install_start = 1
@@ -64,10 +85,12 @@ sql: |
             AND official_install_complete = 0
         THEN 1 ELSE 0 END), 0) AS baseline_started_not_complete_count,
       COALESCE(SUM(CASE WHEN dt = ${business_date}
+            AND official_download_complete = 1
             AND official_install_complete = 1
             AND COALESCE(has_client_install_start, 0) <> 1
         THEN 1 ELSE 0 END), 0) AS current_complete_without_start_count,
       COALESCE(SUM(CASE WHEN dt < ${business_date}
+            AND official_download_complete = 1
             AND official_install_complete = 1
             AND COALESCE(has_client_install_start, 0) <> 1
         THEN 1 ELSE 0 END), 0) AS baseline_complete_without_start_count,
@@ -165,8 +188,12 @@ sql: |
     baseline_download_count,
     current_start_count,
     baseline_start_count,
+    current_pre_start_unfinished_count,
+    baseline_pre_start_unfinished_count,
     current_complete_count,
     baseline_complete_count,
+    current_started_complete_count,
+    baseline_started_complete_count,
     current_download_count - current_start_count
       AS current_no_observed_start_count,
     baseline_download_count - baseline_start_count
@@ -177,14 +204,24 @@ sql: |
       / NULLIF(current_download_count, 0) AS current_no_observed_start_rate,
     (baseline_download_count - baseline_start_count) * 1.0
       / NULLIF(baseline_download_count, 0) AS baseline_no_observed_start_rate,
+    current_pre_start_unfinished_count * 1.0
+      / NULLIF(current_download_count, 0) AS current_pre_start_unfinished_rate,
+    baseline_pre_start_unfinished_count * 1.0
+      / NULLIF(baseline_download_count, 0) AS baseline_pre_start_unfinished_rate,
     current_started_not_complete_count * 1.0
       / NULLIF(current_download_count, 0) AS current_started_not_complete_share,
     baseline_started_not_complete_count * 1.0
       / NULLIF(baseline_download_count, 0) AS baseline_started_not_complete_share,
-    current_complete_count * 1.0 / NULLIF(current_start_count, 0)
+    current_started_complete_count * 1.0 / NULLIF(current_start_count, 0)
       AS current_post_start_completion_rate,
-    baseline_complete_count * 1.0 / NULLIF(baseline_start_count, 0)
+    baseline_started_complete_count * 1.0 / NULLIF(baseline_start_count, 0)
       AS baseline_post_start_completion_rate,
+    current_pre_start_unfinished_count + current_started_not_complete_count
+      - (current_download_count - current_complete_count)
+      AS current_official_loss_closure_gap,
+    baseline_pre_start_unfinished_count + baseline_started_not_complete_count
+      - (baseline_download_count - baseline_complete_count)
+      AS baseline_official_loss_closure_gap,
     current_complete_without_start_count,
     baseline_complete_without_start_count,
     current_start_without_download_count,
@@ -215,18 +252,26 @@ output:
     baseline_download_count: integer
     current_start_count: integer
     baseline_start_count: integer
+    current_pre_start_unfinished_count: integer
+    baseline_pre_start_unfinished_count: integer
     current_complete_count: integer
     baseline_complete_count: integer
+    current_started_complete_count: integer
+    baseline_started_complete_count: integer
     current_no_observed_start_count: integer
     baseline_no_observed_start_count: integer
     current_started_not_complete_count: integer
     baseline_started_not_complete_count: integer
     current_no_observed_start_rate: number
     baseline_no_observed_start_rate: number
+    current_pre_start_unfinished_rate: number
+    baseline_pre_start_unfinished_rate: number
     current_started_not_complete_share: number
     baseline_started_not_complete_share: number
     current_post_start_completion_rate: number
     baseline_post_start_completion_rate: number
+    current_official_loss_closure_gap: integer
+    baseline_official_loss_closure_gap: integer
     current_complete_without_start_count: integer
     baseline_complete_without_start_count: integer
     current_start_without_download_count: integer
@@ -254,18 +299,26 @@ datasets:
       - baseline_download_count
       - current_start_count
       - baseline_start_count
+      - current_pre_start_unfinished_count
+      - baseline_pre_start_unfinished_count
       - current_complete_count
       - baseline_complete_count
+      - current_started_complete_count
+      - baseline_started_complete_count
       - current_no_observed_start_count
       - baseline_no_observed_start_count
       - current_started_not_complete_count
       - baseline_started_not_complete_count
       - current_no_observed_start_rate
       - baseline_no_observed_start_rate
+      - current_pre_start_unfinished_rate
+      - baseline_pre_start_unfinished_rate
       - current_started_not_complete_share
       - baseline_started_not_complete_share
       - current_post_start_completion_rate
       - baseline_post_start_completion_rate
+      - current_official_loss_closure_gap
+      - baseline_official_loss_closure_gap
       - current_complete_without_start_count
       - baseline_complete_without_start_count
       - current_start_without_download_count
@@ -295,18 +348,26 @@ quality:
     baseline_download_count: {min: 0, allow_null: false}
     current_start_count: {min: 0, allow_null: false}
     baseline_start_count: {min: 0, allow_null: false}
+    current_pre_start_unfinished_count: {min: 0, allow_null: false}
+    baseline_pre_start_unfinished_count: {min: 0, allow_null: false}
     current_complete_count: {min: 0, allow_null: false}
     baseline_complete_count: {min: 0, allow_null: false}
+    current_started_complete_count: {min: 0, allow_null: false}
+    baseline_started_complete_count: {min: 0, allow_null: false}
     current_no_observed_start_count: {min: 0, allow_null: false}
     baseline_no_observed_start_count: {min: 0, allow_null: false}
     current_started_not_complete_count: {min: 0, allow_null: false}
     baseline_started_not_complete_count: {min: 0, allow_null: false}
     current_no_observed_start_rate: {min: 0, max: 1, allow_null: true}
     baseline_no_observed_start_rate: {min: 0, max: 1, allow_null: true}
+    current_pre_start_unfinished_rate: {min: 0, max: 1, allow_null: true}
+    baseline_pre_start_unfinished_rate: {min: 0, max: 1, allow_null: true}
     current_started_not_complete_share: {min: 0, max: 1, allow_null: true}
     baseline_started_not_complete_share: {min: 0, max: 1, allow_null: true}
     current_post_start_completion_rate: {min: 0, max: 1, allow_null: true}
     baseline_post_start_completion_rate: {min: 0, max: 1, allow_null: true}
+    current_official_loss_closure_gap: {min: 0, max: 0, allow_null: false}
+    baseline_official_loss_closure_gap: {min: 0, max: 0, allow_null: false}
     current_complete_without_start_count: {min: 0, allow_null: false}
     baseline_complete_without_start_count: {min: 0, allow_null: false}
     current_start_without_download_count: {min: 0, allow_null: false}
