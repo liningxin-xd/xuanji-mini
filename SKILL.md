@@ -10,16 +10,18 @@ description: 接收 DataWorks DQC 的 TapTap Android 下载或安装链路告警
 ## 1. 解析告警
 
 - 只读取输入中实际存在的字段；保留未知字段但不猜含义，忽略 `$velocityCount)` 模板残留。
-- 按以下顺序回退：项目 `dqcEntityQuality.projectName -> payload.projectName`；对象表 `rule.tableName -> dqcEntityQuality.entityName`；分区 `rule.actualExpression -> dqcEntityQuality.actualExpression`；任务 ID `rule.taskId -> dqcEntityQuality.taskId`；比较符 `rule.op -> rule.operator`；阈值 `rule.expectValue`，缺失时仅把 `criticalThreshold` 或 `warningThreshold` 作为补充。
+- 按以下顺序回退：项目 `dqcEntityQuality.projectName -> payload.projectName`；对象表 `rule.tableName -> dqcEntityQuality.entityName`；分区 `rule.actualExpression -> dqcEntityQuality.actualExpression`；任务 ID `rule.taskId -> dqcEntityQuality.taskId`；通过条件比较符 `rule.op -> rule.operator`，记为 `pass_operator`；阈值 `rule.expectValue`，缺失时仅把 `criticalThreshold` 或 `warningThreshold` 作为补充。DataWorks payload 的比较符描述“校验通过”，不是“触发告警”。
 - 优先取规则名 `【】` 内文本作为 `metric_hint`；否则只去除明显的时间、趋势和阈值修饰语。
 - 将输入 `ruleChecks` 的位置视为零基索引；后续每个调查通过 `rule_indexes` 原样指出自己覆盖的规则位置，不重排规则。
 - 不把所有 `checkResult` 当成业务指标值。“连续 N 周下降”等趋势规则中的值可能只是命中标志，真实值必须查询取得。
 
 ## 2. 路由已注册告警
 
-对象表为 `tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d` 或省略项目名的同名表时，在指标匹配前必须完整读取 [DQC 告警路由表](references/dqc-alert-routing.md)，逐条匹配已注册档案。按路由表固定得到 APK/沙盒范围、链路阶段、规则类型、监控字段、监控分子/分母字段、知识库指标名和 Playbook ID；不得让调度层或模型临时推断这些映射。
+对象表为 `tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d` 或省略项目名的同名表时，在指标匹配前必须完整读取 [DQC 告警路由表](references/dqc-alert-routing.md)，逐条匹配已注册档案。按路由表固定得到 APK/沙盒范围、链路阶段、规则类型、监控字段、监控分子/分母字段、`alert_operator`、知识库指标名和 Playbook ID；不得让调度层或模型临时推断这些映射。payload 的 `pass_operator` 与档案的 `alert_operator` 互补时表示同一条规则的正常两面，不是口径冲突。
 
 同一对象表中未命中注册档案的规则返回 `insufficient_definition`，不得模糊匹配到最相似档案。注册档案声明知识库定义缺失时也返回 `insufficient_definition`，不得把路由表当成指标定义。其他对象表继续执行通用知识库匹配，但只有存在明确适用的 Playbook 时才可进入归因。
+
+规则名已经唯一命中注册档案后，payload 的字段、比较符或阈值与档案存在无法解释的差异时，只记录非阻断 profile warning，并继续使用已注册范围和知识库定义执行根指标复核与归因。不得仅因这些差异返回 `insufficient_definition`，也不得丢弃已经完成的调查结果；真实值、原始比较符和阈值仍原样保留在 `alert_rules` 中。后续根指标预检若确实无法对齐当前值、方向、范围或日期，再按 Playbook 的停止条件返回对应状态。
 
 路由完成后，按“项目 + 对象表 + 实际分区 + 知识库标准指标 + game_type”合并同一调查，保留全部原规则及其 `rule_indexes`。同一指标的绝对值、相对过去 7 日和三周趋势规则可以合并；APK 与沙盒不得合并。不同调查串行执行，一个调查受阻不得阻塞其他调查。
 

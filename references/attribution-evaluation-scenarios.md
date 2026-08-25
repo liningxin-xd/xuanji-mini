@@ -83,6 +83,8 @@
 | ID | 场景 | Expected |
 |---|---|---|
 | `C-01` | 路由未注册或知识库未唯一命中 | `insufficient_definition`，不执行归因 |
+| `C-01a` | 规则名已注册，payload 的通过条件与档案告警条件互补 | 正常路由，不记录警告，不得返回 `insufficient_definition` |
+| `C-01b` | 规则名已注册，但字段、比较符或阈值存在其他 profile 差异 | 记录非阻断警告并继续根指标复核与归因，不得丢弃调查结果 |
 | `C-02` | 告警分区到业务日期映射失败 | `insufficient_definition` |
 | `C-03` | 正确业务日期的目标或基线分区不成熟 | `insufficient_data` |
 | `C-04` | 根值与告警在合法精度和口径下仍无法对齐 | `insufficient_definition` |

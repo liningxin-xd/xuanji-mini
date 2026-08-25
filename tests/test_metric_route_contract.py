@@ -20,6 +20,7 @@ DOWNLOAD_PRIMARY_TEMPLATE_PATH = (
     ROOT / "references" / "queries" / "download-primary-attribution-template.md"
 )
 PLAYBOOK_PATH = ROOT / "references" / "download-install-playbook.md"
+SKILL_PATH = ROOT / "SKILL.md"
 QUERY_ASSETS = {
     "下载完成率": (
         DOWNLOAD_ATTRIBUTION_PATH,
@@ -76,6 +77,31 @@ def _route_rows():
 
 
 class MetricRouteContractTest(unittest.TestCase):
+    def test_payload_pass_operators_are_complements_of_alert_operators(self):
+        routing = ROUTING_PATH.read_text(encoding="utf-8")
+        skill = SKILL_PATH.read_text(encoding="utf-8")
+        expected_pairs = {
+            "<": ">=",
+            "<=": ">",
+            ">": "<=",
+            ">=": "<",
+            "==": "!=",
+            "!=": "==",
+        }
+
+        for alert_operator, pass_operator in expected_pairs.items():
+            self.assertIn(
+                f"| `{alert_operator}` | `{pass_operator}` |",
+                routing,
+            )
+        self.assertIn("告警条件 (`alert_operator`)", routing)
+        self.assertIn("通过条件比较符", skill)
+        self.assertIn("不得仅因这些差异返回 `insufficient_definition`", skill)
+        self.assertNotIn(
+            "比较符不一致或字段不一致时返回 `insufficient_definition`",
+            routing,
+        )
+
     def test_all_registered_routes_have_canonical_metrics(self):
         rows = _route_rows()
 

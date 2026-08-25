@@ -18,14 +18,28 @@ ads_dmg_quality_platform_download_chain_monitor_1d
 1. 从规则名 `【】` 中提取并仅做大小写、空格、全半角和 `->`/`→` 归一化的 `metric_hint`。
 2. `metric_hint` 以 `apk` 开头时固定 `game_type=app`；以 `沙盒` 开头时固定 `game_type=sandbox`。不得根据监控字段区分，因为两种范围复用字段名。
 3. 按规则名后缀分类：先匹配“连续 3 周下降”为 `trend_3w`，再匹配“对比过去 7 天均值”为 `relative_7d`，最后匹配“最近 1 天”为 `absolute_1d`。
-4. 使用“对象表 + metric_hint + rule_kind”命中下表。payload 含字段级范围时，它必须与 `monitor_field` 一致；不一致立即停止。
-5. `observed_rule_id` 和阈值只用于识别当前已知配置，不作为指标定义，也不得覆盖 payload 中的真实值。规则重建导致 ID 变化时，只要其他注册字段一致仍可路由。
-6. 未命中档案、比较符不一致或字段不一致时返回 `insufficient_definition`，不得选择相似档案。
-7. `monitor_numerator_field` 和 `monitor_denominator_field` 只登记监控表中用于复现物化率的字段；必须与知识库正式技术口径一致，不得反向充当指标定义。
+4. 使用“对象表 + metric_hint + rule_kind”命中下表。表内条件是触发告警的 `alert_operator`；DataWorks payload 的 `rule.op -> rule.operator` 是校验通过的 `pass_operator`，两者语义相反。
+5. `pass_operator` 与 `alert_operator` 符合下表互补关系时是正常配置，不记录警告。payload 的字段、比较符或阈值存在其他差异时记录非阻断 profile warning，继续使用已注册范围和知识库定义分析，不得仅因此返回 `insufficient_definition` 或丢弃调查结果。
+6. `observed_rule_id` 和阈值只用于识别当前已知配置，不作为指标定义，也不得覆盖 payload 中的真实值。规则重建导致 ID 变化时，只要规则名仍唯一命中档案就继续路由；差异按上一条记录警告。
+7. 只有规则名未命中档案或档案声明的知识库定义缺失时，才在路由阶段返回 `insufficient_definition`；不得选择相似档案。后续根指标预检仍按 Playbook 独立验证当前值、方向、范围和日期。
+8. `monitor_numerator_field` 和 `monitor_denominator_field` 只登记监控表中用于复现物化率的字段；必须与知识库正式技术口径一致，不得反向充当指标定义。
+
+## 比较符语义
+
+| `alert_operator` | DataWorks `pass_operator` |
+|---|---|
+| `<` | `>=` |
+| `<=` | `>` |
+| `>` | `<=` |
+| `>=` | `<` |
+| `==` | `!=` |
+| `!=` | `==` |
+
+例如完成率告警条件 `< 0.75` 对应 payload 通过条件 `>= 0.75`；失败率告警条件 `> 0.01` 对应 payload 通过条件 `<= 0.01`。两组分别描述告警侧和通过侧，不得直接用字符串相等判断是否匹配。
 
 ## 已注册档案
 
-| 范围 | stage | metric_hint | rule_kind | monitor_field | monitor_numerator_field | monitor_denominator_field | 已知条件 | observed_rule_id | 知识库指标 |
+| 范围 | stage | metric_hint | rule_kind | monitor_field | monitor_numerator_field | monitor_denominator_field | 告警条件 (`alert_operator`) | observed_rule_id | 知识库指标 |
 |---|---|---|---|---|---|---|---|---:|---|
 | app | download | `apk下载完成率` | `absolute_1d` | `game_download_complete_rate_1d` | `game_download_complete_device_num_1d` | `game_download_device_num_1d` | `< 0.80` | 28723123 | `下载完成率` |
 | app | download | `apk下载完成率` | `relative_7d` | `wave_game_download_complete_rate_prev_7d` | `game_download_complete_device_num_1d` | `game_download_device_num_1d` | `< 0.98` | 28723124 | `下载完成率` |
