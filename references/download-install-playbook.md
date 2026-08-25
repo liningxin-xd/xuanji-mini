@@ -354,7 +354,21 @@ game_id -> install_stage(skipped_not_applicable) -> device_brand
 - 只有沙盒的 `install_stage` 可以使用 `status=skipped_not_applicable`，并写非空 `reason`。
 - DView 返回真实 query ID 时可写 `query_id`；没有时省略，不得伪造。质量风险可写为去重后的非空 `warning_codes` 数组。
 
-`completed` 必须使用完整队列且至少一个候选家族成功；`no_dominant_slice` 必须是 `existing_anomaly_stop`，或完整队列中至少一个候选家族成功但没有合法候选。单个步骤失败不能缩短数组。`insufficient_data`、`query_blocked` 和 `query_failed` 若发生在根指标或归因根范围预检，使用 `mode=root_precheck_failed`、非空 `reason` 和空 `steps`；若发生在归因家族，则必须使用完整队列且所有候选家族均为 `failed`。`unsupported_drilldown` 只允许两种执行证据：完整根范围无法从归因源复现时使用 `mode=root_scope_failed`、非空 `reason` 和空 `steps`；或使用完整队列且所有候选家族均为 `failed`。writer 将拒绝缺少步骤、顺序不符、非法跳过或与最终状态矛盾的新结果。
+实际执行二级归因时，`attribution_execution` 另写最多一个 `secondary_steps[]` 项：
+
+```json
+{
+  "parent_dimension": "game_id",
+  "parent_value": "12345",
+  "step": "device_brand",
+  "status": "succeeded",
+  "candidate_count": 1
+}
+```
+
+父切片身份使用非空 `parent_value` 或 `parent_label`，父维度必须是一级 `steps` 中候选数为正的家族，`step` 必须命中当前链路登记的父子关系。成功时写非负 `candidate_count`；失败时写非空 `reason`。真实 query ID 和质量风险沿用一级步骤字段规则。未执行二级时省略 `secondary_steps` 或写空数组。
+
+`completed` 必须使用完整队列，且一级与二级 `candidate_count` 合计为正；完整队列的 `no_dominant_slice` 要求至少一个一级家族成功且所有一级、二级候选数均为零。每个 `top_findings[]` 必须写 `attribution_level=primary|secondary` 并回勾候选数为正的对应步骤；二级 finding 还要回勾相同父维度和父切片身份，写出数量不得超过对应 `candidate_count`。`no_dominant_slice` 的另一合法形态是 `existing_anomaly_stop`。单个步骤失败不能缩短数组。`insufficient_data`、`query_blocked` 和 `query_failed` 若发生在根指标或归因根范围预检，使用 `mode=root_precheck_failed`、非空 `reason` 和空 `steps`；若发生在归因家族，则必须使用完整队列且所有候选家族均为 `failed`。`unsupported_drilldown` 只允许两种执行证据：完整根范围无法从归因源复现时使用 `mode=root_scope_failed`、非空 `reason` 和空 `steps`；或使用完整队列且所有候选家族均为 `failed`。writer 将拒绝缺少步骤、顺序不符、非法跳过、候选与结论不闭合或 finding 无对应执行证据的新结果。
 
 ## 贡献分解
 

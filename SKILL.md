@@ -72,7 +72,7 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。单个维度家族失败是家族级限制：该家族不得产生候选，但只要根指标和归因数据源的完整根范围仍合法，就必须记录限制并按 Playbook 继续后续已登记家族，不得直接结束整个调查。只有根范围或全部已登记归因数据源不可用时才返回受阻状态。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
 
-已注册下载/安装告警通过根指标预检后，必须按 Playbook 生成 `attribution_execution`。进入归因时先冻结完整 `steps` 顺序，每完成一步立即写入其真实 `status`、`candidate_count` 或 `reason`，不能等到撰写结论时根据已有候选反推执行记录。单步失败仍保留在原位置并继续；不得省略失败项、重排步骤、把未执行写成成功，或因已经找到游戏候选而截断固定队列。
+已注册下载/安装告警通过根指标预检后，必须按 Playbook 生成 `attribution_execution`。进入归因时先冻结完整 `steps` 顺序，每完成一步立即写入其真实 `status`、`candidate_count` 或 `reason`，不能等到撰写结论时根据已有候选反推执行记录。单步失败仍保留在原位置并继续；不得省略失败项、重排步骤、把未执行写成成功，或因已经找到游戏候选而截断固定队列。实际执行二级归因时，另在 `secondary_steps` 中记录唯一的父维度、父切片身份、子维度、状态和候选数；未执行时省略该字段或写空数组，不得把二级候选伪装成一级候选。
 
 ## 7. 停止并输出
 
@@ -98,7 +98,7 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 `completed` 和 `no_dominant_slice` 调查必须使用卡片的规范字段名，并包含 `YYYY-MM-DD` 的 `analysis_date`、标准指标 `metric`、有限数值 `current_value`、`baseline_value`、`delta_bp`、非空 `summary`、非空字符串数组 `evidence_limits` 和非空 `recommended_action`。其他受阻状态必须包含非空 `reason` 和 `action`；只有指标定义和日期对齐已经完成时才可附带 `analysis_date`，`insufficient_definition` 不得猜测。不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层会拒绝结果。
 
-`top_findings` 只保存实际完成贡献计算、通过闭合与质量检查并达到 Playbook 候选门槛的具体切片，不能保存整体指标变化或待执行事项。每项必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `adverse_impact_bp` 和非空 `finding`。整体变化只写入 `summary` 或顶层 `finding`。存在至少一个合法切片时才可返回 `completed`；至少一个一级家族合法、已按 Playbook 尝试完全部触发的后续家族但没有合法切片时返回 `no_dominant_slice` 并省略 `top_findings`；单个家族失败不算“规定下钻未完成”。只有根范围或全部已登记家族受阻时才按实际原因返回 Playbook 的受阻状态，不得返回 `completed`。
+`top_findings` 只保存实际完成贡献计算、通过闭合与质量检查并达到 Playbook 候选门槛的具体切片，不能保存整体指标变化或待执行事项。每项必须包含非空 `dimension`、非空 `label` 或 `value`、`attribution_level=primary|secondary`、有限数值 `adverse_impact_bp` 和非空 `finding`。一级 finding 的 `dimension` 必须回勾 `steps` 中候选数为正的同名家族；二级 finding 还必须包含与 `secondary_steps` 完全一致的 `parent_dimension` 及非空 `parent_label` 或 `parent_value`。每个家族写出的 finding 数不得超过对应 `candidate_count`。整体变化只写入 `summary` 或顶层 `finding`。存在至少一个合法切片且执行清单中至少一个一级或二级 `candidate_count` 为正时才可返回 `completed`；完成队列后的 `no_dominant_slice` 要求全部候选数均为零并省略 `top_findings`。单个家族失败不算“规定下钻未完成”。只有根范围或全部已登记家族受阻时才按实际原因返回 Playbook 的受阻状态，不得返回 `completed`。
 
 `counterfactual` 只在实际执行剔除计算后输出，且必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `removal_delta_bp`、有限数值 `restoration_ratio` 和非空 `finding`。未执行、未触发或无法计算时省略整个字段，把证据边界写入 `evidence_limits`；不得用 `counterfactual.finding` 描述“尚未执行”。`no_dominant_slice` 不得包含 `counterfactual`。
 

@@ -20,6 +20,7 @@ INSTALL_POST_START_VERSION_TEMPLATE = (
 )
 SECONDARY_ATTRIBUTION_TEMPLATE = QUERY_ROOT / "secondary-attribution-template.md"
 DIMENSION_REGISTRY = QUERY_ROOT / "primary-attribution-dimensions.md"
+SCENARIOS_PATH = ROOT / "references" / "attribution-evaluation-scenarios.md"
 
 
 class AttributionFallbackContractTest(unittest.TestCase):
@@ -64,6 +65,11 @@ class AttributionFallbackContractTest(unittest.TestCase):
             self.playbook,
         )
         self.assertIn("已经找到游戏候选而截断固定队列", self.skill)
+        self.assertIn("`secondary_steps`", self.skill)
+        self.assertIn("`attribution_level=primary|secondary`", self.skill)
+        self.assertIn("一级与二级 `candidate_count` 合计为正", self.playbook)
+        self.assertIn("所有一级、二级候选数均为零", self.playbook)
+        self.assertIn("finding 无对应执行证据", self.playbook)
 
     def test_download_keeps_game_and_reserve_as_first_priority(self):
         fast_families = self.playbook.index("先并行快判两个独立维度家族")
@@ -193,6 +199,9 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertIn("official_observation_days", content)
         self.assertIn("is_metric_anchor = 1", content)
         self.assertIn("禁止选择 `install_event_app_major_version`", content)
+        self.assertIn("无论 `game_id` 是否形成合法结果", content)
+        self.assertIn("都不得省略本模板或缩短队列", content)
+        self.assertNotIn("`game_id` 未形成合法结果", content)
         for field in (
             "overall_current_dimension_match_rate",
             "overall_baseline_dimension_match_rate",
@@ -211,6 +220,15 @@ class AttributionFallbackContractTest(unittest.TestCase):
             "apk_size_tier          -> apk_size_tier"
         )
         self.assertIn(expected_registry_order, registry)
+
+    def test_evaluation_scenarios_require_the_same_unconditional_queues(self):
+        scenarios = SCENARIOS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("仍完成固定五维队列", scenarios)
+        self.assertIn("无论是否已形成合法候选", scenarios)
+        self.assertNotIn("不强制横扫", scenarios)
+        self.assertNotIn("游戏不合法、无候选、解释不足", scenarios)
+        self.assertIn("当前执行清单验收字段", scenarios)
 
     def test_primary_risk_evidence_never_stops_the_dimension_queue(self):
         self.assertIn("不构成拒绝当前结果或停止后续维度的硬门禁", self.playbook)
