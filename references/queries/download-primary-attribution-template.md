@@ -8,7 +8,7 @@
 - 禁止 `CROSS JOIN`、逗号连接、`JOIN ... ON 1 = 1`，也禁止把总体汇总 CTE 连接回分桶结果。
 - 总体数值通过分桶聚合后的窗口函数获得。不要把聚合函数与窗口函数写在同一 CTE 层级。
 - `business_date` 绑定已经确定的 `analysis_dt`；基线固定为此前 7 个完整业务日。
-- 模板中的 `__DIMENSION_VALUE_EXPR__` 和 `__DIMENSION_LABEL_EXPR__` 必须按下方同一维度家族成对替换后才能执行。不得把占位符原样提交给 DView。
+- 模板中的 `__DIMENSION_SOURCE_FIELD__`、`__DIMENSION_VALUE_EXPR__` 和 `__DIMENSION_LABEL_EXPR__` 必须按 [一级归因维度登记](primary-attribution-dimensions.md) 为同一维度家族成组替换后才能执行。每次只选择当前家族的一个源字段，不得把占位符原样提交给 DView。
 - 模板不负责高基数截断。结果可能超过门禁时，按 Playbook 的样本、占比和质量规则增加 `__other_below_threshold__` 闭合残差桶；禁止使用业务 Top 或 `LIMIT` 截断后继续归因。
 
 ## 固定骨架
@@ -17,9 +17,7 @@
 WITH scoped_rows AS (
   SELECT
     dt,
-    game_id,
-    game_name,
-    is_reserve_auto_download,
+    __DIMENSION_SOURCE_FIELD__ AS dimension_source,
     download_sample_flag,
     is_download_complete
   FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
@@ -80,19 +78,19 @@ ORDER BY current_denominator DESC, dimension_value ASC
 
 ## 维度替换
 
-`is_reserve_auto_download` 家族：
+`is_reserve_auto_download` 家族使用以下专用表达式；其余五个低基数家族使用 [一级归因维度登记](primary-attribution-dimensions.md) 的通用表达式和固定顺序：
 
 ```sql
 __DIMENSION_VALUE_EXPR__ = CASE
-  WHEN is_reserve_auto_download IN (0, 1)
-    THEN CAST(is_reserve_auto_download AS STRING)
-  WHEN is_reserve_auto_download IS NULL THEN '__none__'
-  ELSE CONCAT('invalid_', CAST(is_reserve_auto_download AS STRING))
+  WHEN dimension_source IN (0, 1)
+    THEN CAST(dimension_source AS STRING)
+  WHEN dimension_source IS NULL THEN '__none__'
+  ELSE CONCAT('invalid_', CAST(dimension_source AS STRING))
 END
 __DIMENSION_LABEL_EXPR__ = MAX(CASE
-  WHEN is_reserve_auto_download = 1 THEN 'reserve_auto_download'
-  WHEN is_reserve_auto_download = 0 THEN 'other_download'
-  WHEN is_reserve_auto_download IS NULL THEN '__none__'
+  WHEN dimension_source = 1 THEN 'reserve_auto_download'
+  WHEN dimension_source = 0 THEN 'other_download'
+  WHEN dimension_source IS NULL THEN '__none__'
   ELSE 'invalid'
 END)
 ```

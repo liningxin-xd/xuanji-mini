@@ -103,9 +103,9 @@ analysis_dt = 2026-08-17
 - 归因数据在下载或安装正式逻辑粒度上唯一；只有存在已定义的去重键和确定性保留规则时才可去重。
 - 目标与基线的字段语义、分桶边界和标签生成时点一致，历史缓存或当前快照不得回填历史。
 - 维度数据覆盖完整根范围，分子、分母和行数能回勾根调查，该家族能闭合到大盘变化。
-- APK 安装家族还要比较当前与基线的 `chain_id` 非空率、唯一性和跨设备/游戏冲突率；沙盒同样检查 `install_round_id` 的覆盖与歧义。
+- 安装家族的官方分子分母投影只以 `is_metric_anchor=1`、`official_download_complete` 和 `official_install_complete` 检查唯一性与闭合。APK 的 `chain_id` 非空率、唯一性和跨设备/游戏冲突率，以及沙盒 `install_round_id` 的覆盖与歧义，只门禁依赖链路键的阶段或增强诊断；链路键与阶段质量不得作为官方投影的前置门禁。
 
-家族门禁不通过时不得从该家族产生候选。该家族若是本轮规定归因必须完成的路径，按无合法下钻数据源处理；只有 Playbook 明确允许跳过的家族才可继续，并把真实边界写入 `evidence_limits`。这些是一级及后续归因的家族门禁，不是判断既有异常延续的前置查询。
+家族门禁不通过时不得从该家族产生候选，并把家族名和真实限制写入 `evidence_limits`。只要根范围的正式分子分母仍合法，单个家族的缺字段、空桶、重复、覆盖不足、回勾失败或贡献不闭合都不能证明整个归因数据源不可用；必须继续下一个已登记维度家族。只有完整根范围本身无法从归因数据源复现，或按对应链路的固定顺序尝试后没有任何已登记家族可执行时，才按真实原因返回 `insufficient_data`、`query_blocked`、`query_failed` 或 `unsupported_drilldown`。这些是一级及后续归因的家族门禁，不是判断既有异常延续的前置查询。
 
 ### 告警新增性
 
@@ -160,7 +160,7 @@ dt + platform + game_type + device_id + game_id
 | `下载失败次数比率` | [下载失败次数比率游戏归因 QuerySpec](queries/download-failed-pv-rate-game-attribution.yaml) | [下载失败次数比率一级归因模板](queries/download-failed-pv-rate-primary-attribution-template.md) |
 | `下载人为停止率` | [下载人为停止率游戏归因 QuerySpec](queries/download-stop-rate-game-attribution.yaml) | [下载人为停止率一级归因模板](queries/download-stop-rate-primary-attribution-template.md) |
 
-执行下载 `game_id` 一级归因时只完整读取当前标准指标绑定的 QuerySpec，绑定 `business_date=analysis_dt` 和当前 `game_type`，不得读取其他指标的 QuerySpec、重新手写或改组 SQL。执行 `is_reserve_auto_download` 或后续低基数家族前，同样只读取当前指标绑定的模板；每次只能选择一个 Playbook 已登记的维度家族替换模板中的维度表达式。标准指标不在上表时停止，不得改绑最相似指标。每组专用资产固定正式宽表、日期、平台、APK/沙盒范围、分子分母和“分桶聚合后再用窗口总量”的 CTE 结构，但不替代知识库指标定义、数据完整性门禁、候选门槛或贡献计算。
+执行下载 `game_id` 一级归因时只完整读取当前标准指标绑定的 QuerySpec，绑定 `business_date=analysis_dt` 和当前 `game_type`，不得读取其他指标的 QuerySpec、重新手写或改组 SQL。执行 `is_reserve_auto_download` 或后续低基数家族前，同样只读取当前指标绑定的模板，并按模板指向的 [一级维度登记](queries/primary-attribution-dimensions.md) 选择一个 Playbook 已登记的维度家族；每次只能替换一个维度表达式。标准指标不在上表时停止，不得改绑最相似指标。每组专用资产固定正式宽表、日期、平台、APK/沙盒范围、分子分母和“分桶聚合后再用窗口总量”的 CTE 结构，但不替代知识库指标定义、数据完整性门禁、候选门槛或贡献计算。
 
 ### 一级顺序
 
@@ -175,7 +175,7 @@ is_reserve_auto_download
 
 两个规定家族的合法结果必须分别保留到候选选择结束，不能因为 `game_id` 已经达到反事实主导条件而省略或丢弃 `is_reserve_auto_download` 家族。两者都形成合法候选且达到后文跨维度候选重叠门槛时，必须执行一次完整四象限验证；该验证只校准共享范围，不创建交叉候选，也不改变两个原始贡献。
 
-游戏不能充分解释或剔除后异常仍明显时，再检查：
+完成两个快判家族后，满足任一条件都必须进入后续低基数一级：任一快判家族未形成合法结果、两个家族都没有合法候选、游戏不能充分解释，或剔除后异常仍明显。随后检查：
 
 ```text
 apk_size_tier
@@ -185,7 +185,7 @@ os_major_version
 device_brand
 ```
 
-实际执行时按 `apk_size_tier -> channel_group -> app_major_version -> os_major_version -> device_brand` 的稳定顺序即可；候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
+实际执行固定按 `apk_size_tier -> channel_group -> app_major_version -> os_major_version -> device_brand` 的稳定顺序，逐个尝试完上述五个家族；单个家族查询、完整性或闭合失败只淘汰该家族并继续下一个，不能提前返回 `unsupported_drilldown`。候选最终按单项全局不利影响排序。`network_type_group`、`device_model`、存储和细地域默认只做二级，禁止首轮无方向横扫。
 
 ### 终态路由
 
@@ -240,63 +240,69 @@ APK:  dt + platform + game_type + device_id + game_id + chain_id
 
 物理分区 `dt` 表示下载完成 cohort 日，不是安装结果发生日。APK 与沙盒观察窗口可能不同，严格使用知识库定义。APK 只用可靠 `chain_id` 关联；缺失链路进入质量桶，禁止用同日或邻近事件兜底。沙盒多轮歧义进入质量桶。
 
-`has_client_install_trigger`、`has_client_install_start`、安装完成和安装失败必须区分；客户端触发或开始均不能表述为系统安装器已成功拉起。可用存储字段必须同时检查覆盖率。
+`has_client_install_trigger`、`has_client_install_start`、安装完成和安装失败必须区分；客户端触发或开始均不能表述为系统安装器已成功拉起。可用存储字段必须同时检查覆盖率。`install_event_app_major_version` 是安装事件侧版本，只覆盖已经匹配到安装事件的样本；它不得直接拆分从下载完成开始的官方完整分母，也不得把没有安装事件版本的样本合并成普通“未知版本”后归因。
 
 ### 一级顺序
 
-先查：
+第一优先级固定完整读取 [安装游戏归因 QuerySpec](queries/install-game-attribution.yaml) 查：
 
 ```text
 game_id
 ```
 
-游戏解释不足时检查：
+无论 `game_id` 是否形成候选，游戏家族完成后第二步都必须执行后文独立的 `D/S/C` 安装阶段拆解。阶段拆解不得移动到游戏归因之前，也不得因为游戏候选显著而省略；它只回答损耗主要发生在安装开始前还是开始后，不覆盖游戏优先结论。
+
+`game_id` 未形成合法结果、没有合法候选、解释不足或剔除后异常仍明显时，在阶段拆解之后完整读取 [安装低基数一级归因模板](queries/install-primary-attribution-template.md)，再检查官方完整分母可用的维度：
 
 ```text
 apk_size_tier
-app_major_version
 os_major_version
 device_brand
 storage_headroom_tier
 ```
 
+固定按 `apk_size_tier -> os_major_version -> device_brand -> storage_headroom_tier` 的顺序逐个尝试完上述四个家族。单个家族缺字段、查询失败、完整性不足或贡献不闭合时，记录该家族限制并继续下一个；只要官方根投影合法，就不得把单个家族失败升级为整个安装下钻不支持。阶段拆解显示 `S -> C` 同向不利变化达到 5bp 时，另按后文规则检查安装事件版本；不得把该版本检查插到 `game_id` 之前，也不得让它替代上述官方投影家族。
+
 人工解释顺序为 APK/沙盒、游戏贡献、游戏包版本/包大小、是否进入 `installStart`、完成/失败及失败原因、安装器类型/客户端版本、机型/OS/剩余存储。下载专属的预约自动下载、首次下载网络和地域不进入安装一级归因。
 
 ### 安装阶段路由
 
-告警新增性允许继续且调查属于安装链路时，完整读取 [安装游戏与轻量阶段 QuerySpec](queries/install-game-stage-attribution.yaml)，绑定 `business_date=analysis_dt` 和当前 `game_type`。正常加载本 Playbook 或告警新增性停止前不得预读该 QuerySpec。它是安装 `game_id` 一级家族的规定查询，并在同一批官方锚点数据中附带轻量阶段计数；不得另写一条事件明细查询替代，也不计入方向增强查询上限。
+告警新增性允许继续且调查属于安装链路时，先完成 `game_id` 一级归因，再完整读取独立的 [安装阶段损耗拆解 QuerySpec](queries/install-stage-loss-decomposition.yaml)，绑定 `business_date=analysis_dt` 和当前 `game_type`。正常加载本 Playbook、告警新增性停止或游戏家族完成前不得预读、执行该 QuerySpec。它是游戏之后的固定第二步，不计入方向增强查询上限；不得另写事件明细查询替代。
 
-QuerySpec 只使用 `is_metric_anchor=1` 的官方锚点行，以 `official_download_complete` 和 `official_install_complete` 投影知识库已经确认的分母与分子，不得用诊断完成字段替代正式分子。它同时返回目标日、7 日池化基线、`__overall__` 根行、达到既有样本与占比门槛的游戏桶，以及存在长尾时用于闭合的不可候选 `__other_below_threshold__` 残差桶。没有业务 Top 或 `LIMIT`；`max_rows` 只是异常结果量门禁，超过时不得截断继续。所有游戏桶与残差桶必须分别回勾 `__overall__` 的当前和基线分子、分母，且全局 `baseline_day_count` 必须为 7。
+阶段 QuerySpec 只使用 `is_metric_anchor=1` 的官方锚点行。下载完成分母固定为 `D = official_download_complete`，已观测安装开始固定为分母实体中 `has_client_install_start=1` 的 `S`，正式安装完成固定为 `C = official_install_complete`；诊断字段不得替代正式分子。它返回目标日和此前 7 个完整业务日的池化基线计数、损耗率、观察窗口与质量计数，不按游戏或其他维度分桶。
 
-在贡献计算前先检查 QuerySpec 返回的官方锚点唯一性、当前与基线分子分母闭合，以及观察窗口一致性；`app` 的存在侧必须为 3 天，`sandbox` 的存在侧必须为 1 天。`entrant/exit` 桶在不存在的一侧可以没有观察窗口值，不能因此把业务上的单边流量误判为数据缺失。上述正式投影门禁失败时，不得从该家族产生候选。
+阶段结果只在以下门禁全部通过时有效：`baseline_day_count=7`；当前与基线官方下载分母 `D` 均为正；官方锚点无重复；正式分子、分母和开始标记均非空且为二值；不存在开始却没有下载完成、完成却没有开始、或开始事件无法匹配诊断事件的行；满足 `C <= S <= D`；`app` 当前与基线观察窗口均严格为 3 天，`sandbox` 均严格为 1 天。`S=0` 不是质量失败：该侧仍可报告 `D-S` 和 `(S-C)/D`，但 `C/S` 保持未定义且不得填零。任何真正的门禁失败都省略阶段率，在 `evidence_limits` 精确记录“installStart 覆盖/时序不足”或对应质量事实；不得改写为整个安装归因不支持，也不得否定已经合法的游戏或其他官方投影家族。
 
-APK 链路键缺失与跨实体冲突、沙盒轮次缺失与歧义，以及 `T/S/C/E` 覆盖和子集关系只约束可选阶段诊断，不否定已经闭合的官方 `game_id` 分子分母投影。任一阶段门禁失败时省略对应轻量阶段计算、继续合法的游戏贡献分解，并在 `evidence_limits` 记录具体限制；不能改用未登记事件源。
+APK 链路键缺失与跨实体冲突、沙盒轮次缺失与歧义，以及 `T/S/C/E` 覆盖和子集关系只约束阶段或增强诊断，不否定已经闭合的官方 `game_id` 或低基数家族分子分母投影。任一阶段门禁失败时省略对应阶段计算、继续合法的维度贡献分解，并在 `evidence_limits` 记录具体限制；不能改用未登记事件源，也不能输出“官方安装锚点、链路键覆盖与 game_id 必须同时完成”的合并门禁。
 
-先按知识库正式口径确定下载完成分母 `D` 和最终安装完成 `C`，再使用已确认字段聚合客户端安装触发 `T`、安装开始 `S` 和失败信号 `E`。只有字段在当前与基线的生成时点和覆盖稳定，且链路级数据验证 `S` 是 `D` 的子集、`C` 是 `S` 的子集时，才计算：
+先按知识库正式口径确定下载完成分母 `D` 和最终安装完成 `C`，再使用已确认字段聚合安装开始 `S`。只有上述固定门禁通过时才计算：
 
 ```text
 开始前未观测损耗 = D - S
 开始后未完成   = S - C
+开始前未观测损耗率 = (D - S) / D
+开始后未完成占下载分母比例 = (S - C) / D
+开始后安装完成率 = C / S
 ```
 
-若链路级数据进一步验证 `T` 是 `D` 的子集、`S` 是 `T` 的子集且二者严格有序，可继续把开始前拆为 `D - T` 和 `T - S`。任一下游状态在缺少上游状态时出现，必须单列为时序/覆盖质量问题，不得为了得到正数损耗而强行设为零或重排事件。
+用户可见文案必须称 `D - S` 为“未观测到进入 installStart”的样本，不能直接称“没有进入安装”或“用户没有开始安装”，因为事件未上报与真实未发生无法仅凭该字段区分。任一下游状态在缺少上游状态时出现，必须单列为时序/覆盖质量问题，不得为了得到正数损耗而强行设为零或重排事件。
 
-`E` 只是曾出现失败信号的样本，不默认为最终失败。`E` 字段可用时，轻量路由至少报告 `E / D`；只有 `E` 的事件语义确认发生在安装开始后且能稳定关联 `S` 时，才可同时报告 `E / S`。两个比率必须按各自分母命名，不得互换或写成最终失败率。`E` 不可用不阻断已经通过 `D/S/C` 门禁的两段路由。
+若需要继续拆安装触发 `T` 或失败信号 `E`，只能在阶段结果已经合法且后文方向增强条件触发时使用已登记事件语义；不得把它们加入固定阶段 QuerySpec 的有效性前置门禁。`E` 只是曾出现失败信号的样本，不默认为最终失败。
 
-分别对当前和 7 日池化基线先汇总计数再计算阶段率。某段的同向不利变化达到 5bp 时，用它选择后续方向：损耗主要增加在 `D -> S` 时优先检查触发链路、游戏/APK 版本与事件覆盖；主要增加在 `S -> C` 时优先检查安装器、OS/品牌、存储、失败信号与回调覆盖。阶段路由只描述损耗位置，不产生 `top_findings` 候选，不确认技术原因。
+分别对当前和 7 日池化基线先汇总计数再计算阶段率。某段的同向不利变化达到 5bp 时，用它选择后续方向：损耗主要增加在 `D -> S` 时优先检查触发链路、APK 包体、OS/品牌及事件覆盖；主要增加在 `S -> C` 时优先检查安装事件版本、安装器、OS/品牌、存储、失败信号与回调覆盖。阶段路由只描述损耗位置，不产生 `top_findings` 候选，不确认技术原因。
 
-字段不存在、覆盖跨期不稳定或子集关系无法对齐时，省略对应阶段计算、继续合法的维度定位，并在 `evidence_limits` 说明安装阶段不可靠；不得因轻量路由不可用而扫描未登记事件表。轻量阶段路由是已有一级数据上的方向选择，不是规定归因查询；若合并的可选阶段字段导致查询报错或无法闭合，应在有依据的修正后移除这些可选字段并完成原一级聚合，不得仅因轻量路由失败把已合法形成的定位改写为 `query_failed` 或 `unsupported_drilldown`。
+只有阶段门禁有效且 `S -> C` 同向不利变化达到 5bp 时，才完整读取 [安装开始后版本诊断模板](queries/install-post-start-version-template.md)。该模板只在 `official_download_complete=1 AND has_client_install_start=1 AND diagnostic_event_matched=1` 的已观测开始人群中，以 `S` 为分母、`C` 为分子拆 `install_event_app_major_version`；结果用于校准后续方向，不参与官方 `C / D` 的一级贡献排序，也不产生 `top_findings`。版本缺失、覆盖跨期不稳定或无法回勾 `S/C` 时跳过该诊断并继续其他已登记家族，不得建立“未知版本导致安装低下”的结论。
+
+字段不存在、覆盖跨期不稳定或子集关系无法对齐时，省略对应阶段计算、继续合法的维度定位，并在 `evidence_limits` 说明安装阶段不可靠；不得因阶段路由不可用而扫描未登记事件表。独立阶段路由是游戏之后的规定诊断查询，但不是候选归因家族；其失败不得把已合法形成的定位改写为 `query_failed` 或 `unsupported_drilldown`。
 
 ### 合法二级关系
 
 ```text
-game_id -> apk_size_tier, app_major_version, os_major_version,
-           device_brand, storage_headroom_tier
+game_id -> apk_size_tier, os_major_version, device_brand,
+           storage_headroom_tier
 apk_size_tier -> game_id, device_brand, storage_headroom_tier
-app_major_version -> device_brand, os_major_version
-os_major_version -> device_brand, app_major_version, storage_headroom_tier
-device_brand -> device_model, os_major_version, app_major_version,
-                storage_headroom_tier
+os_major_version -> device_brand, storage_headroom_tier
+device_brand -> device_model, os_major_version, storage_headroom_tier
 storage_headroom_tier -> apk_size_tier, device_brand, os_major_version
 ```
 
@@ -395,6 +401,8 @@ restoration_ratio = 1 - abs(removal_delta) / abs(original_delta)
 
 仅当一级候选达到门槛、有足够解释力或明确业务价值、关系已注册、数据覆盖可靠且本次尚未做过二级时执行。只选一个父候选和一个合法子维度。
 
+命中条件后完整读取 [二级归因 SQL 模板](queries/secondary-attribution-template.md)，并按模板指向的 [归因维度登记](queries/primary-attribution-dimensions.md) 绑定一个父维度、父值和一个合法子维度。下载链路还必须按当前标准指标选择模板登记的唯一分子、分母和行级合法性表达式；安装链路固定使用官方锚点投影。不得临时手写另一套父子聚合、只查父范围内部，或省略 `outside_parent` 后继续归因。
+
 查询必须继承：
 
 ```text
@@ -451,7 +459,7 @@ tap_dmp.ods_server_sync_apks
 
 只有告警新增性门禁允许继续，现有一级已经形成合法候选，且按条件触发的剔除反事实与最多一次二级已经执行或合法跳过后，才考虑方向增强验证。先冻结已有定位结论、候选身份、贡献数值和已经实际取得的反事实结果；增强验证只判断该方向是否重复、是否具有实体特异性或是否值得优先探索，不得创造未通过既有门槛的新候选，也不得改写已经闭合的贡献。方向增强属于合法定位完成后的可选校准，不是根指标或规定归因查询。
 
-没有命中下列触发条件时立即停止，不执行验证查询，不需要逐项记录“未验证”。所有触发信号必须来自已经完成的根指标、终态路由、轻量阶段路由、一级或二级聚合、剔除反事实、游戏背景，或已按优先级执行的前序增强模块；不得先扫描当前模块自身的数据源来判断其是否触发。
+没有命中下列触发条件时立即停止，不执行验证查询，不需要逐项记录“未验证”。所有触发信号必须来自已经完成的根指标、终态路由、安装阶段路由、一级或二级聚合、剔除反事实、游戏背景，或已按优先级执行的前序增强模块；不得先扫描当前模块自身的数据源来判断其是否触发。
 
 每个调查最多执行两个需要新增查询的增强模块；每个模块只设计一条聚合查询同时覆盖所需日期，因明确 SQL 错误按规则修正重试不视为新模块。多个需要新增查询的模块同时触发时，按“安装严格漏斗 -> 错误码与恢复 -> 跨维度候选重叠 -> 同日新旧版本准实验 -> 同类负对照”的顺序选择前两个。非安装调查跳过安装严格漏斗；没有已完成查询提供的合法失败信号时跳过错误码与恢复。若安装严格漏斗与错误码使用同一已登记事件源，且一条聚合查询能同时满足两者全部门禁，则合并为一个链路专项模块、只占一个名额；不得为节省名额而省略任一模块的字段、守恒或字典门禁。因上限跳过已触发模块时写入 `evidence_limits`。不得借增强验证新增三级、多个二级父节点或无方向组合扫描。
 
@@ -459,9 +467,9 @@ tap_dmp.ods_server_sync_apks
 
 只有安装调查已形成合法一级候选，且满足以下任一信号时才执行一次：
 
-- 轻量阶段路由中 `D -> S` 或 `S -> C` 的同向不利变化达到 5bp；
-- 轻量路由或已登记归因宽表中的失败信号、`start_only` 或已定义未收口终态占比相对基线上升至少 5bp；
-- 已完成的对应维度聚合已经复用阶段字段，并显示通过门槛的 `app_major_version`、`os_major_version`、`device_brand` 或 `storage_headroom_tier` 候选在该切片内出现至少 5bp 的阶段损耗增加。
+- 安装阶段路由中 `D -> S` 或 `S -> C` 的同向不利变化达到 5bp；
+- 阶段路由或已登记归因宽表中的失败信号、`start_only` 或已定义未收口终态占比相对基线上升至少 5bp；
+- 已完成的开始后版本诊断显示某个合法版本桶的 `S -> C` 损耗相对基线上升至少 5bp。
 
 只有上述信号实际触发后，才完整读取 [安装事件语义登记](install-event-semantics.md)。该文件必须登记事件数据源、action 语义、事件时间、去重键、关联键和观察窗口；APK 能使用稳定 `chain_id`，沙盒能使用稳定 `install_round_id`，且当前与基线 cohort 已按知识库观察窗口成熟时才执行。文件为空、登记不完整或当前 APK/沙盒不适用时停止该模块，不得按字段或 action 名称猜测事件。
 
@@ -480,7 +488,7 @@ tap_dmp.ods_server_sync_apks
 只有已形成合法一级候选，且满足以下任一信号时才执行一次：
 
 - 下载互斥终态中 `explicit_failed` 占比相对基线上升至少 5bp；
-- 安装轻量阶段路由或严格漏斗中，失败信号或最终失败占比相对基线上升至少 5bp；
+- 安装阶段路由或严格漏斗中，失败信号或最终失败占比相对基线上升至少 5bp；
 - 根指标本身或已完成的归因聚合已经提供失败 PV 率，且该率相对基线上升至少 5bp、同口径受影响实体不少于 100。
 
 错误码来源只允许使用归因宽表中已有正式语义的字段，或已登记且通过辅助维度门禁的事件源；安装事件源需要时从 [安装事件语义登记](install-event-semantics.md) 取得。没有合法错误码来源时停止该模块。
@@ -564,11 +572,11 @@ peer 与焦点同方向变化且绝对变化达到焦点的 50% 时，降低实�
 2. 正确映射后的目标或基线分区、样本或成熟窗口不足：`insufficient_data`。
 3. 告警日期与分析日期映射、分子、分母、方向或范围无法可靠确定：`insufficient_definition`。
 4. 按正确日期、范围和精度复核后，当前值仍与告警无法对齐且无法解释：`insufficient_definition`。
-5. 权限阻止根指标或规定归因查询：`query_blocked`。
-6. 根指标或规定归因 SQL 修正两次仍失败：`query_failed`。
-7. 根指标存在但无合法下钻数据源：`unsupported_drilldown`。
+5. 权限阻止根指标，或阻止全部已登记归因家族：`query_blocked`；只阻止一个家族时继续其他家族。
+6. 根指标 SQL 修正两次仍失败，或全部已登记归因家族都查询失败：`query_failed`；单个家族失败时继续其他家族。
+7. 根指标存在，但归因数据源无法复现完整根范围，或没有任何已登记维度字段可执行：`unsupported_drilldown`；单个维度家族不完整或不闭合不满足此条件。
 8. 告警新增性判为既有异常延续且没有达到 5bp 的实质性新增恶化：`no_dominant_slice`。
-9. 一级没有非质量候选达到 5bp：`no_dominant_slice`。
+9. 至少一个一级家族形成合法结果，并且按链路规定完成全部已触发的后续一级后，没有非质量候选达到 5bp：`no_dominant_slice`。
 10. 一级、按条件执行的反事实和最多一次二级均已完成或合法跳过，且没有命中方向增强触发条件。
 11. 已执行两个需要新增查询的方向增强模块，或继续验证不会改变排查方向。
 
@@ -585,6 +593,6 @@ peer 与焦点同方向变化且绝对变化达到焦点的 50% 时，降低实�
 
 - `summary` 和顶层 `finding` 描述整体指标变化、告警新增性、检查范围和综合结论，不得把整体指标伪装成维度切片。
 - `top_findings` 只包含通过贡献分解、闭合、样本、占比、质量桶和候选门槛的具体切片。每项必须写 `dimension`、`label` 或 `value`、`adverse_impact_bp` 和 `finding`；缺少切片身份或只描述整体变化的项不是合法候选。`entrant/exit` 候选的 `finding` 必须明确是新增或退出流量的结构影响，不得表述为该切片自身完成率恶化。方向增强结果可以校准 `finding` 的排查范围和特异性，但不得创建新切片、改变原贡献或写入辅助模块自身的整体结果。
-- 至少存在一个合法切片时才返回 `completed`。告警新增性已经确认是既有异常延续，或完成规定的一级检查但没有合法候选时，返回 `no_dominant_slice` 并省略 `top_findings`；`summary` 必须分别明确“因无实质性新增恶化而停止”或已经执行的一级检查范围。若根指标或规定归因下钻因数据、权限、查询或数据源限制未完成，使用对应受阻状态，不能写成“分析完成”。
+- 至少存在一个合法切片时才返回 `completed`。告警新增性已经确认是既有异常延续，或完成规定的一级检查但没有合法候选时，返回 `no_dominant_slice` 并省略 `top_findings`；`summary` 必须分别明确“因无实质性新增恶化而停止”或已经执行的一级检查范围。只有根指标受阻、完整根范围无法复现，或全部已登记归因家族因数据、权限或查询限制均不可执行时，才使用对应受阻状态；单个家族或独立阶段诊断失败不能把调查改写成“下钻未完成”。
 - 方向增强模块没有触发时不输出占位说明；触发后受阻、失败或证据不足时，把真实边界写入 `evidence_limits`，不覆盖已有合法定位状态。增强结果通过全部门禁时，使用现有 `summary`、`top_findings[].finding`、`evidence_limits` 和 `recommended_action` 表达，不新增接口字段。
 - `counterfactual` 只记录实际完成的剔除计算，必须写目标切片的 `dimension`、`label` 或 `value`、`removal_delta_bp`、`restoration_ratio` 和 `finding`。未触发、未执行或无法计算时省略该字段；原因属于 `evidence_limits`，不是反事实结论。`no_dominant_slice` 不得携带反事实。

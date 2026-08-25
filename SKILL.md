@@ -64,13 +64,13 @@ Playbook 是基线选择、日期语义、归因数据资产、维度顺序、�
 
 任何 DView SQL 查询报错后，先读取 [SQL 快速报错排查手册](references/sql-fast-triage.md)，保留原始错误码、错误类别和错误信息，按同时匹配的报错信号与 SQL 形态选择修正规则，再重试。错误类别为 `semantic_analysis` 时必须先检查 SQL 本身并执行有依据的修正重试，不得直接结束查询。不得只凭错误码套用规则；手册没有明确匹配项时，只根据原始错误做最小修正。
 
-SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。分区缺失或合法空结果经分区检查后记 `insufficient_data`；权限不足记 `query_blocked`；两次修正后仍失败记 `query_failed`；有根指标但无合法维度数据源记 `unsupported_drilldown`。失败和空结果不得写成零。
+SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径以求成功。根指标或全部已登记归因家族的分区缺失、合法空结果、权限不足或查询失败，分别按 Playbook 记 `insufficient_data`、`query_blocked` 或 `query_failed`；有根指标但完整根范围无法从归因数据源复现，或没有任何已登记维度字段可执行时记 `unsupported_drilldown`。单个维度家族出现这些问题时只淘汰当前家族、记录 `evidence_limits` 并继续后续家族，不得提前返回受阻状态。失败和空结果不得写成零。
 
 ## 6. 执行归因
 
 根指标通过后，严格按已加载 Playbook 中对应链路的顺序执行归因。需要字段结构时先 `describe_table`；每个查询完整继承知识库定义和 Playbook 要求的分析范围。
 
-不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
+不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。单个维度家族失败是家族级限制：该家族不得产生候选，但只要根指标和归因数据源的完整根范围仍合法，就必须记录限制并按 Playbook 继续后续已登记家族，不得直接结束整个调查。只有根范围或全部已登记归因数据源不可用时才返回受阻状态。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
 
 ## 7. 停止并输出
 
@@ -94,7 +94,7 @@ SQL 因明确错误最多修正两次，不得删除关键过滤或更换口径�
 
 `completed` 和 `no_dominant_slice` 调查必须使用卡片的规范字段名，并包含 `YYYY-MM-DD` 的 `analysis_date`、标准指标 `metric`、有限数值 `current_value`、`baseline_value`、`delta_bp`、非空 `summary`、非空字符串数组 `evidence_limits` 和非空 `recommended_action`。其他受阻状态必须包含非空 `reason` 和 `action`；只有指标定义和日期对齐已经完成时才可附带 `analysis_date`，`insufficient_definition` 不得猜测。不得改写为嵌套 `root_metric`、`findings` 或 `counterfactual.interpretation`，否则展示层会拒绝结果。
 
-`top_findings` 只保存实际完成贡献计算、通过闭合与质量检查并达到 Playbook 候选门槛的具体切片，不能保存整体指标变化或待执行事项。每项必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `adverse_impact_bp` 和非空 `finding`。整体变化只写入 `summary` 或顶层 `finding`。存在至少一个合法切片时才可返回 `completed`；完成规定检查但没有合法切片时返回 `no_dominant_slice` 并省略 `top_findings`；规定下钻未完成时按实际原因返回 Playbook 的受阻状态，不得返回 `completed`。
+`top_findings` 只保存实际完成贡献计算、通过闭合与质量检查并达到 Playbook 候选门槛的具体切片，不能保存整体指标变化或待执行事项。每项必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `adverse_impact_bp` 和非空 `finding`。整体变化只写入 `summary` 或顶层 `finding`。存在至少一个合法切片时才可返回 `completed`；至少一个一级家族合法、已按 Playbook 尝试完全部触发的后续家族但没有合法切片时返回 `no_dominant_slice` 并省略 `top_findings`；单个家族失败不算“规定下钻未完成”。只有根范围或全部已登记家族受阻时才按实际原因返回 Playbook 的受阻状态，不得返回 `completed`。
 
 `counterfactual` 只在实际执行剔除计算后输出，且必须包含非空 `dimension`、非空 `label` 或 `value`、有限数值 `removal_delta_bp`、有限数值 `restoration_ratio` 和非空 `finding`。未执行、未触发或无法计算时省略整个字段，把证据边界写入 `evidence_limits`；不得用 `counterfactual.finding` 描述“尚未执行”。`no_dominant_slice` 不得包含 `counterfactual`。
 
