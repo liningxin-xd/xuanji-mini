@@ -12,6 +12,13 @@ DOWNLOAD_PRIMARY_TEMPLATES = (
     QUERY_ROOT / "download-failed-pv-rate-primary-attribution-template.md",
     QUERY_ROOT / "download-stop-rate-primary-attribution-template.md",
 )
+GAME_ATTRIBUTION_QUERIES = (
+    QUERY_ROOT / "download-game-attribution.yaml",
+    QUERY_ROOT / "download-failed-rate-game-attribution.yaml",
+    QUERY_ROOT / "download-failed-pv-rate-game-attribution.yaml",
+    QUERY_ROOT / "download-stop-rate-game-attribution.yaml",
+    QUERY_ROOT / "install-game-attribution.yaml",
+)
 INSTALL_PRIMARY_TEMPLATE = QUERY_ROOT / "install-primary-attribution-template.md"
 INSTALL_GAME_QUERY = QUERY_ROOT / "install-game-attribution.yaml"
 INSTALL_STAGE_QUERY = QUERY_ROOT / "install-stage-loss-decomposition.yaml"
@@ -176,6 +183,75 @@ class AttributionFallbackContractTest(unittest.TestCase):
             "| `apk_size_tier` | `1` |",
         ):
             self.assertIn(mapping, registry)
+
+    def test_primary_templates_collapse_high_cardinality_before_dview(self):
+        for path in (*DOWNLOAD_PRIMARY_TEMPLATES, INSTALL_PRIMARY_TEMPLATE):
+            content = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                for contract in (
+                    "COUNT(*) OVER () AS source_bucket_count",
+                    "bucket_flags AS (",
+                    "classified_buckets AS (",
+                    "collapsed_buckets AS (",
+                    "COUNT(*) AS collapsed_source_bucket_count",
+                    "ELSE '__other_below_threshold__'",
+                    "GROUP BY bucket_kind, output_dimension_value",
+                    "FROM collapsed_buckets",
+                    "只有 `bucket_kind=dimension` 可以产生候选",
+                ):
+                    self.assertIn(contract, content)
+                self.assertIn("current_denominator >= 100", content)
+                self.assertIn("overall_current_denominator, 0) >= 0.01", content)
+                self.assertIn("结果必须少于 250 行", content)
+                self.assertNotIn("FROM buckets_with_totals\nORDER BY", content)
+
+    def test_every_high_cardinality_entry_point_has_a_bounded_result(self):
+        registry = DIMENSION_REGISTRY.read_text(encoding="utf-8")
+        for dimension in (
+            "`device_brand`",
+            "`app_major_version`",
+            "`os_major_version`",
+            "`device_model`",
+            "`game_id`",
+        ):
+            with self.subTest(dimension=dimension):
+                self.assertIn(dimension, registry)
+
+        for path in GAME_ATTRIBUTION_QUERIES:
+            content = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertIn("classified_buckets AS (", content)
+                self.assertIn("collapsed_buckets AS (", content)
+                self.assertIn("__other_below_threshold__", content)
+                self.assertIn("max_rows: 250", content)
+
+        secondary = SECONDARY_ATTRIBUTION_TEMPLATE.read_text(encoding="utf-8")
+        self.assertEqual(2, secondary.count("collapsed_buckets AS ("))
+        self.assertEqual(2, secondary.count("FROM collapsed_buckets"))
+        self.assertEqual(2, secondary.count("COUNT(*) OVER () AS source_bucket_count"))
+        self.assertEqual(
+            2, secondary.count("COUNT(*) AS collapsed_source_bucket_count")
+        )
+        self.assertIn("低样本或低占比子桶统一收敛", secondary)
+        self.assertIn("WHEN initial_bucket_kind = 'quality' THEN '__quality__'", secondary)
+
+        version = INSTALL_POST_START_VERSION_TEMPLATE.read_text(encoding="utf-8")
+        for contract in (
+            "COUNT(*) OVER () AS source_bucket_count",
+            "classified_versions AS (",
+            "collapsed_versions AS (",
+            "COUNT(*) AS collapsed_source_bucket_count",
+            "__other_below_threshold__",
+            "FROM collapsed_versions",
+            "`bucket_kind=version`",
+        ):
+            self.assertIn(contract, version)
+
+        self.assertIn("DView 查询结果存在 1000 行返回上限", self.skill)
+        self.assertIn("返回恰好 1000 行", self.playbook)
+        self.assertIn("不得先接收 1000 行截断结果", self.playbook)
+        self.assertIn("一级再加至多 3 个质量桶和 1 个残差桶，最多 204 行", self.playbook)
+        self.assertIn("二级再加 1 个 `outside_parent`，最多 205 行", self.playbook)
 
     def test_install_template_registers_every_fallback_dimension(self):
         content = INSTALL_PRIMARY_TEMPLATE.read_text(encoding="utf-8")

@@ -25,6 +25,12 @@ END)
 
 `GROUP BY` 必须使用与 `__DIMENSION_VALUE_EXPR__` 逐字相同的非聚合表达式。不得同时选择两个字段，不得拼接组合维度。质量匹配为 0、NULL 或其他非 1 值时保留为 `unmatched`，不得过滤、回填旧值或直接结束当前调查。
 
+## 基数保护
+
+白名单描述业务允许性，不保证线上基数永远低。`device_brand` 已知可能超过 DView 的 1000 行上限；`app_major_version`、`os_major_version` 和安装事件版本也可能随脏值或历史编码漂移，二级 `device_model` 与 `game_id` 天然属于高基数。`channel_group`、`apk_size_tier`、`storage_headroom_tier` 和预约自动下载虽然当前是低基数，也必须使用模板内同一保护，不能凭经验跳过。
+
+一级模板会在完整原始桶聚合后保留同时通过 Playbook 样本与占比门槛的业务桶，把默认质量值收敛为至多 `unmatched`、`__none__` 和 `__quality__` 三个不可候选桶，并把其余业务长尾收敛为 `__other_below_threshold__`。最终只允许 `bucket_kind=dimension` 参与候选；`quality` 和 `residual` 只用于质量与闭合。模板返回 `source_bucket_count` 和 `collapsed_source_bucket_count`，执行方必须按 Playbook 的 DView 结果基数门禁验收，不得把任何原始值预先过滤掉。
+
 ## 下载白名单
 
 固定按以下顺序使用；逻辑维度与源字段同名：

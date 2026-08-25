@@ -9,7 +9,7 @@
 - `${parent_value}` 是一级候选已经冻结的规范化字符串值，不得从结果中重新挑选。
 - 父、子字段、质量匹配表达式和标准化表达式只从 [归因维度登记](primary-attribution-dimensions.md) 取得，父子关系只从 Playbook 取得。
 - `outside_parent`、`quality` 和 `residual` 均不可成为候选。只有 `bucket_kind=child` 的子桶可以进入贡献门禁。
-- 禁止业务 Top、`LIMIT`、笛卡尔积以及把父范围分母冒充根分母。低样本或低占比子桶统一收敛为 `__other_below_threshold__`。
+- 禁止业务 Top、`LIMIT`、分页、笛卡尔积以及把父范围分母冒充根分母。低样本或低占比子桶统一收敛为 `__other_below_threshold__`，异常质量值统一收敛为至多三个质量桶；结果必须少于 250 行，不得依赖 DView 的 1000 行截断。
 
 ## 下载指标绑定
 
@@ -113,7 +113,8 @@ WITH raw_scoped_rows AS (
     SUM(current_row_count) OVER () AS overall_current_row_count,
     SUM(baseline_row_count) OVER () AS overall_baseline_row_count,
     SUM(duplicate_row_count) OVER () AS overall_duplicate_row_count,
-    SUM(invalid_metric_row_count) OVER () AS overall_invalid_metric_row_count
+    SUM(invalid_metric_row_count) OVER () AS overall_invalid_metric_row_count,
+    COUNT(*) OVER () AS source_bucket_count
   FROM bucket_aggregates
 ), eligible_buckets AS (
   SELECT
@@ -131,6 +132,11 @@ WITH raw_scoped_rows AS (
       ELSE 'residual'
     END AS bucket_kind,
     CASE
+      WHEN initial_bucket_kind = 'quality'
+        AND dimension_value = 'unmatched' THEN 'unmatched'
+      WHEN initial_bucket_kind = 'quality'
+        AND dimension_value = '__none__' THEN '__none__'
+      WHEN initial_bucket_kind = 'quality' THEN '__quality__'
       WHEN initial_bucket_kind = 'child' AND NOT (
         (
           current_denominator >= 100
@@ -152,6 +158,8 @@ WITH raw_scoped_rows AS (
     bucket_kind,
     output_dimension_value AS dimension_value,
     MAX(output_dimension_value) AS dimension_label,
+    COUNT(*) AS collapsed_source_bucket_count,
+    MAX(source_bucket_count) AS source_bucket_count,
     MAX(baseline_day_count) AS baseline_day_count,
     SUM(current_denominator) AS current_denominator,
     SUM(baseline_denominator) AS baseline_denominator,
@@ -179,6 +187,8 @@ SELECT
   bucket_kind,
   dimension_value,
   dimension_label,
+  collapsed_source_bucket_count,
+  source_bucket_count,
   baseline_day_count,
   current_denominator,
   baseline_denominator,
@@ -328,7 +338,8 @@ WITH raw_scoped_rows AS (
     MAX(baseline_observation_days_max) OVER ()
       AS overall_baseline_observation_days_max,
     SUM(duplicate_row_count) OVER () AS overall_duplicate_row_count,
-    SUM(invalid_metric_row_count) OVER () AS overall_invalid_metric_row_count
+    SUM(invalid_metric_row_count) OVER () AS overall_invalid_metric_row_count,
+    COUNT(*) OVER () AS source_bucket_count
   FROM bucket_aggregates
 ), eligible_buckets AS (
   SELECT
@@ -346,6 +357,11 @@ WITH raw_scoped_rows AS (
       ELSE 'residual'
     END AS bucket_kind,
     CASE
+      WHEN initial_bucket_kind = 'quality'
+        AND dimension_value = 'unmatched' THEN 'unmatched'
+      WHEN initial_bucket_kind = 'quality'
+        AND dimension_value = '__none__' THEN '__none__'
+      WHEN initial_bucket_kind = 'quality' THEN '__quality__'
       WHEN initial_bucket_kind = 'child' AND NOT (
         (
           current_denominator >= 100
@@ -367,6 +383,8 @@ WITH raw_scoped_rows AS (
     bucket_kind,
     output_dimension_value AS dimension_value,
     MAX(output_dimension_value) AS dimension_label,
+    COUNT(*) AS collapsed_source_bucket_count,
+    MAX(source_bucket_count) AS source_bucket_count,
     MAX(baseline_day_count) AS baseline_day_count,
     SUM(current_denominator) AS current_denominator,
     SUM(baseline_denominator) AS baseline_denominator,
@@ -406,6 +424,8 @@ SELECT
   bucket_kind,
   dimension_value,
   dimension_label,
+  collapsed_source_bucket_count,
+  source_bucket_count,
   baseline_day_count,
   current_denominator,
   baseline_denominator,
@@ -446,7 +466,8 @@ ORDER BY
 
 1. 所有占位符必须消失，父子关系和字段映射必须在登记中存在。
 2. `baseline_day_count = 7`，根分母为正，行级指标非法数、正式粒度重复数均为 0。
-3. 所有输出桶的当前与基线分子、分母、行数分别合计回勾根总量；`outside_parent` 必须存在，除非父范围经一级结果证明就是完整根范围。
-4. 贡献计算必须包含 `child + residual + quality + outside_parent` 全部桶，并闭合到根变化；只有 `child` 桶允许成为候选。
-5. 子桶的占比、样本和 5bp 均使用根范围尺度。不得在父范围内部重新计算局部门槛。
-6. 任一门禁失败只淘汰本次父子家族并记录限制，不得删除已经合法形成的一级候选，也不得继续三级下钻。
+3. 结果少于 250 行；每行 `source_bucket_count` 一致，`collapsed_source_bucket_count` 为正且合计等于源桶数；`child` 桶的合并数必须为 1，未单列的业务子桶必须进入残差。
+4. 所有输出桶的当前与基线分子、分母、行数分别合计回勾根总量；`outside_parent` 必须存在，除非父范围经一级结果证明就是完整根范围。
+5. 贡献计算必须包含 `child + residual + quality + outside_parent` 全部桶，并闭合到根变化；只有 `child` 桶允许成为候选。
+6. 子桶的占比、样本和 5bp 均使用根范围尺度。不得在父范围内部重新计算局部门槛。
+7. 任一门禁失败只淘汰本次父子家族并记录限制，不得删除已经合法形成的一级候选，也不得继续三级下钻。
