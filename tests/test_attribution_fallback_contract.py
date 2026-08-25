@@ -201,6 +201,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertIn("禁止选择 `install_event_app_major_version`", content)
         self.assertIn("无论 `game_id` 是否形成合法结果", content)
         self.assertIn("都不得省略本模板或缩短队列", content)
+        self.assertIn("无论该阶段成功、失败并记录限制", content)
         self.assertNotIn("`game_id` 未形成合法结果", content)
         for field in (
             "overall_current_dimension_match_rate",
@@ -229,6 +230,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertNotIn("不强制横扫", scenarios)
         self.assertNotIn("游戏不合法、无候选、解释不足", scenarios)
         self.assertIn("当前执行清单验收字段", scenarios)
+        self.assertIn("记录阶段限制并继续低基数官方维度队列", scenarios)
 
     def test_primary_risk_evidence_never_stops_the_dimension_queue(self):
         self.assertIn("不构成拒绝当前结果或停止后续维度的硬门禁", self.playbook)
