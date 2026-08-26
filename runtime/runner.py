@@ -152,7 +152,7 @@ class AttributionRunner:
             )
 
         state = {
-            "schema_version": 3,
+            "schema_version": 4,
             "run_id": run_id,
             "revision": 0,
             "status": RunStatus.ACTIVE.value,
@@ -178,6 +178,7 @@ class AttributionRunner:
             "metric": metric,
             "alert_date": alert_date,
             "analysis_date": analysis_date,
+            "canonical_root_metric": None,
             "cursor": 0,
             "ready_for_final_validation": False,
             "evidence_export_sha256": None,
@@ -334,6 +335,7 @@ class AttributionRunner:
                     game_type=state["game_type"],
                     produces_candidates=step["produces_candidates"],
                 )
+                self._validate_canonical_root_metric(state, step, outcome)
             except ResultValidationError as exc:
                 attempt["status"] = "failed"
                 attempt["validation"] = {
@@ -792,7 +794,7 @@ class AttributionRunner:
         return state
 
     def _validate_state_contract(self, state: dict[str, Any]) -> None:
-        if state.get("schema_version") != 3:
+        if state.get("schema_version") != 4:
             raise RunnerError("unsupported state schema version")
         self._validate_run_id(state.get("run_id"))
         expected_contract_hashes = {
@@ -838,6 +840,7 @@ class AttributionRunner:
             raise RunnerError("state cursor is invalid")
 
         known_query_ids: set[str] = set()
+        successful_candidate_roots: list[dict[str, float]] = []
         for index, (step, plan_step) in enumerate(zip(steps, plan.steps, strict=True)):
             if not isinstance(step, dict) or step.get("id") != plan_step.id:
                 raise RunnerError("state step order does not match the fixed plan")
@@ -967,6 +970,13 @@ class AttributionRunner:
                         abs_tol=1e-12,
                     ):
                         raise RunnerError("candidate step root metric facts do not close")
+                    successful_candidate_roots.append(
+                        {
+                            "current_value": float(root_values[0]),
+                            "baseline_value": float(root_values[1]),
+                            "delta": float(root_values[2]),
+                        }
+                    )
                 elif any(value is not None for value in root_values):
                     raise RunnerError("diagnostic step cannot contain root metric facts")
             elif candidate_count is not None:
@@ -1038,6 +1048,27 @@ class AttributionRunner:
                 raise RunnerError("failed step lacks a failed current attempt")
             if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and attempts:
                 raise RunnerError("automatic skipped step cannot contain query attempts")
+
+        canonical_root = state.get("canonical_root_metric")
+        if not successful_candidate_roots:
+            if canonical_root is not None:
+                raise RunnerError("state freezes a root metric without a successful family")
+        else:
+            if not self._valid_root_metric(canonical_root):
+                raise RunnerError("state canonical_root_metric is invalid")
+            if not self._root_metrics_match(
+                canonical_root, successful_candidate_roots[0]
+            ):
+                raise RunnerError(
+                    "state canonical_root_metric does not match the first successful family"
+                )
+            if any(
+                not self._root_metrics_match(canonical_root, root)
+                for root in successful_candidate_roots[1:]
+            ):
+                raise RunnerError(
+                    "successful family does not rehook state canonical_root_metric"
+                )
 
         if cursor < len(steps):
             if state.get("status") != RunStatus.ACTIVE.value:
@@ -1176,6 +1207,57 @@ class AttributionRunner:
         ):
             return "query_blocked"
         return "query_failed"
+
+    def _validate_canonical_root_metric(
+        self, state: dict[str, Any], step: dict[str, Any], outcome: Any
+    ) -> None:
+        if not step["produces_candidates"]:
+            return
+        root = {
+            "current_value": outcome.root_current_value,
+            "baseline_value": outcome.root_baseline_value,
+            "delta": outcome.root_delta,
+        }
+        if not self._valid_root_metric(root):
+            raise RunnerError("validated candidate family lacks finite root metric facts")
+        canonical = state.get("canonical_root_metric")
+        if canonical is None:
+            state["canonical_root_metric"] = root
+        elif not self._root_metrics_match(canonical, root):
+            raise ResultValidationError(
+                "result_incomplete",
+                "root metric does not rehook the canonical investigation root",
+            )
+
+    def _valid_root_metric(self, root: Any) -> bool:
+        return (
+            isinstance(root, dict)
+            and set(root) == {"current_value", "baseline_value", "delta"}
+            and all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                for value in root.values()
+            )
+        )
+
+    def _root_metrics_match(
+        self, canonical: dict[str, Any], candidate: dict[str, Any]
+    ) -> bool:
+        if not self._valid_root_metric(canonical) or not self._valid_root_metric(
+            candidate
+        ):
+            return False
+        tolerance = float(self.contracts.result_defaults["contribution_tolerance"])
+        return all(
+            math.isclose(
+                float(canonical[field]),
+                float(candidate[field]),
+                rel_tol=0.0,
+                abs_tol=tolerance,
+            )
+            for field in ("current_value", "baseline_value", "delta")
+        )
 
     def _required_non_empty_string(self, value: dict[str, Any], key: str) -> str:
         result = value.get(key)

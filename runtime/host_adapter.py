@@ -59,7 +59,7 @@ class ProductionDViewExecutor:
         query: Callable[..., Any],
         *,
         database_type: str = "MaxCompute",
-        limit: int = 249,
+        limit: int = 250,
     ):
         if not callable(query):
             raise RunnerError("DView query client must be callable")

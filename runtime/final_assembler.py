@@ -49,6 +49,9 @@ class FinalAssembler:
             raise FinalAssemblyError(
                 f"{status} writer patch cannot contain candidate findings"
             )
+        evidence_limits = self._merge_evidence_limits(
+            writer_pack.get("evidence_limits"), patch["evidence_limits"]
+        )
 
         investigation = {
             **investigation_context,
@@ -65,7 +68,7 @@ class FinalAssembler:
             investigation.update(
                 {
                     "summary": patch["summary"],
-                    "evidence_limits": list(patch["evidence_limits"]),
+                    "evidence_limits": evidence_limits,
                     "recommended_action": patch["recommended_action"],
                 }
             )
@@ -76,8 +79,8 @@ class FinalAssembler:
                     "action": patch["recommended_action"],
                 }
             )
-            if patch["evidence_limits"]:
-                investigation["evidence_limits"] = list(patch["evidence_limits"])
+            if evidence_limits:
+                investigation["evidence_limits"] = evidence_limits
 
         findings = []
         for candidate in writer_pack["candidates"]:
@@ -134,6 +137,15 @@ class FinalAssembler:
         ):
             raise FinalAssemblyError("writer patch evidence_limits are invalid")
         return patch
+
+    def _merge_evidence_limits(
+        self, machine_limits: Any, writer_limits: list[str]
+    ) -> list[str]:
+        if not isinstance(machine_limits, list) or any(
+            not isinstance(item, str) or not item.strip() for item in machine_limits
+        ):
+            raise FinalAssemblyError("writer pack evidence_limits are invalid")
+        return list(dict.fromkeys([*machine_limits, *writer_limits]))
 
     def _validate_context(
         self, context: Any

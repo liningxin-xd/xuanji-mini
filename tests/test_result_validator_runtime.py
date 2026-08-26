@@ -125,6 +125,41 @@ class ResultValidatorRuntimeTest(unittest.TestCase):
         state = self.runner.load_state("result-run")
         self.assertEqual("result_incomplete", state["steps"][1]["failure_code"])
 
+    def test_cross_family_root_mismatch_fails_only_the_current_family(self):
+        ticket = self.ticket
+        while ticket["action"] != "queue_complete":
+            raw_result = raw_result_for_ticket(
+                self.runner, "result-run", ticket, candidate=True
+            )
+            if ticket["step_id"] == "device_brand":
+                for row in raw_result["rows"]:
+                    row["overall_current_numerator"] = 780
+                raw_result["rows"][-1]["current_numerator"] -= 10
+            self.runner.record(
+                "result-run",
+                self_reported_result_event(
+                    ticket, raw_result, f"root-{ticket['step_id']}"
+                ),
+            )
+            ticket = self.runner.next_action("result-run")
+
+        state = self.runner.load_state("result-run")
+        canonical = state["canonical_root_metric"]
+        self.assertAlmostEqual(0.79, canonical["current_value"])
+        self.assertAlmostEqual(0.8, canonical["baseline_value"])
+        self.assertAlmostEqual(-0.01, canonical["delta"])
+        device = state["steps"][2]
+        self.assertEqual("failed", device["status"])
+        self.assertEqual("result_incomplete", device["failure_code"])
+        self.assertEqual(
+            "result_incomplete: root metric does not rehook the canonical "
+            "investigation root",
+            device["reason"],
+        )
+        self.assertTrue(
+            all(step["status"] == "succeeded" for step in state["steps"][3:])
+        )
+
     def test_registered_quality_bucket_is_accepted_and_cannot_be_a_business_bucket(self):
         self.assertTrue(self.runner.result_validator._is_quality_value("__quality__"))
         first_result = raw_result_for_ticket(self.runner, "result-run", self.ticket)
@@ -303,7 +338,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
             response.raw_result,
         )
         self.assertEqual("MaxCompute", calls[0]["database_type"])
-        self.assertEqual(249, calls[0]["limit"])
+        self.assertEqual(250, calls[0]["limit"])
 
     def test_production_executor_normalizes_structured_transport_types(self):
         response = ProductionDViewExecutor(
@@ -458,6 +493,45 @@ class TrustedHostAdapterTest(unittest.TestCase):
             all(step["status"] == "succeeded" for step in state["steps"][1:])
         )
 
+    def test_execute_until_blocked_rejects_250_rows_and_continues(self):
+        runner = AttributionRunner(
+            ROOT,
+            runs_root=self.temp_dir.name,
+            trusted_receipt_verifier=self.signer,
+        )
+        runner.init_run(
+            run_id="host-row-limit",
+            chain="download",
+            game_type="app",
+            metric="下载完成率",
+            alert_date="2026-08-22",
+        )
+        delegate = _RunnerBackedMCPClient(runner, "host-row-limit", set())
+
+        def query(**kwargs):
+            ticket = runner.next_action("host-row-limit")
+            if ticket["step_id"] != "game_id":
+                return delegate(**kwargs)
+            if kwargs["limit"] != 250:
+                raise AssertionError("Host did not request the row-limit sentinel")
+            raw_result = raw_result_for_ticket(runner, "host-row-limit", ticket)
+            raw_result["rows"] = [dict(raw_result["rows"][0]) for _ in range(250)]
+            return {"result": _markdown_result(raw_result, "row-limit-game")}
+
+        adapter = HostDViewAdapter(
+            runner=runner,
+            executor=ProductionDViewExecutor(query),
+            receipt_signer=self.signer,
+        )
+        result = adapter.execute_until_blocked("host-row-limit")
+        self.assertEqual("queue_complete", result["action"])
+        state = runner.load_state("host-row-limit")
+        self.assertEqual("failed", state["steps"][0]["status"])
+        self.assertEqual("result_incomplete", state["steps"][0]["failure_code"])
+        self.assertTrue(
+            all(step["status"] == "succeeded" for step in state["steps"][1:])
+        )
+
 
 class _RunnerBackedMCPClient:
     def __init__(self, runner, run_id, candidate_steps):
@@ -470,7 +544,7 @@ class _RunnerBackedMCPClient:
         ticket = self.runner.next_action(self.run_id)
         if sql != ticket["rendered_sql"]:
             raise AssertionError("Host did not execute the current issued SQL")
-        if database_type != "MaxCompute" or limit != 249:
+        if database_type != "MaxCompute" or limit != 250:
             raise AssertionError("Host changed the registered DView query transport")
         raw_result = raw_result_for_ticket(
             self.runner,

@@ -90,7 +90,19 @@ def _bucket_rows(
             ("residual", "__other_below_threshold__", "Residual", 500, 300, 360, 240),
         ]
     else:
-        buckets = [(business_kind, "slice-flat", "Slice Flat", 1000, 1000, 800, 800)]
+        residual_current_numerator = 710 if direction == "higher_is_better" else 730
+        buckets = [
+            (business_kind, "slice-flat", "Slice Flat", 100, 100, 80, 80),
+            (
+                "residual",
+                "__other_below_threshold__",
+                "Residual",
+                900,
+                900,
+                residual_current_numerator,
+                720,
+            ),
+        ]
 
     overall_current_denominator = sum(item[3] for item in buckets)
     overall_baseline_denominator = sum(item[4] for item in buckets)

@@ -117,6 +117,19 @@ class EvidencePackBuilder:
         ):
             raise EvidencePackError("successful candidate family lacks root metric facts")
         current, baseline, delta = (float(value) for value in roots[0])
+        if any(
+            not math.isclose(
+                float(actual),
+                expected,
+                rel_tol=0.0,
+                abs_tol=0.000001,
+            )
+            for root in roots[1:]
+            for actual, expected in zip(root, (current, baseline, delta), strict=True)
+        ):
+            raise EvidencePackError(
+                "successful candidate families do not share one root metric"
+            )
         return {
             "current_value": current,
             "baseline_value": baseline,

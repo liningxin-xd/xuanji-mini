@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from runtime.evidence_pack import EvidencePackBuilder
-from runtime.final_assembler import FinalAssemblyError
+from runtime.final_assembler import FinalAssembler, FinalAssemblyError
 from runtime.final_validator import FinalEvidenceValidator, FinalValidationError
 from runtime.runner import AttributionRunner
 from tests.runtime_result_fixtures import raw_result_for_ticket, self_reported_result_event
@@ -133,6 +133,29 @@ class WriterPackRuntimeTest(unittest.TestCase):
         patch = self._patch("game_id:not-exposed")
         with self.assertRaisesRegex(FinalAssemblyError, "unknown candidates"):
             self.runner.assemble_final("writer-run", patch, self._context())
+
+    def test_assembler_preserves_machine_evidence_limits_and_deduplicates(self):
+        pack = self.runner.build_writer_pack("writer-run")
+        pack["evidence_limits"] = [
+            "device_brand:result_incomplete",
+            "shared-limit",
+        ]
+        patch = self._patch(pack["candidates"][0]["candidate_id"])
+        patch["evidence_limits"] = ["shared-limit", "writer-limit"]
+        analysis = FinalAssembler().assemble(
+            writer_pack=pack,
+            attribution_execution=self.runner.export("writer-run"),
+            writer_patch=patch,
+            analysis_context=self._context(),
+        )
+        self.assertEqual(
+            [
+                "device_brand:result_incomplete",
+                "shared-limit",
+                "writer-limit",
+            ],
+            analysis["investigations"][0]["evidence_limits"],
+        )
 
 
 if __name__ == "__main__":
