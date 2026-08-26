@@ -860,7 +860,7 @@ def _read_json_input(path_value: str) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m runtime.runner")
+    parser = argparse.ArgumentParser(prog="python3 -m runtime.runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("verify-assets")
