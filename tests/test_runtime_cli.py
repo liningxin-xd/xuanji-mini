@@ -45,6 +45,20 @@ class RuntimeCliTest(unittest.TestCase):
         output = completed.stdout if completed.returncode == 0 else completed.stderr
         return json.loads(output)
 
+    def _analysis_context(self):
+        return {
+            "source": "dataworks_dqc",
+            "project": "tap_dw",
+            "table": "tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d",
+            "partition": "dt=2026-08-22",
+            "investigation": {
+                "rule_indexes": [0],
+                "metric_hint": "下载完成率",
+                "alert_partition": "dt=2026-08-22",
+                "alert_rules": [{"rule_name": "【APK下载完成率】最近1天低于阈值"}],
+            },
+        }
+
     def test_verify_assets_cli(self):
         result = self._cli("verify-assets")
         self.assertEqual("ok", result["status"])
@@ -57,13 +71,15 @@ class RuntimeCliTest(unittest.TestCase):
             "python3 -m runtime.runner next",
             "python3 -m runtime.runner record",
             "python3 -m runtime.runner export",
+            "python3 -m runtime.runner writer-pack",
+            "python3 -m runtime.runner assemble-final",
             "python3 -m runtime.runner validate-final",
         ):
             self.assertIn(command, skill)
         self.assertIn("不得直接修改 `.runs/*/state.json`", skill)
-        self.assertIn("HostDViewAdapter.execute_current(run_id)", skill)
-        self.assertIn('receipt_mode="trusted_host"', skill)
-        self.assertIn("`query_returned` 或 `query_error`", skill)
+        self.assertIn("HostDViewAdapter.execute_until_blocked(run_id)", skill)
+        self.assertIn("ProductionDViewExecutor", skill)
+        self.assertIn("`query_returned` / `query_error`", skill)
         self.assertIn("`self_reported` 不具有", skill)
         self.assertIn("不得用于生产调查", skill)
         self.assertNotIn("实际提交 SQL 与票据一致性仍依赖调用方", skill)
@@ -104,20 +120,37 @@ class RuntimeCliTest(unittest.TestCase):
                 ),
             )
 
-        execution = self._cli("export", "--run-id", "cli-run")
-        analysis = {
-            "investigations": [
+        writer_pack = self._cli("writer-pack", "--run-id", "cli-run")
+        self.assertEqual("no_dominant_slice", writer_pack["result_status_hint"])
+        patch_path = Path(self.temp_dir.name) / "writer-patch.json"
+        patch_path.write_text(
+            json.dumps(
                 {
-                    "status": "no_dominant_slice",
-                    "metric": "下载完成率",
-                    "analysis_date": "2026-08-22",
-                    "attribution_execution": execution,
-                }
-            ]
-        }
-        analysis_path = Path(self.temp_dir.name) / "analysis.json"
-        analysis_path.write_text(
-            json.dumps(analysis, ensure_ascii=False), encoding="utf-8"
+                    "summary": "下载完成率已完成固定一级队列检查。",
+                    "finding_texts": {},
+                    "evidence_limits": [],
+                    "recommended_action": "继续跟踪下载完成率的后续业务日表现。",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        context_path = Path(self.temp_dir.name) / "analysis-context.json"
+        context_path.write_text(
+            json.dumps(self._analysis_context(), ensure_ascii=False), encoding="utf-8"
+        )
+        analysis = self._cli(
+            "assemble-final",
+            "--run-id",
+            "cli-run",
+            "--writer-patch",
+            str(patch_path),
+            "--analysis-context",
+            str(context_path),
+        )
+        self.assertEqual("no_dominant_slice", analysis["investigations"][0]["status"])
+        analysis_path = (
+            Path(self.temp_dir.name) / "cli-run/final/assembled-analysis.json"
         )
         validated = self._cli(
             "validate-final",
@@ -297,29 +330,40 @@ class AnalysisReplayTest(unittest.TestCase):
                     if step["candidate_count"]
                 }
                 self.assertEqual(scenario["expected"]["candidate_counts"], actual_counts)
-                execution = self.runner.export(run_id)
-                investigation = {
-                    "status": scenario["expected"]["status"],
-                    "metric": route["metric"],
-                    "analysis_date": route["analysis_date"],
-                    "attribution_execution": execution,
-                }
+                writer_pack = self.runner.build_writer_pack(run_id)
+                finding_texts = {}
                 if scenario["expected"]["status"] == "completed":
-                    candidate = state["steps"][0]["candidates"][0]
-                    investigation["top_findings"] = [
-                        {
-                            "dimension": scenario["expected"]["finding_dimension"],
-                            "value": scenario["expected"]["finding_value"],
-                            "attribution_level": "primary",
-                            "adverse_impact_bp": candidate["adverse_impact_bp"],
-                            "finding": "The replayed slice passed every machine gate.",
-                        }
-                    ]
-                path = Path(self.temp_dir.name) / f"{run_id}.json"
-                path.write_text(
-                    json.dumps({"investigations": [investigation]}, ensure_ascii=False),
-                    encoding="utf-8",
+                    candidate = writer_pack["candidates"][0]
+                    finding_texts[candidate["candidate_id"]] = (
+                        "The replayed slice passed every machine gate."
+                    )
+                raw_rule = raw_dqc["ruleChecks"][0]
+                context = {
+                    "source": "dataworks_dqc",
+                    "project": raw_dqc["projectName"],
+                    "table": (
+                        f"{raw_dqc['projectName']}.{raw_rule['tableName']}"
+                    ),
+                    "partition": raw_rule["actualExpression"],
+                    "investigation": {
+                        "rule_indexes": [0],
+                        "metric_hint": route["metric"],
+                        "alert_partition": raw_rule["actualExpression"],
+                        "alert_rules": [{"rule_name": raw_rule["ruleName"]}],
+                    },
+                }
+                analysis = self.runner.assemble_final(
+                    run_id,
+                    {
+                        "summary": "The replayed queue completed.",
+                        "finding_texts": finding_texts,
+                        "evidence_limits": [],
+                        "recommended_action": "Review the replayed primary evidence.",
+                    },
+                    context,
                 )
+                self.assertEqual(route["metric"], analysis["investigations"][0]["metric"])
+                path = Path(self.temp_dir.name) / run_id / "final/assembled-analysis.json"
                 receipt = self.runner.validate_final(run_id, path, 0)
                 self.assertEqual(scenario["expected"]["status"], receipt["investigation_status"])
 

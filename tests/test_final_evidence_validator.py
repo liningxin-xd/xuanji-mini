@@ -70,6 +70,39 @@ class FinalEvidenceValidatorTest(unittest.TestCase):
             "analysis_date": "2026-08-22",
             "attribution_execution": execution,
         }
+        if status in {"completed", "no_dominant_slice"}:
+            state = self.runner.load_state("final-run")
+            root_step = next(
+                (
+                    step
+                    for step in state["steps"]
+                    if step["status"] == "succeeded"
+                    and step["produces_candidates"]
+                ),
+                None,
+            )
+            if root_step is not None:
+                investigation.update(
+                    {
+                        "current_value": root_step["root_current_value"],
+                        "baseline_value": root_step["root_baseline_value"],
+                        "delta_bp": root_step["root_delta"] * 10000,
+                    }
+                )
+            investigation.update(
+                {
+                    "summary": "The registered primary queue is complete.",
+                    "evidence_limits": [],
+                    "recommended_action": "Review the validated primary evidence.",
+                }
+            )
+        elif status in self.validator.ALLOWED_FULL_QUEUE_STATUSES:
+            investigation.update(
+                {
+                    "reason": "Every registered candidate family failed.",
+                    "action": "Review the typed family failures.",
+                }
+            )
         if findings is not None:
             investigation["top_findings"] = findings
         return {"investigations": [investigation]}
@@ -243,10 +276,21 @@ class FinalEvidenceValidatorTest(unittest.TestCase):
             receipt_mode="self_reported",
         )
         state = self.runner.load_state("pending-run")
-        analysis = self._analysis(
-            "no_dominant_slice",
-            {"mode": "full_queue", "chain": "download", "game_type": "app", "steps": []},
-        )
+        analysis = {
+            "investigations": [
+                {
+                    "status": "no_dominant_slice",
+                    "metric": "下载完成率",
+                    "analysis_date": "2026-08-22",
+                    "attribution_execution": {
+                        "mode": "full_queue",
+                        "chain": "download",
+                        "game_type": "app",
+                        "steps": [],
+                    },
+                }
+            ]
+        }
         with self.assertRaisesRegex(FinalValidationError, "not complete"):
             self.validator.validate(state, analysis, 0)
 

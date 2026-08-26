@@ -1,0 +1,3 @@
+{
+  "result": "| sample_null | sample_integer | sample_decimal | sample_date |\n| --- | --- | --- | --- |\n| None | 1 | 1.5 | 2026-08-26 |\n\n*查询ID `00000000-0000-4000-8000-000000000001`, 共 1 行, 耗时 1.63s*"
+}

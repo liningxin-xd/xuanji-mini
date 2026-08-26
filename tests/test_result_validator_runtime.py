@@ -1,8 +1,16 @@
+import json
 import tempfile
 import unittest
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
-from runtime.host_adapter import HostDViewAdapter, HostQueryResponse
+from runtime.host_adapter import (
+    DViewExecutionError,
+    HostDViewAdapter,
+    HostQueryResponse,
+    ProductionDViewExecutor,
+)
 from runtime.receipts import TrustedReceiptVerifier
 from runtime.runner import AttributionRunner, RunnerError
 from tests.runtime_result_fixtures import (
@@ -12,6 +20,7 @@ from tests.runtime_result_fixtures import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DVIEW_RESPONSE_PATH = ROOT / "tests/fixtures/runtime/dview-query-response.json"
 
 
 class ResultValidatorRuntimeTest(unittest.TestCase):
@@ -270,6 +279,235 @@ class TrustedHostAdapterTest(unittest.TestCase):
         result = adapter.execute_current("host-run")
         self.assertEqual(1, result["cursor"])
         self.assertEqual(ticket["rendered_sql"], executor.sql)
+
+    def test_production_executor_parses_the_current_dview_mcp_shape(self):
+        fixture = json.loads(DVIEW_RESPONSE_PATH.read_text(encoding="utf-8"))
+        calls = []
+
+        def query(**kwargs):
+            calls.append(kwargs)
+            return fixture
+
+        response = ProductionDViewExecutor(query).execute_read_only("SELECT 1")
+        self.assertEqual("00000000-0000-4000-8000-000000000001", response.query_id)
+        self.assertEqual(
+            {
+                "columns": [
+                    "sample_null",
+                    "sample_integer",
+                    "sample_decimal",
+                    "sample_date",
+                ],
+                "rows": [[None, 1, 1.5, "2026-08-26"]],
+            },
+            response.raw_result,
+        )
+        self.assertEqual("MaxCompute", calls[0]["database_type"])
+        self.assertEqual(249, calls[0]["limit"])
+
+    def test_production_executor_normalizes_structured_transport_types(self):
+        response = ProductionDViewExecutor(
+            lambda **_: {
+                "query_id": "structured-query",
+                "columns": [
+                    {"name": "whole"},
+                    {"name": "fraction"},
+                    {"name": "day"},
+                    {"name": "day_time"},
+                    {"name": "missing"},
+                ],
+                "rows": [
+                    {
+                        "whole": Decimal("2"),
+                        "fraction": Decimal("2.5"),
+                        "day": date(2026, 8, 26),
+                        "day_time": datetime(2026, 8, 26, 12, 30),
+                        "missing": None,
+                    }
+                ],
+            }
+        ).execute_read_only("SELECT typed_values")
+        self.assertEqual(
+            [[2, 2.5, "2026-08-26", "2026-08-26", None]],
+            response.raw_result["rows"],
+        )
+
+    def test_production_executor_preserves_numeric_dimension_values_as_text(self):
+        response = ProductionDViewExecutor(
+            lambda **_: {
+                "result": (
+                    "| analysis_date | game_type | bucket_kind | dimension_value | "
+                    "dimension_label | current_denominator |\n"
+                    "| --- | --- | --- | --- | --- | --- |\n"
+                    "| 2026-08-26 | app | game | 12345 | 12345 | 100 |\n\n"
+                    "*查询ID `numeric-dimension`, 共 1 行, 耗时 1.00s*"
+                )
+            }
+        ).execute_read_only("SELECT numeric_dimension")
+        self.assertEqual("12345", response.raw_result["rows"][0][3])
+        self.assertEqual("12345", response.raw_result["rows"][0][4])
+        self.assertEqual(100, response.raw_result["rows"][0][5])
+
+    def test_execute_until_blocked_runs_four_primary_profiles_without_leaks(self):
+        scenarios = (
+            ("host-download-candidate", "download", "app", "下载完成率", {"game_id"}, 7),
+            ("host-download-flat", "download", "sandbox", "下载失败率", set(), 7),
+            ("host-install-app", "install", "app", "下载安装完成率", set(), 6),
+            ("host-install-sandbox", "install", "sandbox", "下载安装完成率", set(), 5),
+        )
+        for run_id, chain, game_type, metric, candidate_steps, expected_queries in scenarios:
+            with self.subTest(run_id=run_id):
+                runner = AttributionRunner(
+                    ROOT,
+                    runs_root=self.temp_dir.name,
+                    trusted_receipt_verifier=self.signer,
+                )
+                runner.init_run(
+                    run_id=run_id,
+                    chain=chain,
+                    game_type=game_type,
+                    metric=metric,
+                    alert_date="2026-08-24",
+                )
+                client = _RunnerBackedMCPClient(runner, run_id, candidate_steps)
+                adapter = HostDViewAdapter(
+                    runner=runner,
+                    executor=ProductionDViewExecutor(client),
+                    receipt_signer=self.signer,
+                )
+                result = adapter.execute_until_blocked(run_id)
+                self.assertEqual("queue_complete", result["action"])
+                self.assertEqual(expected_queries, result["executed_query_count"])
+                serialized = json.dumps(result)
+                self.assertNotIn("rendered_sql", serialized)
+                self.assertNotIn("raw_result", serialized)
+                expected_status = "completed" if candidate_steps else "no_dominant_slice"
+                self.assertEqual(
+                    expected_status,
+                    runner.build_writer_pack(run_id)["result_status_hint"],
+                )
+
+    def test_execute_until_blocked_pauses_only_for_semantic_repair(self):
+        runner = AttributionRunner(
+            ROOT,
+            runs_root=self.temp_dir.name,
+            trusted_receipt_verifier=self.signer,
+        )
+        runner.init_run(
+            run_id="host-semantic",
+            chain="download",
+            game_type="app",
+            metric="下载完成率",
+            alert_date="2026-08-22",
+        )
+
+        def query(**_):
+            raise DViewExecutionError(
+                query_id="semantic-query",
+                error_class="semantic_analysis",
+                error_code="ODPS-0130071",
+                error_message="column is not in GROUP BY",
+            )
+
+        adapter = HostDViewAdapter(
+            runner=runner,
+            executor=ProductionDViewExecutor(query),
+            receipt_signer=self.signer,
+        )
+        result = adapter.execute_until_blocked("host-semantic")
+        self.assertEqual("repair_query", result["action"])
+        self.assertEqual(1, result["executed_query_count"])
+
+    def test_execute_until_blocked_continues_after_a_family_query_error(self):
+        runner = AttributionRunner(
+            ROOT,
+            runs_root=self.temp_dir.name,
+            trusted_receipt_verifier=self.signer,
+        )
+        runner.init_run(
+            run_id="host-family-error",
+            chain="download",
+            game_type="app",
+            metric="下载完成率",
+            alert_date="2026-08-22",
+        )
+        delegate = _RunnerBackedMCPClient(runner, "host-family-error", set())
+
+        def query(**kwargs):
+            ticket = runner.next_action("host-family-error")
+            if ticket["step_id"] == "game_id":
+                raise DViewExecutionError(
+                    query_id="blocked-game-query",
+                    error_class="permission",
+                    error_code="ACCESS_DENIED",
+                    error_message="permission denied",
+                )
+            return delegate(**kwargs)
+
+        adapter = HostDViewAdapter(
+            runner=runner,
+            executor=ProductionDViewExecutor(query),
+            receipt_signer=self.signer,
+        )
+        result = adapter.execute_until_blocked("host-family-error")
+        self.assertEqual("queue_complete", result["action"])
+        self.assertEqual(7, result["executed_query_count"])
+        state = runner.load_state("host-family-error")
+        self.assertEqual("failed", state["steps"][0]["status"])
+        self.assertTrue(
+            all(step["status"] == "succeeded" for step in state["steps"][1:])
+        )
+
+
+class _RunnerBackedMCPClient:
+    def __init__(self, runner, run_id, candidate_steps):
+        self.runner = runner
+        self.run_id = run_id
+        self.candidate_steps = candidate_steps
+        self.query_count = 0
+
+    def __call__(self, *, sql, database_type, limit):
+        ticket = self.runner.next_action(self.run_id)
+        if sql != ticket["rendered_sql"]:
+            raise AssertionError("Host did not execute the current issued SQL")
+        if database_type != "MaxCompute" or limit != 249:
+            raise AssertionError("Host changed the registered DView query transport")
+        raw_result = raw_result_for_ticket(
+            self.runner,
+            self.run_id,
+            ticket,
+            candidate=ticket["step_id"] in self.candidate_steps,
+        )
+        self.query_count += 1
+        return {
+            "result": _markdown_result(
+                raw_result,
+                f"{self.run_id}-{self.query_count}",
+            )
+        }
+
+
+def _markdown_result(raw_result, query_id):
+    def cell(value):
+        if value is None:
+            return "NULL"
+        return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+    columns = raw_result["columns"]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in raw_result["rows"]:
+        values = [row[name] for name in columns] if isinstance(row, dict) else row
+        lines.append("| " + " | ".join(cell(value) for value in values) + " |")
+    lines.extend(
+        [
+            "",
+            f"*查询ID `{query_id}`, 共 {len(raw_result['rows'])} 行, 耗时 1.00s*",
+        ]
+    )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

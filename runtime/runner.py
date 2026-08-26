@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -17,6 +18,8 @@ from .contracts import (
     sha256_bytes,
     sha256_text,
 )
+from .evidence_pack import EvidencePackBuilder, EvidencePackError
+from .final_assembler import FinalAssembler, FinalAssemblyError
 from .final_validator import FinalEvidenceValidator, FinalValidationError
 from .models import QueryBinding, RunStatus, StepStatus, TERMINAL_STEP_STATUSES
 from .query_builder import QueryBuildError, QueryBuilder
@@ -139,6 +142,8 @@ class AttributionRunner:
                     "attempts": [],
                     "candidate_count": None,
                     "candidates": [],
+                    "root_current_value": None,
+                    "root_baseline_value": None,
                     "root_delta": None,
                     "failure_code": None,
                     "reason": None,
@@ -147,7 +152,7 @@ class AttributionRunner:
             )
 
         state = {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": run_id,
             "revision": 0,
             "status": RunStatus.ACTIVE.value,
@@ -345,11 +350,15 @@ class AttributionRunner:
                     "status": "succeeded",
                     "candidate_count": outcome.candidate_count,
                     "warning_codes": list(outcome.warning_codes),
+                    "root_current_value": outcome.root_current_value,
+                    "root_baseline_value": outcome.root_baseline_value,
                     "root_delta": outcome.root_delta,
                 }
                 step["status"] = StepStatus.SUCCEEDED.value
                 step["candidate_count"] = outcome.candidate_count
                 step["candidates"] = list(outcome.candidates)
+                step["root_current_value"] = outcome.root_current_value
+                step["root_baseline_value"] = outcome.root_baseline_value
                 step["root_delta"] = outcome.root_delta
                 step["warning_codes"] = list(outcome.warning_codes)
         else:
@@ -425,6 +434,34 @@ class AttributionRunner:
         ) != evidence_sha256:
             raise RunnerError("stored attribution evidence is missing or changed")
         return evidence
+
+    def build_writer_pack(self, run_id: str) -> dict[str, Any]:
+        self.export(run_id)
+        state = self._load_state(run_id)
+        pack = EvidencePackBuilder().build(state)
+        self._atomic_write_json(
+            self._run_dir(run_id) / "exports/writer-pack.json", pack
+        )
+        return pack
+
+    def assemble_final(
+        self,
+        run_id: str,
+        writer_patch: dict[str, Any],
+        analysis_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        execution = self.export(run_id)
+        pack = self.build_writer_pack(run_id)
+        analysis = FinalAssembler().assemble(
+            writer_pack=pack,
+            attribution_execution=execution,
+            writer_patch=writer_patch,
+            analysis_context=analysis_context,
+        )
+        self._atomic_write_json(
+            self._run_dir(run_id) / "final/assembled-analysis.json", analysis
+        )
+        return analysis
 
     def validate_final(
         self,
@@ -755,7 +792,7 @@ class AttributionRunner:
         return state
 
     def _validate_state_contract(self, state: dict[str, Any]) -> None:
-        if state.get("schema_version") != 2:
+        if state.get("schema_version") != 3:
             raise RunnerError("unsupported state schema version")
         self._validate_run_id(state.get("run_id"))
         expected_contract_hashes = {
@@ -910,10 +947,41 @@ class AttributionRunner:
                     raise RunnerError("diagnostic step has candidate details")
                 if step.get("failure_code") is not None or step.get("reason") is not None:
                     raise RunnerError("succeeded step retains a failure classification")
+                root_values = (
+                    step.get("root_current_value"),
+                    step.get("root_baseline_value"),
+                    step.get("root_delta"),
+                )
+                if plan_step.produces_candidates:
+                    if any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in root_values
+                    ):
+                        raise RunnerError("candidate step lacks finite root metric facts")
+                    if not math.isclose(
+                        float(root_values[0]) - float(root_values[1]),
+                        float(root_values[2]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    ):
+                        raise RunnerError("candidate step root metric facts do not close")
+                elif any(value is not None for value in root_values):
+                    raise RunnerError("diagnostic step cannot contain root metric facts")
             elif candidate_count is not None:
                 raise RunnerError("non-succeeded step cannot have candidate_count")
             elif step.get("candidates") != []:
                 raise RunnerError("non-succeeded step cannot have candidate details")
+            elif any(
+                step.get(field) is not None
+                for field in (
+                    "root_current_value",
+                    "root_baseline_value",
+                    "root_delta",
+                )
+            ):
+                raise RunnerError("non-succeeded step cannot contain root metric facts")
             warning_codes = step.get("warning_codes")
             if not isinstance(warning_codes, list) or any(
                 not isinstance(code, str) or not code.strip() for code in warning_codes
@@ -1234,9 +1302,9 @@ def _read_json_input(path_value: str) -> dict[str, Any]:
     try:
         value = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise RunnerError(f"record input is not valid JSON: {exc}") from exc
+        raise RunnerError(f"input is not valid JSON: {exc}") from exc
     if not isinstance(value, dict):
-        raise RunnerError("record input must contain a JSON object")
+        raise RunnerError("input must contain a JSON object")
     return value
 
 
@@ -1260,7 +1328,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("--resume", action="store_true")
 
-    for command in ("next", "status", "export"):
+    for command in ("next", "status", "export", "writer-pack"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--run-id", required=True)
 
@@ -1271,6 +1339,10 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--run-id", required=True)
     validate_parser.add_argument("--analysis-json", required=True)
     validate_parser.add_argument("--investigation-index", type=int, required=True)
+    assemble_parser = subparsers.add_parser("assemble-final")
+    assemble_parser.add_argument("--run-id", required=True)
+    assemble_parser.add_argument("--writer-patch", required=True)
+    assemble_parser.add_argument("--analysis-context", required=True)
     return parser
 
 
@@ -1300,6 +1372,14 @@ def main(argv: list[str] | None = None) -> int:
             result = runner.status(args.run_id)
         elif args.command == "export":
             result = runner.export(args.run_id)
+        elif args.command == "writer-pack":
+            result = runner.build_writer_pack(args.run_id)
+        elif args.command == "assemble-final":
+            result = runner.assemble_final(
+                args.run_id,
+                _read_json_input(args.writer_patch),
+                _read_json_input(args.analysis_context),
+            )
         elif args.command == "validate-final":
             result = runner.validate_final(
                 args.run_id,
@@ -1310,6 +1390,8 @@ def main(argv: list[str] | None = None) -> int:
             raise RunnerError(f"unknown command: {args.command}")
     except (
         ContractError,
+        EvidencePackError,
+        FinalAssemblyError,
         FinalValidationError,
         QueryBuildError,
         RunnerError,

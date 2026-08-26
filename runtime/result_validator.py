@@ -23,6 +23,8 @@ class ResultValidationOutcome:
     candidate_count: int
     candidates: tuple[dict[str, Any], ...]
     warning_codes: tuple[str, ...]
+    root_current_value: float | None
+    root_baseline_value: float | None
     root_delta: float | None
 
 
@@ -240,11 +242,22 @@ class ResultValidator:
         candidates.sort(
             key=lambda item: (-item["adverse_impact_bp"], item["value"])
         )
+        first = rows[0]
+        root_current_value = (
+            first["overall_current_numerator"]
+            / first["overall_current_denominator"]
+        )
+        root_baseline_value = (
+            first["overall_baseline_numerator"]
+            / first["overall_baseline_denominator"]
+        )
         return ResultValidationOutcome(
             status="succeeded",
             candidate_count=len(candidates),
             candidates=tuple(candidates),
             warning_codes=tuple(sorted(warnings)),
+            root_current_value=root_current_value,
+            root_baseline_value=root_baseline_value,
             root_delta=root_delta,
         )
 
@@ -344,6 +357,8 @@ class ResultValidator:
             candidate_count=0,
             candidates=(),
             warning_codes=warnings,
+            root_current_value=None,
+            root_baseline_value=None,
             root_delta=None,
         )
 

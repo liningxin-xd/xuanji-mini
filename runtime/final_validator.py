@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from .contracts import canonical_sha256
+from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .models import StepStatus, TERMINAL_STEP_STATUSES
 
 
@@ -60,6 +61,37 @@ class FinalEvidenceValidator:
             raise FinalValidationError(
                 "investigation analysis_date does not match the run"
             )
+        if investigation_status in {"completed", "no_dominant_slice"}:
+            try:
+                root_metric = EvidencePackBuilder().root_metric(state["steps"])
+            except EvidencePackError as exc:
+                raise FinalValidationError(str(exc)) from exc
+            if root_metric is None:
+                raise FinalValidationError("successful investigation lacks root facts")
+            for field, expected in root_metric.items():
+                actual = investigation.get(field)
+                if (
+                    isinstance(actual, bool)
+                    or not isinstance(actual, (int, float))
+                    or not math.isfinite(float(actual))
+                    or not math.isclose(
+                        float(actual),
+                        float(expected),
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    raise FinalValidationError(
+                        f"investigation {field} does not match frozen root facts"
+                    )
+            self._require_text(investigation, "summary")
+            self._require_text(investigation, "recommended_action")
+            self._validate_text_array(investigation, "evidence_limits")
+        else:
+            self._require_text(investigation, "reason")
+            self._require_text(investigation, "action")
+            if "evidence_limits" in investigation:
+                self._validate_text_array(investigation, "evidence_limits")
 
         execution = investigation.get("attribution_execution")
         if not isinstance(execution, dict):
@@ -142,6 +174,7 @@ class FinalEvidenceValidator:
         for finding in top_findings:
             if not isinstance(finding, dict):
                 raise FinalValidationError("each top finding must be an object")
+            self._require_text(finding, "finding")
             if finding.get("attribution_level") != "primary":
                 raise FinalValidationError(
                     "V1 fixed-queue validation accepts only primary findings"
@@ -246,6 +279,19 @@ class FinalEvidenceValidator:
             "validated_step_count": len(actual_steps),
             "validated_query_id_count": len(self._query_ids_in(investigation)),
         }
+
+    def _require_text(self, value: dict[str, Any], field: str) -> str:
+        text = value.get(field)
+        if not isinstance(text, str) or not text.strip():
+            raise FinalValidationError(f"{field} must be a non-empty string")
+        return text
+
+    def _validate_text_array(self, value: dict[str, Any], field: str) -> None:
+        items = value.get(field)
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) or not item.strip() for item in items
+        ):
+            raise FinalValidationError(f"{field} must be an array of non-empty strings")
 
     def _known_query_ids(self, state: dict[str, Any]) -> set[str]:
         return {

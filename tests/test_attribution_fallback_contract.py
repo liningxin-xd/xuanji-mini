@@ -37,10 +37,9 @@ class AttributionFallbackContractTest(unittest.TestCase):
         cls.playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
 
     def test_family_local_failure_does_not_end_the_investigation(self):
-        self.assertIn("单个维度家族失败是家族级限制", self.skill)
-        self.assertIn("不得直接结束整个调查", self.skill)
-        self.assertIn("单个家族失败不算“规定下钻未完成”", self.skill)
-        self.assertIn("不得提前返回受阻状态", self.skill)
+        self.assertIn("单个家族失败不得截断或重排队列", self.skill)
+        self.assertIn("单个步骤失败不能缩短数组", self.playbook)
+        self.assertIn("不能提前返回 `unsupported_drilldown`", self.playbook)
         self.assertIn("继续下一个已登记维度家族", self.playbook)
         self.assertNotIn(
             "该家族若是本轮规定归因必须完成的路径，按无合法下钻数据源处理",
@@ -57,10 +56,10 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertIn("逐个尝试完上述五个家族", self.playbook)
 
     def test_registered_attribution_emits_machine_checkable_full_queue(self):
-        self.assertIn("`attribution_execution`", self.skill)
+        self.assertIn("attribution_execution", self.skill)
         self.assertIn("`attribution_execution.execution_mode`", self.playbook)
         self.assertIn("`trusted_host_adapter` 或 `self_reported_development`", self.playbook)
-        self.assertIn("不能等到撰写结论时根据已有候选反推执行记录", self.skill)
+        self.assertIn("步骤终态、候选和 warning 全部由 Runtime 生成", self.skill)
         self.assertIn("## 归因执行清单", self.playbook)
         self.assertIn("writer 将拒绝缺少步骤、顺序不符", self.playbook)
         self.assertIn(
@@ -73,9 +72,9 @@ class AttributionFallbackContractTest(unittest.TestCase):
             "-> os_major_version -> apk_size_tier",
             self.playbook,
         )
-        self.assertIn("已经找到游戏候选而截断固定队列", self.skill)
-        self.assertIn("`secondary_steps`", self.skill)
-        self.assertIn("`attribution_level=primary|secondary`", self.skill)
+        self.assertIn("无论是否已经形成游戏候选", self.playbook)
+        self.assertIn("`secondary_steps`", self.playbook)
+        self.assertIn("`attribution_level=primary|secondary`", self.playbook)
         self.assertIn("一级与二级 `candidate_count` 合计为正", self.playbook)
         self.assertIn("所有一级、二级候选数均为零", self.playbook)
         self.assertIn("finding 无对应执行证据", self.playbook)
@@ -249,7 +248,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
         ):
             self.assertIn(contract, version)
 
-        self.assertIn("DView 查询结果存在 1000 行返回上限", self.skill)
+        self.assertIn("DView 最多返回 1000 行", self.playbook)
         self.assertIn("返回恰好 1000 行", self.playbook)
         self.assertIn("不得先接收 1000 行截断结果", self.playbook)
         self.assertIn("一级再加至多 3 个质量桶和 1 个残差桶，最多 204 行", self.playbook)
