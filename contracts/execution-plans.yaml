@@ -1,0 +1,108 @@
+version: 1
+
+plans:
+  download:
+    chain: download
+    allowed_game_types:
+      - app
+      - sandbox
+    allowed_metrics:
+      - 下载完成率
+      - 下载失败率
+      - 下载失败次数比率
+      - 下载人为停止率
+    steps:
+      - id: game_id
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: is_reserve_auto_download
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: device_brand
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: channel_group
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: app_major_version
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: os_major_version
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: apk_size_tier
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+
+  install_app:
+    chain: install
+    allowed_game_types:
+      - app
+    allowed_metrics:
+      - 下载安装完成率
+    steps:
+      - id: game_id
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: install_stage
+        kind: diagnostic
+        produces_candidates: false
+        failure_scope: step
+      - id: device_brand
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: storage_headroom_tier
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: os_major_version
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: apk_size_tier
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+
+  install_sandbox:
+    chain: install
+    allowed_game_types:
+      - sandbox
+    allowed_metrics:
+      - 下载安装完成率
+    steps:
+      - id: game_id
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: install_stage
+        kind: diagnostic
+        produces_candidates: false
+        failure_scope: step
+        automatic_status: skipped_not_applicable
+        automatic_reason: sandbox 没有适用的客户端 installStart 语义
+      - id: device_brand
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: storage_headroom_tier
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: os_major_version
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
+      - id: apk_size_tier
+        kind: primary
+        produces_candidates: true
+        failure_scope: step
