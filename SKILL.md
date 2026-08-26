@@ -40,6 +40,8 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 - 平台层按 [Primary Host Boundary Integration](references/host-boundary-integration.md)
   注册 `xuanji_run_investigation`、`xuanji_submit_repair` 和 `xuanji_finalize`；
   只把这三个窄接口暴露给模型。
+- 不能修改现有 DView MCP 时，独立部署 [Native Primary Host](references/native-host-deployment.md)；
+  由该服务在 UI 以下通过 MCP client 调用现有只读 `/mcp/query`，不得让模型发起嵌套调用。
 - Host 在模型进程外持有至少 32 字节 receipt secret，并用同一 `TrustedReceiptVerifier` 创建 Runner 与 `HostDViewAdapter`。
 - `ProductionDViewExecutor` 接收当前 DView MCP 的真实响应，保留真实 query ID，并转换为有序 `columns + rows`。
 - Host 调用 `HostDViewAdapter.execute_until_blocked(run_id)`；普通成功和家族级失败都自动继续固定队列。

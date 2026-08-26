@@ -18,6 +18,11 @@ root, and a validated-result sink. Only the three `xuanji_*` methods
 may be registered as model tools. The DView callable, runner, adapter, sink, and
 artifact readers must remain private to the Host process.
 
+When the existing DView MCP service cannot be modified, deploy the repository's
+independent `host_service` and follow [Native Primary Host Deployment](native-host-deployment.md).
+Its server-side MCP client calls the existing read-only DView endpoint below the
+UI boundary. Calling DView from a model-visible terminal remains invalid.
+
 Resume accepts only the current schema-v4 state with identical immutable
 identity and contract hashes. A legacy state or changed run identity is rejected
 and must start under a new run ID.
