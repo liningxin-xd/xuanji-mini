@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -158,13 +159,16 @@ class RepositoryContracts:
         self.execution_plans_path = self.contract_root / "execution-plans.yaml"
         self.query_registry_path = self.contract_root / "query-registry.yaml"
         self.asset_lock_path = self.contract_root / "query-assets.lock.json"
+        self.result_schemas_path = self.contract_root / "result-schemas.yaml"
 
         self._plans_raw = _load_yaml_mapping(self.execution_plans_path)
         self._registry = _load_yaml_mapping(self.query_registry_path)
         self._asset_lock = _load_json_mapping(self.asset_lock_path)
+        self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
         self._plans = self._validate_plans()
         self._asset_hashes = self._load_asset_hashes()
         self._validate_registry()
+        self._validate_result_schemas()
 
     @property
     def registry(self) -> dict[str, Any]:
@@ -177,6 +181,53 @@ class RepositoryContracts:
     @property
     def asset_hashes(self) -> dict[str, str]:
         return dict(self._asset_hashes)
+
+    @property
+    def execution_plan_sha256(self) -> str:
+        return sha256_bytes(self.execution_plans_path.read_bytes())
+
+    @property
+    def query_registry_sha256(self) -> str:
+        return sha256_bytes(self.query_registry_path.read_bytes())
+
+    @property
+    def triage_sha256(self) -> str:
+        return sha256_bytes(self.triage_path().read_bytes())
+
+    @property
+    def result_schemas_sha256(self) -> str:
+        return sha256_bytes(self.result_schemas_path.read_bytes())
+
+    @property
+    def result_defaults(self) -> dict[str, Any]:
+        return deepcopy(self._result_schemas["defaults"])
+
+    def metric_result_contract(self, metric: str) -> dict[str, Any]:
+        contract = self._result_schemas["metrics"].get(metric)
+        if not isinstance(contract, dict):
+            raise ContractError(f"result contract is missing metric: {metric}")
+        return deepcopy(contract)
+
+    def result_schema(self, schema_id: str) -> dict[str, Any]:
+        schema = self._result_schemas["schemas"].get(schema_id)
+        if not isinstance(schema, dict):
+            raise ContractError(f"unknown result schema: {schema_id}")
+        return deepcopy(schema)
+
+    def query_spec_result_contract(
+        self, binding: QueryBinding
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        if binding.asset_kind != "query_spec":
+            raise ContractError("result columns can only be loaded from a QuerySpec")
+        raw = _load_yaml_mapping(_safe_path(self.root, binding.asset_path))
+        output = raw.get("output")
+        quality = raw.get("quality")
+        if not isinstance(output, dict) or not isinstance(quality, dict):
+            raise ContractError(f"QuerySpec lacks output/quality: {binding.asset_path}")
+        columns = output.get("columns")
+        if not isinstance(columns, dict) or not columns:
+            raise ContractError(f"QuerySpec lacks output columns: {binding.asset_path}")
+        return dict(columns), deepcopy(quality)
 
     def verify_assets(self) -> dict[str, Any]:
         result = verify_asset_lock(self.root, self.asset_lock_path)
@@ -227,14 +278,16 @@ class RepositoryContracts:
                     metric_config["game_query"]["path"],
                     "query_spec",
                     metric_config,
+                    result_schema_id="query_spec_bucket",
                 )
             dimension_config = self._dimension_config("download", step_id)
             return self._binding(
                 metric_config["primary_template"]["path"],
                 "markdown_template",
                 metric_config,
-                step_id,
-                dimension_config,
+                result_schema_id="download_primary_bucket",
+                dimension=step_id,
+                dimension_config=dimension_config,
             )
 
         install_config = self._registry["install"]
@@ -245,6 +298,7 @@ class RepositoryContracts:
                 install_config["game_query"]["path"],
                 "query_spec",
                 install_config,
+                result_schema_id="query_spec_bucket",
             )
         if step_id == "install_stage":
             if game_type == "sandbox":
@@ -258,14 +312,16 @@ class RepositoryContracts:
                 install_config["stage_query"]["path"],
                 "query_spec",
                 install_config,
+                result_schema_id="install_stage",
             )
         dimension_config = self._dimension_config("install", step_id)
         return self._binding(
             install_config["primary_template"]["path"],
             "markdown_template",
             install_config,
-            step_id,
-            dimension_config,
+            result_schema_id="install_primary_bucket",
+            dimension=step_id,
+            dimension_config=dimension_config,
         )
 
     def all_primary_dimension_fields(self) -> set[str]:
@@ -276,14 +332,17 @@ class RepositoryContracts:
         return fields
 
     def triage_text(self) -> str:
-        path = _safe_path(self.root, self._registry["triage_path"])
-        return path.read_text(encoding="utf-8")
+        return self.triage_path().read_text(encoding="utf-8")
+
+    def triage_path(self) -> Path:
+        return _safe_path(self.root, self._registry["triage_path"])
 
     def _binding(
         self,
         path: str,
         asset_kind: str,
         config: dict[str, Any],
+        result_schema_id: str,
         dimension: str | None = None,
         dimension_config: dict[str, Any] | None = None,
     ) -> QueryBinding:
@@ -296,6 +355,7 @@ class RepositoryContracts:
             data_sources=tuple(config.get("data_sources", [])),
             protected_tokens=tuple(config.get("protected_tokens", [])),
             required_predicates=tuple(config.get("required_predicates", [])),
+            result_schema_id=result_schema_id,
             dimension=dimension,
             dimension_config=dict(dimension_config) if dimension_config else None,
         )
@@ -411,8 +471,10 @@ class RepositoryContracts:
         registry = self._registry
         if registry.get("version") != 1:
             raise ContractError("query registry version must be 1")
-        if registry.get("execution_mode") != "task_ticket":
-            raise ContractError("V1 query registry must use task_ticket mode")
+        if registry.get("execution_mode") != "trusted_host_adapter":
+            raise ContractError(
+                "V1 query registry must use the trusted Host adapter"
+            )
         triage_path = registry.get("triage_path")
         if not _safe_path(self.root, triage_path).is_file():
             raise ContractError("registered SQL triage file does not exist")
@@ -499,3 +561,47 @@ class RepositoryContracts:
                 isinstance(value, str) and value for value in values
             ):
                 raise ContractError(f"{field} must be a non-empty string list for {name}")
+
+    def _validate_result_schemas(self) -> None:
+        result = self._result_schemas
+        if result.get("version") != 1:
+            raise ContractError("result schema version must be 1")
+        defaults = result.get("defaults")
+        metrics = result.get("metrics")
+        schemas = result.get("schemas")
+        if not isinstance(defaults, dict):
+            raise ContractError("result schema defaults must be a mapping")
+        if not isinstance(metrics, dict) or set(metrics) != {
+            metric
+            for plan in self._plans.values()
+            for metric in plan.allowed_metrics
+        }:
+            raise ContractError("result schemas must cover every registered metric")
+        if not isinstance(schemas, dict) or set(schemas) != {
+            "query_spec_bucket",
+            "download_primary_bucket",
+            "install_primary_bucket",
+            "install_stage",
+        }:
+            raise ContractError("result schemas do not cover every query binding kind")
+        for name, config in metrics.items():
+            if config.get("direction") not in {
+                "higher_is_better",
+                "lower_is_better",
+            } or not isinstance(config.get("numerator_subset"), bool):
+                raise ContractError(f"invalid metric result contract: {name}")
+        for schema_id, schema in schemas.items():
+            if schema.get("validator") not in {
+                "contribution_buckets",
+                "install_stage",
+            }:
+                raise ContractError(f"invalid result validator: {schema_id}")
+            columns = schema.get("columns")
+            if columns is not None and (
+                not isinstance(columns, dict)
+                or not all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in columns.items()
+                )
+            ):
+                raise ContractError(f"invalid result columns: {schema_id}")

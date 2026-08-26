@@ -55,6 +55,7 @@ class QueryBinding:
     data_sources: tuple[str, ...]
     protected_tokens: tuple[str, ...]
     required_predicates: tuple[str, ...]
+    result_schema_id: str
     dimension: str | None = None
     dimension_config: dict[str, Any] | None = None
 

@@ -110,6 +110,20 @@ class QueryBuilderRuntimeTest(unittest.TestCase):
             ),
             built.sql.replace("AND platform = 'ANDROID'", ""),
             built.sql.replace("AND game_type = 'app'", ""),
+            built.sql.replace(
+                "FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d",
+                "FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d src "
+                "JOIN tap_dw.unregistered_dimension_snapshot extra "
+                "ON src.dt = extra.dt",
+                1,
+            ),
+            built.sql.replace(
+                "FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d",
+                "FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d src "
+                "JOIN `tap_dw.unregistered_dimension_snapshot` extra "
+                "ON src.dt = extra.dt",
+                1,
+            ),
         )
         for sql in mutations:
             with self.subTest(sql=sql[-80:]), self.assertRaises(QueryBuildError):

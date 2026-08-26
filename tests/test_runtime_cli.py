@@ -1,4 +1,5 @@
 import json
+import copy
 import os
 import subprocess
 import sys
@@ -7,10 +8,15 @@ import unittest
 from pathlib import Path
 
 from runtime.runner import AttributionRunner
+from tests.runtime_result_fixtures import (
+    raw_result_for_ticket,
+    self_reported_result_event,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS_PATH = ROOT / "tests/fixtures/runtime/scenario-replays.json"
+ANALYSIS_REPLAYS_PATH = ROOT / "tests/fixtures/runtime/analysis-replays.json"
 
 
 class RuntimeCliTest(unittest.TestCase):
@@ -19,6 +25,7 @@ class RuntimeCliTest(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.env = dict(os.environ)
         self.env["XUANJI_RUNS_ROOT"] = self.temp_dir.name
+        self.runner = AttributionRunner(ROOT, runs_root=self.temp_dir.name)
 
     def _cli(self, *args, input_value=None, expected_returncode=0):
         completed = subprocess.run(
@@ -54,7 +61,12 @@ class RuntimeCliTest(unittest.TestCase):
         ):
             self.assertIn(command, skill)
         self.assertIn("不得直接修改 `.runs/*/state.json`", skill)
-        self.assertIn("当前为任务票据模式", skill)
+        self.assertIn("HostDViewAdapter.execute_current(run_id)", skill)
+        self.assertIn('receipt_mode="trusted_host"', skill)
+        self.assertIn("`query_returned` 或 `query_error`", skill)
+        self.assertIn("`self_reported` 不具有", skill)
+        self.assertIn("不得用于生产调查", skill)
+        self.assertNotIn("实际提交 SQL 与票据一致性仍依赖调用方", skill)
 
     def test_cli_round_trip_reaches_export_and_final_validation(self):
         initialized = self._cli(
@@ -71,6 +83,8 @@ class RuntimeCliTest(unittest.TestCase):
             "2026-08-22",
             "--analysis-date",
             "2026-08-22",
+            "--receipt-mode",
+            "self_reported",
         )
         self.assertEqual(0, initialized["cursor"])
 
@@ -78,20 +92,16 @@ class RuntimeCliTest(unittest.TestCase):
             ticket = self._cli("next", "--run-id", "cli-run")
             if ticket["action"] == "queue_complete":
                 break
+            raw_result = raw_result_for_ticket(
+                self.runner, "cli-run", ticket
+            )
             self._cli(
                 "record",
                 "--run-id",
                 "cli-run",
-                input_value={
-                    "event": "query_succeeded",
-                    "step_id": ticket["step_id"],
-                    "attempt_no": ticket["attempt_no"],
-                    "submitted_sql_sha256": ticket["rendered_sql_sha256"],
-                    "query_id": f"cli-{ticket['step_id']}",
-                    "candidate_count": 0,
-                    "warning_codes": [],
-                    "raw_result": {"rows": []},
-                },
+                input_value=self_reported_result_event(
+                    ticket, raw_result, f"cli-{ticket['step_id']}"
+                ),
             )
 
         execution = self._cli("export", "--run-id", "cli-run")
@@ -99,6 +109,8 @@ class RuntimeCliTest(unittest.TestCase):
             "investigations": [
                 {
                     "status": "no_dominant_slice",
+                    "metric": "下载完成率",
+                    "analysis_date": "2026-08-22",
                     "attribution_execution": execution,
                 }
             ]
@@ -117,6 +129,9 @@ class RuntimeCliTest(unittest.TestCase):
             "0",
         )
         self.assertEqual("valid", validated["status"])
+        state = self.runner.load_state("cli-run")
+        self.assertEqual("finalized", state["status"])
+        self.assertEqual(validated["analysis_sha256"], state["final_analysis_sha256"])
 
     def test_cli_rejects_cross_step_record(self):
         self._cli(
@@ -133,6 +148,8 @@ class RuntimeCliTest(unittest.TestCase):
             "2026-08-22",
             "--analysis-date",
             "2026-08-22",
+            "--receipt-mode",
+            "self_reported",
         )
         ticket = self._cli("next", "--run-id", "cli-invalid")
         error = self._cli(
@@ -140,12 +157,10 @@ class RuntimeCliTest(unittest.TestCase):
             "--run-id",
             "cli-invalid",
             input_value={
-                "event": "query_succeeded",
+                "event": "query_returned",
                 "step_id": "device_brand",
                 "attempt_no": 0,
                 "submitted_sql_sha256": ticket["rendered_sql_sha256"],
-                "candidate_count": 0,
-                "warning_codes": [],
             },
             expected_returncode=2,
         )
@@ -169,7 +184,7 @@ class ScenarioReplayTest(unittest.TestCase):
                     game_type=scenario["game_type"],
                     metric=scenario["metric"],
                     alert_date="2026-08-24",
-                    analysis_date="2026-08-22",
+                    receipt_mode="self_reported",
                 )
                 issued_steps = []
                 while True:
@@ -178,25 +193,23 @@ class ScenarioReplayTest(unittest.TestCase):
                         break
                     issued_steps.append(ticket["step_id"])
                     if ticket["step_id"] in scenario["failed_steps"]:
-                        event = {
-                            "event": "step_validation_failed",
-                            "step_id": ticket["step_id"],
-                            "attempt_no": ticket["attempt_no"],
-                            "reason": "scenario family validation failed",
-                            "warning_codes": ["result_incomplete"],
-                        }
+                        raw_result = raw_result_for_ticket(
+                            self.runner, run_id, ticket
+                        )
+                        raw_result["rows"][0]["analysis_date"] = "2026-01-01"
                     else:
-                        event = {
-                            "event": "query_succeeded",
-                            "step_id": ticket["step_id"],
-                            "attempt_no": ticket["attempt_no"],
-                            "submitted_sql_sha256": ticket["rendered_sql_sha256"],
-                            "candidate_count": scenario["candidate_steps"].get(
-                                ticket["step_id"], 0
-                            ),
-                            "warning_codes": [],
-                            "raw_result": {"rows": []},
-                        }
+                        raw_result = raw_result_for_ticket(
+                            self.runner,
+                            run_id,
+                            ticket,
+                            candidate=ticket["step_id"]
+                            in scenario["candidate_steps"],
+                        )
+                    event = self_reported_result_event(
+                        ticket,
+                        raw_result,
+                        f"{run_id}-{ticket['step_id']}",
+                    )
                     self.runner.record(run_id, event)
                 self.assertEqual(scenario["expected_query_steps"], issued_steps)
                 state = self.runner.load_state(run_id)
@@ -218,6 +231,7 @@ class ScenarioReplayTest(unittest.TestCase):
             metric=scenario["metric"],
             alert_date="2026-08-22",
             analysis_date="2026-08-22",
+            receipt_mode="self_reported",
         )
         ticket = self.runner.next_action("semantic-regression")
         result = self.runner.record(
@@ -226,7 +240,9 @@ class ScenarioReplayTest(unittest.TestCase):
                 "event": "query_error",
                 "step_id": ticket["step_id"],
                 "attempt_no": ticket["attempt_no"],
+                "receipt_type": "self_reported_receipt",
                 "submitted_sql_sha256": ticket["rendered_sql_sha256"],
+                "query_id": "semantic-regression-game",
                 "error_class": scenario["error_class"],
                 "error_code": "ODPS-0130071",
                 "error_message": "semantic check failed",
@@ -235,6 +251,77 @@ class ScenarioReplayTest(unittest.TestCase):
         self.assertEqual(scenario["expected_cursor"], result["cursor"])
         next_action = self.runner.next_action("semantic-regression")
         self.assertEqual(scenario["expected_next_action"], next_action["action"])
+
+
+class AnalysisReplayTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.runner = AttributionRunner(ROOT, runs_root=self.temp_dir.name)
+        self.fixture = json.loads(ANALYSIS_REPLAYS_PATH.read_text(encoding="utf-8"))
+
+    def test_raw_dqc_route_and_query_outputs_replay_to_expected_analysis(self):
+        for scenario in self.fixture["scenarios"]:
+            with self.subTest(scenario=scenario["id"]):
+                route = scenario["routing"]
+                raw_dqc = scenario["raw_dqc_input"]
+                self.assertIn(route["metric"].replace("下载", ""), raw_dqc["ruleChecks"][0]["ruleName"])
+                run_id = scenario["id"]
+                self.runner.init_run(
+                    run_id=run_id,
+                    chain=route["chain"],
+                    game_type=route["game_type"],
+                    metric=route["metric"],
+                    alert_date=route["alert_date"],
+                    analysis_date=route["analysis_date"],
+                    receipt_mode="self_reported",
+                )
+                while True:
+                    ticket = self.runner.next_action(run_id)
+                    if ticket["action"] == "queue_complete":
+                        break
+                    result_name = scenario["step_results"][ticket["step_id"]]
+                    raw_result = copy.deepcopy(self.fixture["result_sets"][result_name])
+                    self.runner.record(
+                        run_id,
+                        self_reported_result_event(
+                            ticket,
+                            raw_result,
+                            f"{run_id}-{ticket['step_id']}",
+                        ),
+                    )
+                state = self.runner.load_state(run_id)
+                actual_counts = {
+                    step["id"]: step["candidate_count"]
+                    for step in state["steps"]
+                    if step["candidate_count"]
+                }
+                self.assertEqual(scenario["expected"]["candidate_counts"], actual_counts)
+                execution = self.runner.export(run_id)
+                investigation = {
+                    "status": scenario["expected"]["status"],
+                    "metric": route["metric"],
+                    "analysis_date": route["analysis_date"],
+                    "attribution_execution": execution,
+                }
+                if scenario["expected"]["status"] == "completed":
+                    candidate = state["steps"][0]["candidates"][0]
+                    investigation["top_findings"] = [
+                        {
+                            "dimension": scenario["expected"]["finding_dimension"],
+                            "value": scenario["expected"]["finding_value"],
+                            "attribution_level": "primary",
+                            "adverse_impact_bp": candidate["adverse_impact_bp"],
+                            "finding": "The replayed slice passed every machine gate.",
+                        }
+                    ]
+                path = Path(self.temp_dir.name) / f"{run_id}.json"
+                path.write_text(
+                    json.dumps({"investigations": [investigation]}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                receipt = self.runner.validate_final(run_id, path, 0)
+                self.assertEqual(scenario["expected"]["status"], receipt["investigation_status"])
 
 
 if __name__ == "__main__":

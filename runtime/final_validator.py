@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from typing import Any
 
+from .contracts import canonical_sha256
 from .models import StepStatus, TERMINAL_STEP_STATUSES
 
 
@@ -11,6 +13,15 @@ class FinalValidationError(ValueError):
 
 
 class FinalEvidenceValidator:
+    ALLOWED_FULL_QUEUE_STATUSES = {
+        "completed",
+        "no_dominant_slice",
+        "insufficient_data",
+        "query_blocked",
+        "query_failed",
+        "unsupported_drilldown",
+    }
+
     def validate(
         self,
         state: dict[str, Any],
@@ -38,6 +49,17 @@ class FinalEvidenceValidator:
         investigation = investigations[investigation_index]
         if not isinstance(investigation, dict):
             raise FinalValidationError("selected investigation must be an object")
+        investigation_status = investigation.get("status")
+        if investigation_status not in self.ALLOWED_FULL_QUEUE_STATUSES:
+            raise FinalValidationError(
+                f"unknown full_queue investigation status: {investigation_status}"
+            )
+        if investigation.get("metric") != state["metric"]:
+            raise FinalValidationError("investigation metric does not match the run")
+        if investigation.get("analysis_date") != state["analysis_date"]:
+            raise FinalValidationError(
+                "investigation analysis_date does not match the run"
+            )
 
         execution = investigation.get("attribution_execution")
         if not isinstance(execution, dict):
@@ -48,6 +70,10 @@ class FinalEvidenceValidator:
             raise FinalValidationError("attribution chain does not match the run")
         if execution.get("game_type") != state["game_type"]:
             raise FinalValidationError("attribution game_type does not match the run")
+        if execution.get("execution_mode") != state["execution_mode"]:
+            raise FinalValidationError(
+                "attribution execution_mode does not match the run"
+            )
 
         actual_steps = execution.get("steps")
         if not isinstance(actual_steps, list) or len(actual_steps) != len(
@@ -56,6 +82,7 @@ class FinalEvidenceValidator:
             raise FinalValidationError("attribution step count does not match the fixed queue")
         known_query_ids = self._known_query_ids(state)
         candidate_counts: dict[str, int] = {}
+        candidate_details: dict[str, list[dict[str, Any]]] = {}
         candidate_successes: set[str] = set()
         candidate_failures: set[str] = set()
 
@@ -82,6 +109,7 @@ class FinalEvidenceValidator:
                     )
                 if expected["produces_candidates"]:
                     candidate_counts[expected["id"]] = expected["candidate_count"]
+                    candidate_details[expected["id"]] = expected["candidates"]
                     candidate_successes.add(expected["id"])
             else:
                 if "candidate_count" in actual:
@@ -92,14 +120,13 @@ class FinalEvidenceValidator:
                     raise FinalValidationError(f"reason mismatch for {expected['id']}")
                 if expected["produces_candidates"]:
                     candidate_failures.add(expected["id"])
+            expected_query_id = self._last_query_id(expected)
             query_id = actual.get("query_id")
-            if query_id is not None and query_id not in known_query_ids:
+            if query_id != expected_query_id:
                 raise FinalValidationError(
-                    f"unknown query_id for {expected['id']}: {query_id}"
+                    f"query_id mismatch for {expected['id']}: {query_id}"
                 )
-            if "warning_codes" in actual and actual["warning_codes"] != expected[
-                "warning_codes"
-            ]:
+            if actual.get("warning_codes", []) != expected["warning_codes"]:
                 raise FinalValidationError(
                     f"warning_codes mismatch for {expected['id']}"
                 )
@@ -131,6 +158,28 @@ class FinalEvidenceValidator:
                 for key in ("label", "value")
             ):
                 raise FinalValidationError("primary finding lacks a slice identity")
+            candidate = self._matching_candidate(
+                finding, candidate_details.get(dimension, [])
+            )
+            if candidate is None:
+                raise FinalValidationError(
+                    f"finding slice is not a validated candidate: {dimension}"
+                )
+            adverse_impact = finding.get("adverse_impact_bp")
+            if (
+                isinstance(adverse_impact, bool)
+                or not isinstance(adverse_impact, (int, float))
+                or not math.isfinite(float(adverse_impact))
+                or not math.isclose(
+                    float(adverse_impact),
+                    float(candidate["adverse_impact_bp"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            ):
+                raise FinalValidationError(
+                    f"finding adverse_impact_bp does not match candidate: {dimension}"
+                )
             finding_counts[dimension] += 1
         for dimension, count in finding_counts.items():
             if count > candidate_counts[dimension]:
@@ -138,7 +187,6 @@ class FinalEvidenceValidator:
                     f"findings exceed candidate_count for {dimension}"
                 )
 
-        investigation_status = investigation.get("status")
         positive_candidate_count = sum(
             count for count in candidate_counts.values() if count > 0
         )
@@ -166,6 +214,15 @@ class FinalEvidenceValidator:
                 raise FinalValidationError(
                     "no_dominant_slice cannot contain counterfactual"
                 )
+        else:
+            if candidate_successes or candidate_counts:
+                raise FinalValidationError(
+                    f"{investigation_status} requires every candidate family to fail"
+                )
+            if top_findings or "counterfactual" in investigation:
+                raise FinalValidationError(
+                    f"{investigation_status} cannot contain findings or counterfactual"
+                )
         if candidate_failures and not candidate_successes and investigation_status in {
             "completed",
             "no_dominant_slice",
@@ -174,10 +231,18 @@ class FinalEvidenceValidator:
                 "all candidate families failed; a successful investigation status is illegal"
             )
 
+        evidence_hash = state.get("evidence_export_sha256")
+        if isinstance(evidence_hash, str) and canonical_sha256(execution) != evidence_hash:
+            raise FinalValidationError(
+                "attribution_execution does not match the exported run evidence"
+            )
+
         return {
             "status": "valid",
             "run_id": state["run_id"],
             "investigation_index": investigation_index,
+            "investigation_status": investigation_status,
+            "execution_mode": state["execution_mode"],
             "validated_step_count": len(actual_steps),
             "validated_query_id_count": len(self._query_ids_in(investigation)),
         }
@@ -189,6 +254,30 @@ class FinalEvidenceValidator:
             for attempt in step["attempts"]
             if isinstance(attempt.get("query_id"), str) and attempt["query_id"]
         }
+
+    def _last_query_id(self, step: dict[str, Any]) -> str | None:
+        for attempt in reversed(step["attempts"]):
+            query_id = attempt.get("query_id")
+            if isinstance(query_id, str) and query_id:
+                return query_id
+        return None
+
+    def _matching_candidate(
+        self, finding: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        finding_value = finding.get("value")
+        finding_label = finding.get("label")
+        for candidate in candidates:
+            if isinstance(finding_value, str) and finding_value.strip() and (
+                finding_value != candidate.get("value")
+            ):
+                continue
+            if isinstance(finding_label, str) and finding_label.strip() and (
+                finding_label != candidate.get("label")
+            ):
+                continue
+            return candidate
+        return None
 
     def _query_ids_in(self, value: Any) -> list[str]:
         result: list[str] = []

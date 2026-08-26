@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,14 @@ from .contracts import (
     ContractError,
     RepositoryContracts,
     canonical_sha256,
+    sha256_bytes,
     sha256_text,
 )
 from .final_validator import FinalEvidenceValidator, FinalValidationError
-from .models import RunStatus, StepStatus, TERMINAL_STEP_STATUSES
+from .models import QueryBinding, RunStatus, StepStatus, TERMINAL_STEP_STATUSES
 from .query_builder import QueryBuildError, QueryBuilder
+from .receipts import ReceiptVerificationError, TrustedReceiptVerifier
+from .result_validator import ResultValidationError, ResultValidator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,10 +37,13 @@ class AttributionRunner:
         self,
         root: Path | str = ROOT,
         runs_root: Path | str | None = None,
+        trusted_receipt_verifier: TrustedReceiptVerifier | None = None,
     ):
         self.root = Path(root).resolve()
         self.contracts = RepositoryContracts(self.root)
         self.query_builder = QueryBuilder(self.contracts)
+        self.result_validator = ResultValidator(self.contracts)
+        self.trusted_receipt_verifier = trusted_receipt_verifier
         configured_runs_root = os.environ.get("XUANJI_RUNS_ROOT")
         if runs_root is not None:
             self.runs_root = Path(runs_root).resolve()
@@ -57,12 +64,23 @@ class AttributionRunner:
         game_type: str,
         metric: str,
         alert_date: str,
-        analysis_date: str,
+        analysis_date: str | None = None,
+        receipt_mode: str = "trusted_host",
         resume: bool = False,
     ) -> dict[str, Any]:
         self._validate_run_id(run_id)
         self._validate_date(alert_date, "alert_date")
-        self._validate_date(analysis_date, "analysis_date")
+        expected_analysis_date = self._derive_analysis_date(chain, alert_date)
+        if analysis_date is not None:
+            self._validate_date(analysis_date, "analysis_date")
+            if analysis_date != expected_analysis_date:
+                raise RunnerError(
+                    "analysis_date does not match the registered chain mapping: "
+                    f"expected {expected_analysis_date}"
+                )
+        analysis_date = expected_analysis_date
+        if receipt_mode not in {"trusted_host", "self_reported"}:
+            raise RunnerError("receipt_mode must be trusted_host or self_reported")
         self.contracts.verify_assets()
         plan = self.contracts.select_plan(chain, game_type, metric)
         run_dir = self._run_dir(run_id)
@@ -76,8 +94,13 @@ class AttributionRunner:
                 "metric": metric,
                 "alert_date": alert_date,
                 "analysis_date": analysis_date,
+                "receipt_mode": receipt_mode,
                 "plan_id": plan.id,
                 "plan_contract_sha256": plan.sha256,
+                "execution_plan_sha256": self.contracts.execution_plan_sha256,
+                "query_registry_sha256": self.contracts.query_registry_sha256,
+                "triage_sha256": self.contracts.triage_sha256,
+                "result_schemas_sha256": self.contracts.result_schemas_sha256,
             }
             mismatches = {
                 key: {"expected": value, "actual": state.get(key)}
@@ -90,11 +113,18 @@ class AttributionRunner:
                 )
             return {"resumed": True, **self._status_payload(state)}
 
+        if receipt_mode == "trusted_host" and self.trusted_receipt_verifier is None:
+            raise RunnerError(
+                "trusted_host runs must be initialized by a Host adapter with a "
+                "trusted receipt verifier"
+            )
+
         steps = []
         for plan_step in plan.steps:
             binding = self.contracts.binding_for(
                 plan, plan_step.id, metric, game_type
             )
+            binding_snapshot = self._binding_snapshot(binding)
             steps.append(
                 {
                     "id": plan_step.id,
@@ -104,23 +134,40 @@ class AttributionRunner:
                     "automatic_status": plan_step.automatic_status,
                     "automatic_reason": plan_step.automatic_reason,
                     "status": StepStatus.PENDING.value,
-                    "query_asset_path": binding.asset_path if binding else None,
-                    "query_asset_sha256": binding.asset_sha256 if binding else None,
+                    "binding": binding_snapshot,
+                    "binding_sha256": canonical_sha256(binding_snapshot),
                     "attempts": [],
                     "candidate_count": None,
+                    "candidates": [],
+                    "root_delta": None,
+                    "failure_code": None,
                     "reason": None,
                     "warning_codes": [],
                 }
             )
 
         state = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "revision": 0,
             "status": RunStatus.ACTIVE.value,
-            "execution_mode": "task_ticket",
+            "execution_mode": (
+                "trusted_host_adapter"
+                if receipt_mode == "trusted_host"
+                else "self_reported_development"
+            ),
+            "receipt_mode": receipt_mode,
+            "trusted_receipt_key_id": (
+                self.trusted_receipt_verifier.key_id
+                if receipt_mode == "trusted_host"
+                else None
+            ),
             "plan_id": plan.id,
             "plan_contract_sha256": plan.sha256,
+            "execution_plan_sha256": self.contracts.execution_plan_sha256,
+            "query_registry_sha256": self.contracts.query_registry_sha256,
+            "triage_sha256": self.contracts.triage_sha256,
+            "result_schemas_sha256": self.contracts.result_schemas_sha256,
             "chain": chain,
             "game_type": game_type,
             "metric": metric,
@@ -128,6 +175,9 @@ class AttributionRunner:
             "analysis_date": analysis_date,
             "cursor": 0,
             "ready_for_final_validation": False,
+            "evidence_export_sha256": None,
+            "final_analysis_sha256": None,
+            "validation_receipt": None,
             "steps": steps,
             "processed_events": {},
         }
@@ -170,10 +220,7 @@ class AttributionRunner:
                 self._write_state(state)
             return self._repair_ticket(state, step)
         if step["status"] == StepStatus.PENDING.value:
-            plan = self.contracts.plans[state["plan_id"]]
-            binding = self.contracts.binding_for(
-                plan, step["id"], state["metric"], state["game_type"]
-            )
+            binding = self._binding_from_step(step)
             if binding is None:
                 raise RunnerError(f"current step has no query binding: {step['id']}")
             built = self.query_builder.build(
@@ -195,6 +242,8 @@ class AttributionRunner:
                     "query_id": None,
                     "error": None,
                     "event_path": None,
+                    "raw_result_sha256": None,
+                    "validation": None,
                 }
             )
             step["status"] = StepStatus.IN_PROGRESS.value
@@ -231,11 +280,7 @@ class AttributionRunner:
         event_type = event.get("event")
         if event_type == "repair_submitted":
             return self._record_repair(state, step, event, event_hash)
-        if event_type not in {
-            "query_succeeded",
-            "query_error",
-            "step_validation_failed",
-        }:
+        if event_type not in {"query_returned", "query_error"}:
             raise RunnerError(f"unsupported record event: {event_type}")
         if step["status"] != StepStatus.IN_PROGRESS.value:
             raise RunnerError(f"current step is not awaiting a query result: {step['status']}")
@@ -247,38 +292,66 @@ class AttributionRunner:
             raise RunnerError(
                 f"event attempt_no must equal current attempt {attempt['attempt_no']}"
             )
-        if event_type in {"query_succeeded", "query_error"}:
-            self._require_submitted_hash(event, attempt)
+        self._validate_record_event_fields(event_type, event, state)
+        self._require_submitted_hash(event, attempt)
+        self._verify_receipt(state, event)
+        query_id = self._required_non_empty_string(event, "query_id")
+        self._ensure_unique_query_id(state, step["id"], query_id)
+        if event_type == "query_returned":
+            raw_result = event.get("raw_result")
+            if not isinstance(raw_result, dict):
+                raise RunnerError("raw_result must be an object")
+            raw_result_sha256 = self._required_sha256(event, "raw_result_sha256")
+            if canonical_sha256(raw_result) != raw_result_sha256:
+                raise RunnerError("raw_result_sha256 does not match raw_result")
+        else:
+            raw_result = None
+            raw_result_sha256 = None
 
         event_path = Path("events") / f"{event_hash}.json"
         self._atomic_write_json(self._run_dir(run_id) / event_path, event)
         attempt["event_path"] = str(event_path)
-        query_id = self._optional_non_empty_string(event, "query_id")
         attempt["query_id"] = query_id
+        attempt["raw_result_sha256"] = raw_result_sha256
 
         advance_cursor = True
-        if event_type == "query_succeeded":
-            candidate_count = event.get("candidate_count")
-            if (
-                isinstance(candidate_count, bool)
-                or not isinstance(candidate_count, int)
-                or candidate_count < 0
-            ):
-                raise RunnerError("candidate_count must be a non-negative integer")
-            if not step["produces_candidates"] and candidate_count != 0:
-                raise RunnerError("diagnostic steps cannot produce candidates")
-            warning_codes = self._warning_codes(event)
-            attempt["status"] = "succeeded"
-            step["status"] = StepStatus.SUCCEEDED.value
-            step["candidate_count"] = candidate_count
-            step["warning_codes"] = warning_codes
-        elif event_type == "step_validation_failed":
-            reason = self._required_non_empty_string(event, "reason")
-            warning_codes = self._warning_codes(event)
-            attempt["status"] = "failed"
-            step["status"] = StepStatus.FAILED.value
-            step["reason"] = reason
-            step["warning_codes"] = warning_codes
+        if event_type == "query_returned":
+            binding = self._binding_from_step(step)
+            if binding is None:  # pragma: no cover - automatic steps issue no ticket
+                raise RunnerError("query result has no immutable binding")
+            try:
+                outcome = self.result_validator.validate(
+                    raw_result=raw_result,
+                    binding=binding,
+                    step_id=step["id"],
+                    metric=state["metric"],
+                    analysis_date=state["analysis_date"],
+                    game_type=state["game_type"],
+                    produces_candidates=step["produces_candidates"],
+                )
+            except ResultValidationError as exc:
+                attempt["status"] = "failed"
+                attempt["validation"] = {
+                    "status": "failed",
+                    "failure_code": exc.code,
+                    "reason": str(exc),
+                }
+                step["status"] = StepStatus.FAILED.value
+                step["failure_code"] = exc.code
+                step["reason"] = f"{exc.code}: {exc}"
+            else:
+                attempt["status"] = "succeeded"
+                attempt["validation"] = {
+                    "status": "succeeded",
+                    "candidate_count": outcome.candidate_count,
+                    "warning_codes": list(outcome.warning_codes),
+                    "root_delta": outcome.root_delta,
+                }
+                step["status"] = StepStatus.SUCCEEDED.value
+                step["candidate_count"] = outcome.candidate_count
+                step["candidates"] = list(outcome.candidates)
+                step["root_delta"] = outcome.root_delta
+                step["warning_codes"] = list(outcome.warning_codes)
         else:
             raw_error = {
                 "class": self._required_non_empty_string(event, "error_class"),
@@ -292,6 +365,7 @@ class AttributionRunner:
                 advance_cursor = False
             else:
                 step["status"] = StepStatus.FAILED.value
+                step["failure_code"] = self._query_failure_code(raw_error)
                 repair_suffix = (
                     " after two evidence-based repairs"
                     if raw_error["class"] == "semantic_analysis" and attempt_no == 2
@@ -301,6 +375,11 @@ class AttributionRunner:
                     f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
                     f"{raw_error['message']}"
                 )
+                attempt["validation"] = {
+                    "status": "failed",
+                    "failure_code": step["failure_code"],
+                    "reason": step["reason"],
+                }
 
         state["processed_events"][event_hash] = {
             "event": event_type,
@@ -331,11 +410,69 @@ class AttributionRunner:
                 raise RunnerError(
                     f"cannot export non-terminal step {step['id']}: {step['status']}"
                 )
-        if state["status"] == RunStatus.QUEUE_COMPLETE.value:
-            state["status"] = RunStatus.FINALIZED.value
+        evidence = self._export_evidence(state)
+        evidence_sha256 = canonical_sha256(evidence)
+        export_path = self._run_dir(run_id) / "exports/attribution-execution.json"
+        if state["evidence_export_sha256"] is None:
+            self._atomic_write_json(export_path, evidence)
+            state["evidence_export_sha256"] = evidence_sha256
             state["revision"] += 1
             self._write_state(state)
+        elif state["evidence_export_sha256"] != evidence_sha256:
+            raise RunnerError("exported evidence no longer matches immutable run state")
+        elif not export_path.is_file() or canonical_sha256(
+            json.loads(export_path.read_text(encoding="utf-8"))
+        ) != evidence_sha256:
+            raise RunnerError("stored attribution evidence is missing or changed")
+        return evidence
 
+    def validate_final(
+        self,
+        run_id: str,
+        analysis_path: Path | str,
+        investigation_index: int,
+    ) -> dict[str, Any]:
+        state = self._load_state(run_id)
+        path = Path(analysis_path)
+        try:
+            content = path.read_bytes()
+            analysis = json.loads(content.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RunnerError(f"analysis JSON cannot be read: {exc}") from exc
+        analysis_sha256 = sha256_bytes(content)
+        if state["status"] == RunStatus.FINALIZED.value:
+            receipt = state.get("validation_receipt")
+            if (
+                state.get("final_analysis_sha256") == analysis_sha256
+                and isinstance(receipt, dict)
+                and receipt.get("investigation_index") == investigation_index
+            ):
+                return dict(receipt)
+            raise RunnerError("finalized run cannot validate different final evidence")
+        if state["status"] != RunStatus.QUEUE_COMPLETE.value:
+            raise RunnerError("run must be queue_complete before final validation")
+        if not isinstance(state.get("evidence_export_sha256"), str):
+            raise RunnerError("export attribution evidence before final validation")
+        validation = FinalEvidenceValidator().validate(
+            state, analysis, investigation_index
+        )
+        receipt = {
+            **validation,
+            "analysis_sha256": analysis_sha256,
+            "attribution_evidence_sha256": state["evidence_export_sha256"],
+        }
+        receipt["validation_receipt_sha256"] = canonical_sha256(receipt)
+        self._atomic_write_json(
+            self._run_dir(run_id) / "final/validation-receipt.json", receipt
+        )
+        state["final_analysis_sha256"] = analysis_sha256
+        state["validation_receipt"] = receipt
+        state["status"] = RunStatus.FINALIZED.value
+        state["revision"] += 1
+        self._write_state(state)
+        return receipt
+
+    def _export_evidence(self, state: dict[str, Any]) -> dict[str, Any]:
         exported_steps = []
         for step in state["steps"]:
             exported = {"step": step["id"], "status": step["status"]}
@@ -353,6 +490,7 @@ class AttributionRunner:
             "mode": "full_queue",
             "chain": state["chain"],
             "game_type": state["game_type"],
+            "execution_mode": state["execution_mode"],
             "steps": exported_steps,
         }
 
@@ -368,25 +506,27 @@ class AttributionRunner:
         )
         if sha256_text(sql) != attempt["sql_sha256"]:
             raise RunnerError("stored SQL no longer matches its issued hash")
+        binding = self._binding_from_step(step)
+        if binding is None:  # pragma: no cover - automatic steps issue no ticket
+            raise RunnerError("query ticket has no immutable binding")
         ticket = {
             "action": "execute_query",
             "run_id": state["run_id"],
             "revision": state["revision"],
             "step_id": step["id"],
             "attempt_no": attempt["attempt_no"],
-            "query_asset_path": step["query_asset_path"],
-            "query_asset_sha256": step["query_asset_sha256"],
+            "query_asset_path": binding.asset_path,
+            "query_asset_sha256": binding.asset_sha256,
+            "binding_sha256": step["binding_sha256"],
+            "result_schema_id": binding.result_schema_id,
             "rendered_sql_sha256": attempt["sql_sha256"],
             "parameters": {
                 "business_date": state["analysis_date"],
                 "game_type": state["game_type"],
             },
             "rendered_sql": sql,
-            "allowed_outcomes": [
-                "query_succeeded",
-                "query_error",
-                "step_validation_failed",
-            ],
+            "receipt_mode": state["receipt_mode"],
+            "allowed_outcomes": ["query_returned", "query_error"],
         }
         self._atomic_write_json(
             self._run_dir(state["run_id"])
@@ -410,6 +550,7 @@ class AttributionRunner:
         original_sql = (
             self._run_dir(state["run_id"]) / attempt["sql_path"]
         ).read_text(encoding="utf-8")
+        baseline_attempt = step["attempts"][0]
         ticket = {
             "action": "repair_query",
             "run_id": state["run_id"],
@@ -420,6 +561,9 @@ class AttributionRunner:
             "cursor_locked": True,
             "raw_error": dict(attempt["error"]),
             "original_sql_sha256": attempt["sql_sha256"],
+            "attempt_0_sql_sha256": baseline_attempt["sql_sha256"],
+            "binding_sha256": step["binding_sha256"],
+            "triage_sha256": state["triage_sha256"],
             "original_sql": original_sql,
             "triage_text": self.contracts.triage_text(),
             "required_submission": [
@@ -443,6 +587,20 @@ class AttributionRunner:
         event: dict[str, Any],
         event_hash: str,
     ) -> dict[str, Any]:
+        allowed_fields = {
+            "event",
+            "step_id",
+            "repair_attempt",
+            "repair_reason",
+            "error_evidence",
+            "repaired_sql",
+        }
+        if set(event) != allowed_fields:
+            raise RunnerError(
+                "repair event fields do not match the repair contract; "
+                f"missing={sorted(allowed_fields - set(event))}, "
+                f"unknown={sorted(set(event) - allowed_fields)}"
+            )
         if step["status"] != StepStatus.REPAIR_REQUIRED.value:
             raise RunnerError(f"current step does not accept a repair: {step['status']}")
         if not step["attempts"]:
@@ -465,13 +623,14 @@ class AttributionRunner:
         repair_reason = self._required_non_empty_string(event, "repair_reason")
         error_evidence = self._required_non_empty_string(event, "error_evidence")
         repaired_sql = self._required_non_empty_string(event, "repaired_sql")
-        original_sql = (
+        failed_sql = (
             self._run_dir(state["run_id"]) / previous_attempt["sql_path"]
         ).read_text(encoding="utf-8")
-        plan = self.contracts.plans[state["plan_id"]]
-        binding = self.contracts.binding_for(
-            plan, step["id"], state["metric"], state["game_type"]
-        )
+        baseline_attempt = step["attempts"][0]
+        baseline_sql = (
+            self._run_dir(state["run_id"]) / baseline_attempt["sql_path"]
+        ).read_text(encoding="utf-8")
+        binding = self._binding_from_step(step)
         if binding is None:
             raise RunnerError("automatic step cannot accept a SQL repair")
         parameters = {
@@ -479,7 +638,7 @@ class AttributionRunner:
             "game_type": state["game_type"],
         }
         diff = self.query_builder.validate_repair(
-            original_sql, repaired_sql, binding, parameters
+            baseline_sql, failed_sql, repaired_sql, binding, parameters
         )
         sql_path = self._sql_relative_path(
             state["cursor"], step["id"], repair_attempt
@@ -502,6 +661,8 @@ class AttributionRunner:
                 "query_id": None,
                 "error": None,
                 "event_path": None,
+                "raw_result_sha256": None,
+                "validation": None,
                 "repair": {
                     "source_attempt_no": previous_attempt["attempt_no"],
                     "repair_reason": repair_reason,
@@ -594,9 +755,35 @@ class AttributionRunner:
         return state
 
     def _validate_state_contract(self, state: dict[str, Any]) -> None:
-        if state.get("schema_version") != 1:
+        if state.get("schema_version") != 2:
             raise RunnerError("unsupported state schema version")
         self._validate_run_id(state.get("run_id"))
+        expected_contract_hashes = {
+            "execution_plan_sha256": self.contracts.execution_plan_sha256,
+            "query_registry_sha256": self.contracts.query_registry_sha256,
+            "triage_sha256": self.contracts.triage_sha256,
+            "result_schemas_sha256": self.contracts.result_schemas_sha256,
+        }
+        for field, expected_hash in expected_contract_hashes.items():
+            if state.get(field) != expected_hash:
+                raise RunnerError(f"state {field} no longer matches the contract")
+        expected_analysis_date = self._derive_analysis_date(
+            state.get("chain"), state.get("alert_date")
+        )
+        if state.get("analysis_date") != expected_analysis_date:
+            raise RunnerError("state analysis_date violates the registered date mapping")
+        receipt_mode = state.get("receipt_mode")
+        expected_execution_mode = {
+            "trusted_host": "trusted_host_adapter",
+            "self_reported": "self_reported_development",
+        }.get(receipt_mode)
+        if state.get("execution_mode") != expected_execution_mode:
+            raise RunnerError("state receipt/execution mode is invalid")
+        if receipt_mode == "trusted_host":
+            if not isinstance(state.get("trusted_receipt_key_id"), str):
+                raise RunnerError("trusted run lacks its receipt key identity")
+        elif state.get("trusted_receipt_key_id") is not None:
+            raise RunnerError("self-reported run cannot bind a trusted receipt key")
         plan = self.contracts.select_plan(
             state.get("chain"), state.get("game_type"), state.get("metric")
         )
@@ -613,6 +800,7 @@ class AttributionRunner:
         ):
             raise RunnerError("state cursor is invalid")
 
+        known_query_ids: set[str] = set()
         for index, (step, plan_step) in enumerate(zip(steps, plan.steps, strict=True)):
             if not isinstance(step, dict) or step.get("id") != plan_step.id:
                 raise RunnerError("state step order does not match the fixed plan")
@@ -628,12 +816,11 @@ class AttributionRunner:
             binding = self.contracts.binding_for(
                 plan, plan_step.id, state["metric"], state["game_type"]
             )
-            expected_asset_path = binding.asset_path if binding else None
-            expected_asset_hash = binding.asset_sha256 if binding else None
-            if step.get("query_asset_path") != expected_asset_path or step.get(
-                "query_asset_sha256"
-            ) != expected_asset_hash:
-                raise RunnerError(f"state query asset changed: {plan_step.id}")
+            expected_binding = self._binding_snapshot(binding)
+            if step.get("binding") != expected_binding:
+                raise RunnerError(f"state binding snapshot changed: {plan_step.id}")
+            if step.get("binding_sha256") != canonical_sha256(expected_binding):
+                raise RunnerError(f"state binding hash changed: {plan_step.id}")
             status = step.get("status")
             if status not in {member.value for member in StepStatus}:
                 raise RunnerError(f"invalid step status: {status}")
@@ -672,6 +859,26 @@ class AttributionRunner:
                     raise RunnerError(f"attempt SQL file is missing: {relative_sql_path}") from exc
                 if sha256_text(sql_text) != digest:
                     raise RunnerError(f"attempt SQL file hash mismatch: {plan_step.id}")
+                query_id = attempt.get("query_id")
+                if query_id is not None:
+                    if not isinstance(query_id, str) or not query_id.strip():
+                        raise RunnerError(f"invalid query_id: {plan_step.id}")
+                    if query_id in known_query_ids:
+                        raise RunnerError("query_id is reused across attempts or steps")
+                    known_query_ids.add(query_id)
+                raw_result_hash = attempt.get("raw_result_sha256")
+                if raw_result_hash is not None and (
+                    not isinstance(raw_result_hash, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", raw_result_hash)
+                ):
+                    raise RunnerError(f"invalid raw result hash: {plan_step.id}")
+                attempt_status = attempt["status"]
+                if attempt_status in {"succeeded", "failed", "error"} and query_id is None:
+                    raise RunnerError("completed query attempt lacks a query_id")
+                if attempt_status in {"succeeded", "failed"} and raw_result_hash is None:
+                    raise RunnerError("returned query attempt lacks a raw result hash")
+                if attempt_status in {"issued", "error"} and raw_result_hash is not None:
+                    raise RunnerError("non-returned query attempt has a raw result hash")
                 if attempt_index == 0 and attempt.get("repair") is not None:
                     raise RunnerError("initial SQL attempt cannot be marked as a repair")
                 if attempt_index > 0:
@@ -696,8 +903,22 @@ class AttributionRunner:
                     raise RunnerError("succeeded step has invalid candidate_count")
                 if not plan_step.produces_candidates and candidate_count != 0:
                     raise RunnerError("diagnostic step has candidates")
+                candidates = step.get("candidates")
+                if not isinstance(candidates, list) or len(candidates) != candidate_count:
+                    raise RunnerError("succeeded step candidate details do not close")
+                if not plan_step.produces_candidates and candidates:
+                    raise RunnerError("diagnostic step has candidate details")
+                if step.get("failure_code") is not None or step.get("reason") is not None:
+                    raise RunnerError("succeeded step retains a failure classification")
             elif candidate_count is not None:
                 raise RunnerError("non-succeeded step cannot have candidate_count")
+            elif step.get("candidates") != []:
+                raise RunnerError("non-succeeded step cannot have candidate details")
+            warning_codes = step.get("warning_codes")
+            if not isinstance(warning_codes, list) or any(
+                not isinstance(code, str) or not code.strip() for code in warning_codes
+            ) or len(warning_codes) != len(set(warning_codes)):
+                raise RunnerError("step warning_codes are invalid")
             if status in {
                 StepStatus.FAILED.value,
                 StepStatus.SKIPPED_NOT_APPLICABLE.value,
@@ -706,6 +927,17 @@ class AttributionRunner:
                 or not step["reason"].strip()
             ):
                 raise RunnerError("failed/skipped step requires a reason")
+            if status == StepStatus.FAILED.value and step.get("failure_code") not in {
+                "schema_invalid",
+                "result_incomplete",
+                "contribution_not_closed",
+                "quality_gate_failed",
+                "query_failed",
+                "query_blocked",
+            }:
+                raise RunnerError("failed step lacks a runner failure classification")
+            if status != StepStatus.FAILED.value and step.get("failure_code") is not None:
+                raise RunnerError("non-failed step has a failure classification")
             if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and not (
                 plan.id == "install_sandbox" and plan_step.id == "install_stage"
             ):
@@ -725,11 +957,15 @@ class AttributionRunner:
             ):
                 raise RunnerError("repair_required step lacks a repairable semantic error")
             if status == StepStatus.SUCCEEDED.value and (
-                not attempts or attempts[-1]["status"] != "succeeded"
+                not attempts
+                or attempts[-1]["status"] != "succeeded"
+                or not isinstance(attempts[-1].get("validation"), dict)
             ):
                 raise RunnerError("succeeded step lacks a succeeded current attempt")
             if status == StepStatus.FAILED.value and (
-                not attempts or attempts[-1]["status"] not in {"failed", "error"}
+                not attempts
+                or attempts[-1]["status"] not in {"failed", "error"}
+                or not isinstance(attempts[-1].get("validation"), dict)
             ):
                 raise RunnerError("failed step lacks a failed current attempt")
             if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and attempts:
@@ -740,6 +976,15 @@ class AttributionRunner:
                 raise RunnerError("incomplete queue must remain active")
             if state.get("ready_for_final_validation") is not False:
                 raise RunnerError("incomplete queue cannot be ready for final validation")
+            if any(
+                state.get(field) is not None
+                for field in (
+                    "evidence_export_sha256",
+                    "final_analysis_sha256",
+                    "validation_receipt",
+                )
+            ):
+                raise RunnerError("active run contains final evidence metadata")
         else:
             if state.get("status") not in {
                 RunStatus.QUEUE_COMPLETE.value,
@@ -748,6 +993,33 @@ class AttributionRunner:
                 raise RunnerError("complete queue has an invalid run status")
             if state.get("ready_for_final_validation") is not True:
                 raise RunnerError("complete queue must be ready for final validation")
+            evidence_hash = state.get("evidence_export_sha256")
+            if evidence_hash is not None and (
+                not isinstance(evidence_hash, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence_hash)
+            ):
+                raise RunnerError("invalid exported evidence hash")
+            if state.get("status") == RunStatus.QUEUE_COMPLETE.value and any(
+                state.get(field) is not None
+                for field in ("final_analysis_sha256", "validation_receipt")
+            ):
+                raise RunnerError("queue_complete run contains final validation state")
+            if state.get("status") == RunStatus.FINALIZED.value:
+                analysis_hash = state.get("final_analysis_sha256")
+                receipt = state.get("validation_receipt")
+                if (
+                    not isinstance(evidence_hash, str)
+                    or not isinstance(analysis_hash, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", analysis_hash)
+                    or not isinstance(receipt, dict)
+                ):
+                    raise RunnerError("finalized run lacks immutable validation evidence")
+                receipt_without_hash = dict(receipt)
+                receipt_hash = receipt_without_hash.pop(
+                    "validation_receipt_sha256", None
+                )
+                if receipt_hash != canonical_sha256(receipt_without_hash):
+                    raise RunnerError("validation receipt integrity check failed")
 
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)
@@ -767,13 +1039,75 @@ class AttributionRunner:
         if submitted_hash != attempt["sql_sha256"]:
             raise RunnerError("submitted SQL hash does not match the issued ticket")
 
-    def _warning_codes(self, event: dict[str, Any]) -> list[str]:
-        warning_codes = event.get("warning_codes", [])
-        if not isinstance(warning_codes, list) or any(
-            not isinstance(code, str) or not code.strip() for code in warning_codes
+    def _validate_record_event_fields(
+        self, event_type: str, event: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        common = {
+            "event",
+            "step_id",
+            "attempt_no",
+            "receipt_type",
+            "submitted_sql_sha256",
+            "query_id",
+        }
+        if event_type == "query_returned":
+            allowed = common | {"raw_result", "raw_result_sha256"}
+        else:
+            allowed = common | {"error_class", "error_code", "error_message"}
+        if state["receipt_mode"] == "trusted_host":
+            allowed |= {"receipt_key_id", "receipt_id", "receipt_signature"}
+        unknown = sorted(set(event) - allowed)
+        missing = sorted(allowed - set(event))
+        if unknown or missing:
+            raise RunnerError(
+                f"record event fields do not match the receipt contract; "
+                f"missing={missing}, unknown={unknown}"
+            )
+
+    def _verify_receipt(
+        self, state: dict[str, Any], event: dict[str, Any]
+    ) -> None:
+        expected_type = {
+            "trusted_host": "trusted_host_receipt",
+            "self_reported": "self_reported_receipt",
+        }[state["receipt_mode"]]
+        if event.get("receipt_type") != expected_type:
+            raise RunnerError(f"receipt_type must be {expected_type}")
+        if state["receipt_mode"] == "self_reported":
+            return
+        verifier = self.trusted_receipt_verifier
+        if verifier is None or verifier.key_id != state["trusted_receipt_key_id"]:
+            raise RunnerError("trusted Host receipt verifier is unavailable")
+        try:
+            verifier.verify(state["run_id"], event)
+        except ReceiptVerificationError as exc:
+            raise RunnerError(str(exc)) from exc
+
+    def _ensure_unique_query_id(
+        self, state: dict[str, Any], step_id: str, query_id: str
+    ) -> None:
+        for step in state["steps"]:
+            for attempt in step["attempts"]:
+                if attempt.get("query_id") == query_id:
+                    raise RunnerError(
+                        f"query_id is already bound to step {step['id']}; "
+                        f"cannot bind it to {step_id}"
+                    )
+
+    def _required_sha256(self, value: dict[str, Any], key: str) -> str:
+        result = self._required_non_empty_string(value, key)
+        if not re.fullmatch(r"[0-9a-f]{64}", result):
+            raise RunnerError(f"{key} must be a lowercase SHA-256")
+        return result
+
+    def _query_failure_code(self, raw_error: dict[str, str]) -> str:
+        combined = " ".join(raw_error.values()).lower()
+        if any(
+            marker in combined
+            for marker in ("permission", "access denied", "unauthorized", "forbidden")
         ):
-            raise RunnerError("warning_codes must be an array of non-empty strings")
-        return list(dict.fromkeys(warning_codes))
+            return "query_blocked"
+        return "query_failed"
 
     def _required_non_empty_string(self, value: dict[str, Any], key: str) -> str:
         result = value.get(key)
@@ -794,6 +1128,46 @@ class AttributionRunner:
                 return attempt["query_id"]
         return None
 
+    def _binding_snapshot(self, binding: QueryBinding | None) -> dict[str, Any] | None:
+        if binding is None:
+            return None
+        return {
+            "asset_path": binding.asset_path,
+            "asset_sha256": binding.asset_sha256,
+            "asset_kind": binding.asset_kind,
+            "data_sources": list(binding.data_sources),
+            "protected_tokens": list(binding.protected_tokens),
+            "required_predicates": list(binding.required_predicates),
+            "result_schema_id": binding.result_schema_id,
+            "dimension": binding.dimension,
+            "dimension_config": binding.dimension_config,
+        }
+
+    def _binding_from_step(self, step: dict[str, Any]) -> QueryBinding | None:
+        snapshot = step.get("binding")
+        if snapshot is None:
+            if step.get("binding_sha256") != canonical_sha256(None):
+                raise RunnerError("automatic step binding hash changed")
+            return None
+        if not isinstance(snapshot, dict) or step.get(
+            "binding_sha256"
+        ) != canonical_sha256(snapshot):
+            raise RunnerError("immutable step binding failed its checksum")
+        try:
+            return QueryBinding(
+                asset_path=snapshot["asset_path"],
+                asset_sha256=snapshot["asset_sha256"],
+                asset_kind=snapshot["asset_kind"],
+                data_sources=tuple(snapshot["data_sources"]),
+                protected_tokens=tuple(snapshot["protected_tokens"]),
+                required_predicates=tuple(snapshot["required_predicates"]),
+                result_schema_id=snapshot["result_schema_id"],
+                dimension=snapshot.get("dimension"),
+                dimension_config=snapshot.get("dimension_config"),
+            )
+        except (KeyError, TypeError) as exc:
+            raise RunnerError("immutable step binding is malformed") from exc
+
     def _sql_relative_path(self, cursor: int, step_id: str, attempt_no: int) -> str:
         return str(Path("sql") / f"{cursor:02d}-{step_id}-attempt-{attempt_no}.sql")
 
@@ -811,8 +1185,6 @@ class AttributionRunner:
             )
 
     def _validate_date(self, value: str, field: str) -> None:
-        from datetime import date
-
         if not isinstance(value, str):
             raise RunnerError(f"{field} must use YYYY-MM-DD")
         try:
@@ -821,6 +1193,15 @@ class AttributionRunner:
             raise RunnerError(f"{field} must use YYYY-MM-DD") from exc
         if parsed.isoformat() != value:
             raise RunnerError(f"{field} must use YYYY-MM-DD")
+
+    def _derive_analysis_date(self, chain: Any, alert_date: Any) -> str:
+        self._validate_date(alert_date, "alert_date")
+        parsed = date.fromisoformat(alert_date)
+        if chain == "download":
+            return parsed.isoformat()
+        if chain == "install":
+            return (parsed - timedelta(days=2)).isoformat()
+        raise RunnerError(f"unsupported chain for date mapping: {chain}")
 
     def _atomic_write_json(self, path: Path, value: Any) -> None:
         content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -871,7 +1252,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--game-type", required=True, choices=("app", "sandbox"))
     init_parser.add_argument("--metric", required=True)
     init_parser.add_argument("--alert-date", required=True)
-    init_parser.add_argument("--analysis-date", required=True)
+    init_parser.add_argument("--analysis-date")
+    init_parser.add_argument(
+        "--receipt-mode",
+        choices=("trusted_host", "self_reported"),
+        default="trusted_host",
+    )
     init_parser.add_argument("--resume", action="store_true")
 
     for command in ("next", "status", "export"):
@@ -903,6 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
                 metric=args.metric,
                 alert_date=args.alert_date,
                 analysis_date=args.analysis_date,
+                receipt_mode=args.receipt_mode,
                 resume=args.resume,
             )
         elif args.command == "next":
@@ -914,10 +1301,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "export":
             result = runner.export(args.run_id)
         elif args.command == "validate-final":
-            analysis = _read_json_input(args.analysis_json)
-            result = FinalEvidenceValidator().validate(
-                runner.load_state(args.run_id),
-                analysis,
+            result = runner.validate_final(
+                args.run_id,
+                args.analysis_json,
                 args.investigation_index,
             )
         else:  # pragma: no cover - argparse prevents this branch

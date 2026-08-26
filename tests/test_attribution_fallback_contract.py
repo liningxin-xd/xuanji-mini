@@ -58,6 +58,8 @@ class AttributionFallbackContractTest(unittest.TestCase):
 
     def test_registered_attribution_emits_machine_checkable_full_queue(self):
         self.assertIn("`attribution_execution`", self.skill)
+        self.assertIn("`attribution_execution.execution_mode`", self.playbook)
+        self.assertIn("`trusted_host_adapter` 或 `self_reported_development`", self.playbook)
         self.assertIn("不能等到撰写结论时根据已有候选反推执行记录", self.skill)
         self.assertIn("## 归因执行清单", self.playbook)
         self.assertIn("writer 将拒绝缺少步骤、顺序不符", self.playbook)

@@ -24,6 +24,7 @@ class ErrorRepairRuntimeTest(unittest.TestCase):
             metric="下载完成率",
             alert_date="2026-08-22",
             analysis_date="2026-08-22",
+            receipt_mode="self_reported",
         )
         self.initial_ticket = self.runner.next_action("repair-run")
 
@@ -32,6 +33,7 @@ class ErrorRepairRuntimeTest(unittest.TestCase):
             "event": "query_error",
             "step_id": ticket["step_id"],
             "attempt_no": ticket["attempt_no"],
+            "receipt_type": "self_reported_receipt",
             "submitted_sql_sha256": ticket["rendered_sql_sha256"],
             "query_id": f"error-query-{ticket['attempt_no']}",
             "error_class": "semantic_analysis",
@@ -146,6 +148,46 @@ class ErrorRepairRuntimeTest(unittest.TestCase):
                     self.runner.record(
                         "repair-run", self._repair_event(ticket, repaired_sql)
                     )
+
+    def test_repair_rejects_semantic_drift_against_attempt_zero(self):
+        self._submit_semantic_error()
+        ticket = self.runner.next_action("repair-run")
+        illegal_repairs = (
+            ticket["original_sql"].replace("-7, 'dd'", "-30, 'dd'"),
+            ticket["original_sql"].replace(
+                "AND platform = 'ANDROID'", "OR platform = 'ANDROID'"
+            ),
+            ticket["original_sql"].replace(
+                "THEN is_download_complete ELSE 0 END",
+                "THEN 1 - is_download_complete ELSE 0 END",
+                1,
+            ),
+            ticket["original_sql"].replace(
+                "WHEN dimension_value = '__none__' THEN 'quality'",
+                "WHEN dimension_value <> '__none__' THEN 'quality'",
+            ),
+        )
+        for repaired_sql in illegal_repairs:
+            with self.subTest(sql=repaired_sql[-120:]), self.assertRaises(
+                QueryBuildError
+            ):
+                self.runner.record(
+                    "repair-run", self._repair_event(ticket, repaired_sql)
+                )
+
+    def test_second_repair_is_still_compared_with_attempt_zero(self):
+        self._submit_semantic_error()
+        repair_one = self.runner.next_action("repair-run")
+        repaired_one = repair_one["original_sql"].replace(
+            "scoped_rows", "scoped_rows_repaired"
+        )
+        self.runner.record("repair-run", self._repair_event(repair_one, repaired_one))
+        attempt_one = self.runner.next_action("repair-run")
+        self._submit_semantic_error(attempt_one)
+        repair_two = self.runner.next_action("repair-run")
+        drifted = repair_two["original_sql"].replace("-7, 'dd'", "-30, 'dd'")
+        with self.assertRaises(QueryBuildError):
+            self.runner.record("repair-run", self._repair_event(repair_two, drifted))
 
     def test_repair_never_modifies_the_source_query_asset(self):
         before = hashlib.sha256(GAME_QUERY_PATH.read_bytes()).hexdigest()

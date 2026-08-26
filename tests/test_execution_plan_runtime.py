@@ -8,6 +8,10 @@ import yaml
 
 from runtime.contracts import ContractError, RepositoryContracts
 from runtime.runner import AttributionRunner, RunnerError
+from tests.runtime_result_fixtures import (
+    raw_result_for_ticket,
+    self_reported_result_event,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,41 +129,33 @@ class DeterministicQueueRunnerTest(unittest.TestCase):
             metric="下载完成率",
             alert_date="2026-08-22",
             analysis_date="2026-08-22",
+            receipt_mode="self_reported",
         )
 
-    def _success_event(self, ticket, candidate_count=0):
-        return {
-            "event": "query_succeeded",
-            "step_id": ticket["step_id"],
-            "attempt_no": ticket["attempt_no"],
-            "submitted_sql_sha256": ticket["rendered_sql_sha256"],
-            "query_id": f"query-{ticket['step_id']}",
-            "candidate_count": candidate_count,
-            "warning_codes": [],
-            "raw_result": {"rows": []},
-        }
+    def _success_event(self, ticket, candidate=False, run_id="download-run"):
+        raw_result = raw_result_for_ticket(
+            self.runner, run_id, ticket, candidate=candidate
+        )
+        return self_reported_result_event(
+            ticket, raw_result, f"query-{run_id}-{ticket['step_id']}"
+        )
 
     def test_candidate_discovery_does_not_end_or_reorder_the_queue(self):
         self._init_download()
         first = self.runner.next_action("download-run")
         self.assertEqual("game_id", first["step_id"])
-        self.runner.record("download-run", self._success_event(first, 3))
+        self.runner.record("download-run", self._success_event(first, True))
         second = self.runner.next_action("download-run")
         self.assertEqual("is_reserve_auto_download", second["step_id"])
 
     def test_family_failure_advances_to_the_next_fixed_step(self):
         self._init_download()
         first = self.runner.next_action("download-run")
+        raw_result = raw_result_for_ticket(self.runner, "download-run", first)
+        raw_result["rows"][0]["overall_current_numerator"] += 1
         self.runner.record(
             "download-run",
-            {
-                "event": "step_validation_failed",
-                "step_id": "game_id",
-                "attempt_no": 0,
-                "query_id": "query-game",
-                "reason": "result contribution did not close",
-                "warning_codes": ["result_incomplete"],
-            },
+            self_reported_result_event(first, raw_result, "query-download-run-game"),
         )
         second = self.runner.next_action("download-run")
         self.assertEqual("is_reserve_auto_download", second["step_id"])
@@ -198,9 +194,13 @@ class DeterministicQueueRunnerTest(unittest.TestCase):
             metric="下载安装完成率",
             alert_date="2026-08-24",
             analysis_date="2026-08-22",
+            receipt_mode="self_reported",
         )
         game = self.runner.next_action("sandbox-install")
-        self.runner.record("sandbox-install", self._success_event(game, 1))
+        self.runner.record(
+            "sandbox-install",
+            self._success_event(game, True, "sandbox-install"),
+        )
         brand = self.runner.next_action("sandbox-install")
         self.assertEqual("device_brand", brand["step_id"])
         state = self.runner.load_state("sandbox-install")
@@ -212,12 +212,13 @@ class DeterministicQueueRunnerTest(unittest.TestCase):
             ticket = self.runner.next_action("download-run")
             if ticket["action"] == "queue_complete":
                 break
-            count = 1 if ticket["step_id"] == "game_id" else 0
             self.runner.record(
-                "download-run", self._success_event(ticket, count)
+                "download-run",
+                self._success_event(ticket, ticket["step_id"] == "game_id"),
             )
         exported = self.runner.export("download-run")
         self.assertEqual("full_queue", exported["mode"])
+        self.assertEqual("self_reported_development", exported["execution_mode"])
         self.assertEqual(
             list(EXPECTED_DOWNLOAD), [step["step"] for step in exported["steps"]]
         )
@@ -231,6 +232,46 @@ class DeterministicQueueRunnerTest(unittest.TestCase):
         state_path.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(RunnerError, "integrity"):
             self.runner.status("download-run")
+
+    def test_run_freezes_registry_triage_and_complete_bindings(self):
+        self._init_download()
+        state = self.runner.load_state("download-run")
+        for field in (
+            "execution_plan_sha256",
+            "query_registry_sha256",
+            "triage_sha256",
+            "result_schemas_sha256",
+        ):
+            self.assertRegex(state[field], r"^[0-9a-f]{64}$")
+        binding = state["steps"][2]["binding"]
+        self.assertEqual("device_brand", binding["dimension"])
+        self.assertEqual("device_brand", binding["dimension_config"]["source_field"])
+        self.assertIn("quality_source_expression", binding["dimension_config"])
+        self.assertIn("value_expression", binding["dimension_config"])
+        self.assertRegex(state["steps"][2]["binding_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_resume_rejects_registry_or_triage_drift(self):
+        for relative_path in (
+            "contracts/query-registry.yaml",
+            "references/sql-fast-triage.md",
+        ):
+            with self.subTest(relative_path=relative_path), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "repo"
+                shutil.copytree(ROOT / "contracts", root / "contracts")
+                shutil.copytree(ROOT / "references", root / "references")
+                runner = AttributionRunner(root, runs_root=Path(temp) / "runs")
+                runner.init_run(
+                    run_id="frozen-run",
+                    chain="download",
+                    game_type="app",
+                    metric="下载完成率",
+                    alert_date="2026-08-22",
+                    receipt_mode="self_reported",
+                )
+                path = root / relative_path
+                path.write_text(path.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
+                with self.assertRaisesRegex(RunnerError, "no longer matches"):
+                    runner.status("frozen-run")
 
 
 if __name__ == "__main__":

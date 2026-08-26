@@ -1,5 +1,5 @@
 version: 1
-execution_mode: task_ticket
+execution_mode: trusted_host_adapter
 triage_path: references/sql-fast-triage.md
 
 download_metrics:

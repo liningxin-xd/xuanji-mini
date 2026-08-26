@@ -1,0 +1,107 @@
+{
+  "result_sets": {
+    "game_adverse": {
+      "columns": [
+        "analysis_date", "game_type", "bucket_kind", "dimension_value",
+        "dimension_label", "bucket_baseline_active_day_count",
+        "baseline_day_count", "current_denominator", "baseline_denominator",
+        "current_numerator", "baseline_numerator",
+        "overall_current_denominator", "overall_baseline_denominator",
+        "overall_current_numerator", "overall_baseline_numerator",
+        "invalid_metric_row_count"
+      ],
+      "rows": [
+        ["2026-08-22", "app", "game", "slice-a", "Slice A", 7, 7, 500, 700, 350, 560, 1000, 1000, 790, 800, 0],
+        ["2026-08-22", "app", "residual", "__other_below_threshold__", "Residual", 7, 7, 500, 300, 440, 240, 1000, 1000, 790, 800, 0]
+      ]
+    },
+    "game_flat": {
+      "columns": [
+        "analysis_date", "game_type", "bucket_kind", "dimension_value",
+        "dimension_label", "bucket_baseline_active_day_count",
+        "baseline_day_count", "current_denominator", "baseline_denominator",
+        "current_numerator", "baseline_numerator",
+        "overall_current_denominator", "overall_baseline_denominator",
+        "overall_current_numerator", "overall_baseline_numerator",
+        "invalid_metric_row_count"
+      ],
+      "rows": [
+        ["2026-08-22", "app", "game", "slice-flat", "Slice Flat", 7, 7, 1000, 1000, 800, 800, 1000, 1000, 800, 800, 0]
+      ]
+    },
+    "primary_flat": {
+      "columns": [
+        "analysis_date", "game_type", "bucket_kind", "dimension_value",
+        "dimension_label", "collapsed_source_bucket_count", "source_bucket_count",
+        "baseline_day_count", "current_denominator", "baseline_denominator",
+        "current_numerator", "baseline_numerator",
+        "overall_current_denominator", "overall_baseline_denominator",
+        "overall_current_numerator", "overall_baseline_numerator",
+        "overall_current_dimension_matched_denominator",
+        "overall_baseline_dimension_matched_denominator",
+        "overall_current_dimension_unmatched_denominator",
+        "overall_baseline_dimension_unmatched_denominator",
+        "overall_current_dimension_match_rate",
+        "overall_baseline_dimension_match_rate", "invalid_metric_row_count"
+      ],
+      "rows": [
+        ["2026-08-22", "app", "dimension", "slice-flat", "Slice Flat", 1, 1, 7, 1000, 1000, 800, 800, 1000, 1000, 800, 800, 1000, 1000, 0, 0, 1.0, 1.0, 0]
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "historical-download-completion-slice",
+      "raw_dqc_input": {
+        "projectName": "tap_dw",
+        "ruleChecks": [{
+          "ruleName": "【APK下载完成率】最近1天低于阈值",
+          "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+          "actualExpression": "dt=2026-08-22"
+        }]
+      },
+      "routing": {
+        "chain": "download", "game_type": "app", "metric": "下载完成率",
+        "alert_date": "2026-08-22", "analysis_date": "2026-08-22"
+      },
+      "step_results": {
+        "game_id": "game_adverse",
+        "is_reserve_auto_download": "primary_flat",
+        "device_brand": "primary_flat",
+        "channel_group": "primary_flat",
+        "app_major_version": "primary_flat",
+        "os_major_version": "primary_flat",
+        "apk_size_tier": "primary_flat"
+      },
+      "expected": {
+        "status": "completed", "candidate_counts": {"game_id": 1},
+        "finding_dimension": "game_id", "finding_value": "slice-a"
+      }
+    },
+    {
+      "id": "historical-download-failure-flat",
+      "raw_dqc_input": {
+        "projectName": "tap_dw",
+        "ruleChecks": [{
+          "ruleName": "【APK下载失败率】最近1天高于阈值",
+          "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+          "actualExpression": "dt=2026-08-22"
+        }]
+      },
+      "routing": {
+        "chain": "download", "game_type": "app", "metric": "下载失败率",
+        "alert_date": "2026-08-22", "analysis_date": "2026-08-22"
+      },
+      "step_results": {
+        "game_id": "game_flat",
+        "is_reserve_auto_download": "primary_flat",
+        "device_brand": "primary_flat",
+        "channel_group": "primary_flat",
+        "app_major_version": "primary_flat",
+        "os_major_version": "primary_flat",
+        "apk_size_tier": "primary_flat"
+      },
+      "expected": {"status": "no_dominant_slice", "candidate_counts": {}}
+    }
+  ]
+}

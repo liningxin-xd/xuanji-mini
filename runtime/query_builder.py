@@ -117,9 +117,13 @@ class QueryBuilder:
         business_date = parameters.get("business_date")
         if not isinstance(business_date, str) or f"'{business_date}'" not in normalized:
             raise QueryBuildError("current business_date literal is missing")
-        for data_source in binding.data_sources:
-            if not re.search(rf"(?i)\b{re.escape(data_source)}\b", normalized):
-                raise QueryBuildError(f"registered data source is missing: {data_source}")
+        actual_sources = self._physical_data_sources(normalized)
+        expected_sources = {source.lower() for source in binding.data_sources}
+        if actual_sources != expected_sources:
+            raise QueryBuildError(
+                "physical data sources must exactly equal the registered set: "
+                f"expected={sorted(expected_sources)}, actual={sorted(actual_sources)}"
+            )
         for token in binding.protected_tokens:
             if not re.search(rf"(?i)\b{re.escape(token)}\b", normalized):
                 raise QueryBuildError(f"protected metric token is missing: {token}")
@@ -149,18 +153,19 @@ class QueryBuilder:
 
     def validate_repair(
         self,
-        original_sql: str,
+        baseline_sql: str,
+        failed_sql: str,
         repaired_sql: str,
         binding: QueryBinding,
         parameters: dict[str, Any],
     ) -> str:
         if not isinstance(repaired_sql, str) or not repaired_sql.strip():
             raise QueryBuildError("repaired_sql must be a non-empty string")
-        if sha256_text(original_sql) == sha256_text(repaired_sql):
+        if sha256_text(failed_sql) == sha256_text(repaired_sql):
             raise QueryBuildError("repaired SQL must differ from the failed SQL")
         self.validate_sql(repaired_sql, binding, parameters)
 
-        original_semantic = self._sql_without_comments(original_sql)
+        original_semantic = self._sql_without_comments(baseline_sql)
         repaired_semantic = self._sql_without_comments(repaired_sql)
         original_sources = self._physical_data_sources(original_semantic)
         repaired_sources = self._physical_data_sources(repaired_semantic)
@@ -199,11 +204,61 @@ class QueryBuilder:
         ):
             raise QueryBuildError("repair cannot change the registered date scope")
 
+        if self._normalize_sql(self._first_cte_body(original_semantic)) != (
+            self._normalize_sql(self._first_cte_body(repaired_semantic))
+        ):
+            raise QueryBuildError(
+                "repair cannot change the frozen range CTE or its WHERE scope"
+            )
+        if self._function_calls(original_semantic, "DATEADD") != self._function_calls(
+            repaired_semantic, "DATEADD"
+        ):
+            raise QueryBuildError("repair cannot change DATEADD offsets or arguments")
+
+        protected_expressions = set(binding.protected_tokens)
+        if binding.dimension_config:
+            protected_expressions.add(binding.dimension_config["source_field"])
+        if self._protected_select_expressions(
+            original_semantic, protected_expressions
+        ) != self._protected_select_expressions(
+            repaired_semantic, protected_expressions
+        ):
+            raise QueryBuildError(
+                "repair cannot change registered metric aggregation expressions"
+            )
+        if self._quality_select_expressions(
+            original_semantic
+        ) != self._quality_select_expressions(repaired_semantic):
+            raise QueryBuildError(
+                "repair cannot change quality-bucket or residual-bucket logic"
+            )
+        if self._final_output_columns(original_semantic) != self._final_output_columns(
+            repaired_semantic
+        ):
+            raise QueryBuildError("repair cannot change final output columns")
+
+        similarity = difflib.SequenceMatcher(
+            None,
+            self._normalize_sql(original_semantic),
+            self._normalize_sql(repaired_semantic),
+        ).ratio()
+        changed_lines = sum(
+            1
+            for line in difflib.ndiff(
+                baseline_sql.splitlines(), repaired_sql.splitlines()
+            )
+            if line.startswith(("+ ", "- "))
+        )
+        if similarity < 0.85 or changed_lines > 32:
+            raise QueryBuildError(
+                "repair exceeds the registered semantic diff budget"
+            )
+
         diff = "".join(
             difflib.unified_diff(
-                original_sql.splitlines(keepends=True),
+                baseline_sql.splitlines(keepends=True),
                 repaired_sql.splitlines(keepends=True),
-                fromfile="failed.sql",
+                fromfile="attempt-0.sql",
                 tofile="repaired.sql",
             )
         )
@@ -350,11 +405,176 @@ class QueryBuilder:
         return re.sub(r"--[^\n]*", " ", without_blocks)
 
     def _physical_data_sources(self, sql: str) -> set[str]:
-        return {
-            match.group(1).lower()
-            for match in re.finditer(
-                r"(?i)\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*\."
-                r"[A-Za-z_][A-Za-z0-9_]*)\b",
-                sql,
+        sources = set()
+        for match in re.finditer(
+            r"(?i)\b(?:FROM|JOIN)\s+"
+            r"(`?[A-Za-z_][A-Za-z0-9_]*`?\s*\.\s*"
+            r"`?[A-Za-z_][A-Za-z0-9_]*`?)",
+            sql,
+        ):
+            sources.add(re.sub(r"[`\s]", "", match.group(1)).lower())
+        return sources
+
+    def _normalize_sql(self, sql: str) -> str:
+        return re.sub(r"\s+", " ", sql).strip().lower()
+
+    def _first_cte_body(self, sql: str) -> str:
+        match = re.search(
+            r"(?is)^\s*WITH\s+[A-Za-z_][A-Za-z0-9_]*\s+AS\s*\(", sql
+        )
+        if not match:
+            raise QueryBuildError("registered SQL must start with a named CTE")
+        opening = sql.find("(", match.start())
+        closing = self._matching_parenthesis(sql, opening)
+        return sql[opening + 1 : closing]
+
+    def _function_calls(self, sql: str, function_name: str) -> tuple[str, ...]:
+        calls: list[str] = []
+        pattern = re.compile(rf"(?i)\b{re.escape(function_name)}\s*\(")
+        for match in pattern.finditer(sql):
+            opening = sql.find("(", match.start())
+            closing = self._matching_parenthesis(sql, opening)
+            calls.append(self._normalize_sql(sql[match.start() : closing + 1]))
+        return tuple(calls)
+
+    def _matching_parenthesis(self, sql: str, opening: int) -> int:
+        depth = 0
+        quote: str | None = None
+        index = opening
+        while index < len(sql):
+            char = sql[index]
+            if quote:
+                if char == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 1
+                    else:
+                        quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index
+            index += 1
+        raise QueryBuildError("SQL contains unbalanced parentheses")
+
+    def _select_expression_lists(self, sql: str) -> list[list[str]]:
+        result: list[list[str]] = []
+        for match in re.finditer(r"(?i)\bSELECT\b", sql):
+            start = match.end()
+            depth = self._depth_at(sql, start)
+            end = self._find_keyword_at_depth(sql, "FROM", start, depth)
+            if end is None:
+                continue
+            result.append(self._split_at_depth(sql[start:end], ","))
+        return result
+
+    def _depth_at(self, sql: str, end: int) -> int:
+        depth = 0
+        quote: str | None = None
+        index = 0
+        while index < end:
+            char = sql[index]
+            if quote:
+                if char == quote:
+                    if index + 1 < end and sql[index + 1] == quote:
+                        index += 1
+                    else:
+                        quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        return depth
+
+    def _find_keyword_at_depth(
+        self, sql: str, keyword: str, start: int, depth: int
+    ) -> int | None:
+        pattern = re.compile(rf"(?i)\b{re.escape(keyword)}\b")
+        for match in pattern.finditer(sql, start):
+            if self._depth_at(sql, match.start()) == depth:
+                return match.start()
+        return None
+
+    def _split_at_depth(self, value: str, separator: str) -> list[str]:
+        parts: list[str] = []
+        start = 0
+        depth = 0
+        quote: str | None = None
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if quote:
+                if char == quote:
+                    if index + 1 < len(value) and value[index + 1] == quote:
+                        index += 1
+                    else:
+                        quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == separator and depth == 0:
+                parts.append(value[start:index])
+                start = index + 1
+            index += 1
+        parts.append(value[start:])
+        return [part.strip() for part in parts if part.strip()]
+
+    def _protected_select_expressions(
+        self, sql: str, protected_tokens: set[str]
+    ) -> tuple[str, ...]:
+        expressions = []
+        for select_list in self._select_expression_lists(sql):
+            for expression in select_list:
+                if any(
+                    re.search(rf"(?i)\b{re.escape(token)}\b", expression)
+                    for token in protected_tokens
+                ):
+                    expressions.append(self._normalize_sql(expression))
+        return tuple(expressions)
+
+    def _quality_select_expressions(self, sql: str) -> tuple[str, ...]:
+        markers = (
+            "'quality'",
+            "'residual'",
+            "'__none__'",
+            "'__quality__'",
+            "'__other_below_threshold__'",
+            "'unmatched'",
+            "'invalid_'",
+        )
+        expressions = []
+        for select_list in self._select_expression_lists(sql):
+            for expression in select_list:
+                normalized = self._normalize_sql(expression)
+                if any(marker in normalized for marker in markers):
+                    expressions.append(normalized)
+        return tuple(expressions)
+
+    def _final_output_columns(self, sql: str) -> tuple[str, ...]:
+        select_lists = self._select_expression_lists(sql)
+        if not select_lists:
+            raise QueryBuildError("SQL has no SELECT list")
+        columns: list[str] = []
+        for expression in select_lists[-1]:
+            alias = re.search(
+                r"(?is)\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", expression
             )
-        }
+            if alias:
+                columns.append(alias.group(1).lower())
+                continue
+            identifier = re.search(
+                r"(?is)([A-Za-z_][A-Za-z0-9_]*)\s*$", expression
+            )
+            if not identifier:
+                raise QueryBuildError("final SELECT expression lacks a stable column")
+            columns.append(identifier.group(1).lower())
+        return tuple(columns)

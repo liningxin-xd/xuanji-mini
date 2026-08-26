@@ -76,21 +76,21 @@ DView 查询结果存在 1000 行返回上限。任何按维度、版本、错�
 
 不得省略 Playbook 要求的阶段、把可选步骤当成必选步骤，或在 Playbook 之外临时增加维度、组合、算法、门槛和因果判断。单个维度家族失败是家族级限制：该家族不得产生候选，但只要根指标和归因数据源的完整根范围仍合法，就必须记录限制并按 Playbook 继续后续已登记家族，不得直接结束整个调查。只有根范围或全部已登记归因数据源不可用时才返回受阻状态。某一步因数据、权限或适用条件不能执行时，按 Playbook 的边界继续或停止，不得用猜测补足证据。
 
-已注册下载/安装告警通过根指标预检后，必须按 Playbook 生成 `attribution_execution`。进入归因时先冻结完整 `steps` 顺序，每完成一步立即写入其真实 `status`、`candidate_count` 或 `reason`，不能等到撰写结论时根据已有候选反推执行记录。单步失败仍保留在原位置并继续；不得省略失败项、重排步骤、把未执行写成成功，或因已经找到游戏候选而截断固定队列。实际执行二级归因时，另在 `secondary_steps` 中记录唯一的父维度、父切片身份、子维度、状态和候选数；未执行时省略该字段或写空数组，不得把二级候选伪装成一级候选。
+已注册下载/安装告警通过根指标预检后，必须由 runner 按 Playbook 冻结完整一级 `steps` 顺序并生成 `attribution_execution`。调用方只能提交 `query_returned` 或 `query_error` 原始事实；步骤的 `status`、`candidate_count`、`warning_codes`、`failure_code` 和 `reason` 必须由 runner 的结果校验与计算生成，不能等到撰写结论时根据已有候选反推执行记录，也不得提交 `step_validation_failed` 直接选择终态。单步失败仍保留在原位置并继续；不得省略失败项、重排步骤、把未执行写成成功，或因已经找到游戏候选而截断固定队列。实际执行二级归因时，另在 `secondary_steps` 中记录唯一的父维度、父切片身份、子维度、状态和经同等校验得到的候选数；未执行时省略该字段或写空数组，不得把二级候选伪装成一级候选。
 
 ### 固定归因队列运行协议
 
-根指标预检和告警新增性门禁已经决定进入 `mode=full_queue` 后，必须在本 Skill 根目录使用本地 runner 冻结并执行完整一级队列：
+根指标预检和告警新增性门禁已经决定进入 `mode=full_queue` 后，必须在本 Skill 根目录通过可信 Host/DView Adapter 冻结并执行完整一级队列：
 
-1. 先执行 `python3 -m runtime.runner init --run-id <run_id> --chain <download|install> --game-type <app|sandbox> --metric <标准指标> --alert-date <alert_dt> --analysis-date <analysis_dt>`。不得在门禁决定进入 `full_queue` 前创建 run。
-2. 重复执行 `python3 -m runtime.runner next --run-id <run_id>`，每次只处理票据返回的当前动作。`execute_query` 的 `rendered_sql` 必须原样提交只读 DView MCP，不得自行选择 QuerySpec、合并家族或重写 SQL。
-3. 使用 `python3 -m runtime.runner record --run-id <run_id>` 从 stdin 登记 DView 原始结果或原始错误。成功和 SQL 错误必须回传票据中的 `rendered_sql_sha256`；有真实 query ID 时原样回传，没有时省略。
-4. `repair_query` 表示当前游标已锁定。只依据票据内嵌的完整 triage、原始错误和失败 SQL提交 `repair_submitted`；不得执行其他步骤，不得修改源 QuerySpec。runner 最多接受两次通过保护门禁的修正。
-5. 单步骤 `failed` 后继续调用 `next`；不得把家族失败升级为整个调查失败。沙盒 `install_stage` 由 runner 自动记录为 `skipped_not_applicable`。
-6. 只有 `next` 返回 `queue_complete` 后才执行 `python3 -m runtime.runner export --run-id <run_id>` 生成 `attribution_execution`，并在最终返回前执行 `python3 -m runtime.runner validate-final --run-id <run_id> --analysis-json <analysis.json> --investigation-index <index>`。
-7. 不得直接修改 `.runs/*/state.json`、票据、SQL、事件或 revision，不得绕过 runner 提前调用 writer。`validate-final` 未通过时不得提交最终结果。
+1. 生产 Host 必须在模型进程外持有至少 32 字节的 receipt secret，使用同一 `TrustedReceiptVerifier` 创建 `AttributionRunner` 和 `HostDViewAdapter`，再以 `receipt_mode="trusted_host"` 创建 run。runner 只接收 `alert_date` 并按已登记链路推导 `analysis_date`；即使 Host 传入该日期，也必须与推导值一致。不得在门禁决定进入 `full_queue` 前创建 run。
+2. Host 重复调用 `HostDViewAdapter.execute_current(run_id)`。Adapter 必须直接执行 runner 当前票据的 `rendered_sql`，保存真实 query ID 和原始响应，计算实际 SQL 与结果 hash，再产生签名 `trusted_host_receipt`。模型不得复制或改写 SQL，也不得自行构造 Host receipt。
+3. Adapter 只登记 `query_returned` 或 `query_error`。`query_returned` 必须带票据 SQL hash、当前步骤唯一的非空 query ID、带精确 `columns` 和 `rows` 的 `raw_result`、以及匹配的 `raw_result_sha256`；`query_error` 必须带同样的 SQL hash 和 query ID，以及完整的原始 error class、code 和 message。query ID 不得跨步骤或 attempt 复用。ResultValidator 在 runner 内部验证 schema、行数预算、唯一键、源桶与折叠桶闭合、质量桶、分子分母回勾和贡献闭合，并自动生成候选与步骤终态。
+4. `repair_query` 表示当前游标已锁定。只依据票据内嵌的完整 triage、原始错误和失败 SQL 提交 `repair_submitted`；不得执行其他步骤，不得修改源 QuerySpec。runner 每次都将修正与 attempt 0 的登记 SQL 比较，最多接受两次通过保护门禁的修正。
+5. 单步骤 `failed` 后继续执行当前 Host 队列；不得把家族失败升级为整个调查失败。沙盒 `install_stage` 由 runner 自动记录为 `skipped_not_applicable`。
+6. 只有队列返回 `queue_complete` 后才可 export `attribution_execution`，且导出证据必须保留 `trusted_host_adapter` 或 `self_reported_development` 的 `execution_mode`。先生成最终 analysis JSON，再调用 `validate_final`；校验必须绑定 run 的 metric、analysis date、game type、execution mode、逐步 query ID、warnings、候选和调查状态。只有校验成功并持久化 final analysis SHA-256 与 validation receipt 后，run 才能进入 `finalized`。
+7. 不得直接修改 `.runs/*/state.json`、票据、SQL、事件、receipt 或 revision，不得绕过 runner 提前调用 writer。未获得 `validation_receipt` 时不得提交最终结果。
 
-当前为任务票据模式：runner 能确定性约束队列、资产、参数、SQL hash、状态和最终证据，但无法直接观察模型向 DView MCP 发出的请求；实际提交 SQL 与票据一致性仍依赖调用方如实回传 hash。
+只有隔离的开发和回归测试可显式使用 `--receipt-mode self_reported`：通过 `python3 -m runtime.runner init` 创建开发 run，用 `python3 -m runtime.runner next` 取得票据，再用 `python3 -m runtime.runner record` 登记完整的 `self_reported_receipt`。队列完成后依次执行 `python3 -m runtime.runner export` 和 `python3 -m runtime.runner validate-final`。`self_reported` 不具有实际 DView SQL 不可篡改保证，不得用于生产调查或宣称可信执行。
 
 ## 7. 停止并输出
 
@@ -122,7 +122,7 @@ DView 查询结果存在 1000 行返回上限。任何按维度、版本、错�
 
 结论的证据边界严格遵守 Playbook，用户可见措辞严格遵守文案规范；不得把定位结果升级为未经证实的因果结论。
 
-DView 返回真实 query ID 时，可用 `queries: [{"purpose": "...", "query_id": "..."}]` 保留；没有返回时省略 `queries`，不得伪造。
+runner 固定队列中每个 `query_returned` 或 `query_error` 都必须保留当次执行唯一的真实 query ID；其他不进入 runner 的辅助查询只在 DView 实际返回 ID 时用 `queries: [{"purpose": "...", "query_id": "..."}]` 保留，没有返回时省略，不得伪造。
 
 ## 安全边界
 
