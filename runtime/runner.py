@@ -15,6 +15,7 @@ from .contracts import (
     canonical_sha256,
     sha256_text,
 )
+from .final_validator import FinalEvidenceValidator, FinalValidationError
 from .models import RunStatus, StepStatus, TERMINAL_STEP_STATUSES
 from .query_builder import QueryBuildError, QueryBuilder
 
@@ -163,6 +164,11 @@ class AttributionRunner:
             return self._queue_complete_ticket(state)
 
         step = state["steps"][state["cursor"]]
+        if step["status"] == StepStatus.REPAIR_REQUIRED.value:
+            if changed:
+                state["revision"] += 1
+                self._write_state(state)
+            return self._repair_ticket(state, step)
         if step["status"] == StepStatus.PENDING.value:
             plan = self.contracts.plans[state["plan_id"]]
             binding = self.contracts.binding_for(
@@ -222,6 +228,15 @@ class AttributionRunner:
                 f"event targets non-current step {event.get('step_id')}; "
                 f"current step is {step['id']}"
             )
+        event_type = event.get("event")
+        if event_type == "repair_submitted":
+            return self._record_repair(state, step, event, event_hash)
+        if event_type not in {
+            "query_succeeded",
+            "query_error",
+            "step_validation_failed",
+        }:
+            raise RunnerError(f"unsupported record event: {event_type}")
         if step["status"] != StepStatus.IN_PROGRESS.value:
             raise RunnerError(f"current step is not awaiting a query result: {step['status']}")
         if not step["attempts"]:
@@ -232,14 +247,6 @@ class AttributionRunner:
             raise RunnerError(
                 f"event attempt_no must equal current attempt {attempt['attempt_no']}"
             )
-
-        event_type = event.get("event")
-        if event_type not in {
-            "query_succeeded",
-            "query_error",
-            "step_validation_failed",
-        }:
-            raise RunnerError(f"unsupported record event: {event_type}")
         if event_type in {"query_succeeded", "query_error"}:
             self._require_submitted_hash(event, attempt)
 
@@ -249,6 +256,7 @@ class AttributionRunner:
         query_id = self._optional_non_empty_string(event, "query_id")
         attempt["query_id"] = query_id
 
+        advance_cursor = True
         if event_type == "query_succeeded":
             candidate_count = event.get("candidate_count")
             if (
@@ -279,19 +287,30 @@ class AttributionRunner:
             }
             attempt["status"] = "error"
             attempt["error"] = raw_error
-            step["status"] = StepStatus.FAILED.value
-            step["reason"] = (
-                f"{raw_error['class']} {raw_error['code']}: {raw_error['message']}"
-            )
+            if raw_error["class"] == "semantic_analysis" and attempt_no < 2:
+                step["status"] = StepStatus.REPAIR_REQUIRED.value
+                advance_cursor = False
+            else:
+                step["status"] = StepStatus.FAILED.value
+                repair_suffix = (
+                    " after two evidence-based repairs"
+                    if raw_error["class"] == "semantic_analysis" and attempt_no == 2
+                    else ""
+                )
+                step["reason"] = (
+                    f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
+                    f"{raw_error['message']}"
+                )
 
         state["processed_events"][event_hash] = {
             "event": event_type,
             "step_id": step["id"],
             "event_path": str(event_path),
         }
-        state["cursor"] += 1
-        if state["cursor"] >= len(state["steps"]):
-            self._mark_queue_complete(state)
+        if advance_cursor:
+            state["cursor"] += 1
+            if state["cursor"] >= len(state["steps"]):
+                self._mark_queue_complete(state)
         state["revision"] += 1
         self._write_state(state)
         return {
@@ -376,6 +395,135 @@ class AttributionRunner:
             ticket,
         )
         return ticket
+
+    def _repair_ticket(
+        self, state: dict[str, Any], step: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not step["attempts"]:
+            raise RunnerError("repair_required step has no failed attempt")
+        attempt = step["attempts"][-1]
+        if attempt.get("status") != "error" or not attempt.get("error"):
+            raise RunnerError("repair_required step has no raw SQL error")
+        repair_attempt = attempt["attempt_no"] + 1
+        if repair_attempt > 2:
+            raise RunnerError("maximum SQL repairs already exhausted")
+        original_sql = (
+            self._run_dir(state["run_id"]) / attempt["sql_path"]
+        ).read_text(encoding="utf-8")
+        ticket = {
+            "action": "repair_query",
+            "run_id": state["run_id"],
+            "revision": state["revision"],
+            "step_id": step["id"],
+            "repair_attempt": repair_attempt,
+            "max_repairs": 2,
+            "cursor_locked": True,
+            "raw_error": dict(attempt["error"]),
+            "original_sql_sha256": attempt["sql_sha256"],
+            "original_sql": original_sql,
+            "triage_text": self.contracts.triage_text(),
+            "required_submission": [
+                "repair_reason",
+                "error_evidence",
+                "repaired_sql",
+            ],
+        }
+        self._atomic_write_json(
+            self._run_dir(state["run_id"])
+            / "tickets"
+            / f"{state['cursor']:02d}-{step['id']}-repair-{repair_attempt}.json",
+            ticket,
+        )
+        return ticket
+
+    def _record_repair(
+        self,
+        state: dict[str, Any],
+        step: dict[str, Any],
+        event: dict[str, Any],
+        event_hash: str,
+    ) -> dict[str, Any]:
+        if step["status"] != StepStatus.REPAIR_REQUIRED.value:
+            raise RunnerError(f"current step does not accept a repair: {step['status']}")
+        if not step["attempts"]:
+            raise RunnerError("repair_required step has no failed attempt")
+        previous_attempt = step["attempts"][-1]
+        if previous_attempt.get("status") != "error" or not previous_attempt.get(
+            "error"
+        ):
+            raise RunnerError("repair requires a preserved raw SQL error")
+        repair_attempt = event.get("repair_attempt")
+        expected_attempt = previous_attempt["attempt_no"] + 1
+        if (
+            isinstance(repair_attempt, bool)
+            or not isinstance(repair_attempt, int)
+            or repair_attempt != expected_attempt
+        ):
+            raise RunnerError(f"repair_attempt must equal {expected_attempt}")
+        if repair_attempt > 2:
+            raise RunnerError("at most two SQL repairs are allowed")
+        repair_reason = self._required_non_empty_string(event, "repair_reason")
+        error_evidence = self._required_non_empty_string(event, "error_evidence")
+        repaired_sql = self._required_non_empty_string(event, "repaired_sql")
+        original_sql = (
+            self._run_dir(state["run_id"]) / previous_attempt["sql_path"]
+        ).read_text(encoding="utf-8")
+        plan = self.contracts.plans[state["plan_id"]]
+        binding = self.contracts.binding_for(
+            plan, step["id"], state["metric"], state["game_type"]
+        )
+        if binding is None:
+            raise RunnerError("automatic step cannot accept a SQL repair")
+        parameters = {
+            "business_date": state["analysis_date"],
+            "game_type": state["game_type"],
+        }
+        diff = self.query_builder.validate_repair(
+            original_sql, repaired_sql, binding, parameters
+        )
+        sql_path = self._sql_relative_path(
+            state["cursor"], step["id"], repair_attempt
+        )
+        diff_path = str(
+            Path("sql")
+            / f"{state['cursor']:02d}-{step['id']}-repair-{repair_attempt}.diff"
+        )
+        event_path = Path("events") / f"{event_hash}.json"
+        run_dir = self._run_dir(state["run_id"])
+        self._atomic_write_text(run_dir / sql_path, repaired_sql)
+        self._atomic_write_text(run_dir / diff_path, diff)
+        self._atomic_write_json(run_dir / event_path, event)
+        step["attempts"].append(
+            {
+                "attempt_no": repair_attempt,
+                "status": "issued",
+                "sql_sha256": sha256_text(repaired_sql),
+                "sql_path": sql_path,
+                "query_id": None,
+                "error": None,
+                "event_path": None,
+                "repair": {
+                    "source_attempt_no": previous_attempt["attempt_no"],
+                    "repair_reason": repair_reason,
+                    "error_evidence": error_evidence,
+                    "diff_path": diff_path,
+                    "event_path": str(event_path),
+                },
+            }
+        )
+        step["status"] = StepStatus.IN_PROGRESS.value
+        state["processed_events"][event_hash] = {
+            "event": "repair_submitted",
+            "step_id": step["id"],
+            "event_path": str(event_path),
+        }
+        state["revision"] += 1
+        self._write_state(state)
+        return {
+            "idempotent_replay": False,
+            "event_sha256": event_hash,
+            **self._status_payload(state),
+        }
 
     def _queue_complete_ticket(self, state: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -489,6 +637,49 @@ class AttributionRunner:
             status = step.get("status")
             if status not in {member.value for member in StepStatus}:
                 raise RunnerError(f"invalid step status: {status}")
+            attempts = step.get("attempts")
+            if not isinstance(attempts, list):
+                raise RunnerError(f"step attempts must be a list: {plan_step.id}")
+            for attempt_index, attempt in enumerate(attempts):
+                if not isinstance(attempt, dict):
+                    raise RunnerError(f"invalid attempt record: {plan_step.id}")
+                if attempt.get("attempt_no") != attempt_index or attempt_index > 2:
+                    raise RunnerError(f"attempt sequence changed: {plan_step.id}")
+                if attempt.get("status") not in {
+                    "issued",
+                    "succeeded",
+                    "failed",
+                    "error",
+                }:
+                    raise RunnerError(f"invalid attempt status: {plan_step.id}")
+                digest = attempt.get("sql_sha256")
+                relative_sql_path = attempt.get("sql_path")
+                if not isinstance(digest, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", digest
+                ):
+                    raise RunnerError(f"invalid attempt SQL hash: {plan_step.id}")
+                if not isinstance(relative_sql_path, str):
+                    raise RunnerError(f"invalid attempt SQL path: {plan_step.id}")
+                run_dir = self._run_dir(state["run_id"]).resolve()
+                sql_path = (run_dir / relative_sql_path).resolve()
+                try:
+                    sql_path.relative_to(run_dir)
+                except ValueError as exc:
+                    raise RunnerError("attempt SQL path escapes its run directory") from exc
+                try:
+                    sql_text = sql_path.read_text(encoding="utf-8")
+                except FileNotFoundError as exc:
+                    raise RunnerError(f"attempt SQL file is missing: {relative_sql_path}") from exc
+                if sha256_text(sql_text) != digest:
+                    raise RunnerError(f"attempt SQL file hash mismatch: {plan_step.id}")
+                if attempt_index == 0 and attempt.get("repair") is not None:
+                    raise RunnerError("initial SQL attempt cannot be marked as a repair")
+                if attempt_index > 0:
+                    repair = attempt.get("repair")
+                    if not isinstance(repair, dict) or repair.get(
+                        "source_attempt_no"
+                    ) != attempt_index - 1:
+                        raise RunnerError(f"repair lineage changed: {plan_step.id}")
             if index < cursor and status not in TERMINAL_STEP_STATUSES:
                 raise RunnerError("a completed cursor prefix contains non-terminal steps")
             if index == cursor and cursor < len(steps) and status in TERMINAL_STEP_STATUSES:
@@ -510,12 +701,39 @@ class AttributionRunner:
             if status in {
                 StepStatus.FAILED.value,
                 StepStatus.SKIPPED_NOT_APPLICABLE.value,
-            } and not isinstance(step.get("reason"), str):
+            } and (
+                not isinstance(step.get("reason"), str)
+                or not step["reason"].strip()
+            ):
                 raise RunnerError("failed/skipped step requires a reason")
             if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and not (
                 plan.id == "install_sandbox" and plan_step.id == "install_stage"
             ):
                 raise RunnerError("illegal skipped_not_applicable step")
+            if status == StepStatus.PENDING.value and attempts:
+                raise RunnerError("pending step cannot already contain attempts")
+            if status == StepStatus.IN_PROGRESS.value and (
+                not attempts or attempts[-1]["status"] != "issued"
+            ):
+                raise RunnerError("in_progress step must have one issued current attempt")
+            if status == StepStatus.REPAIR_REQUIRED.value and (
+                not attempts
+                or attempts[-1]["status"] != "error"
+                or (attempts[-1].get("error") or {}).get("class")
+                != "semantic_analysis"
+                or attempts[-1]["attempt_no"] >= 2
+            ):
+                raise RunnerError("repair_required step lacks a repairable semantic error")
+            if status == StepStatus.SUCCEEDED.value and (
+                not attempts or attempts[-1]["status"] != "succeeded"
+            ):
+                raise RunnerError("succeeded step lacks a succeeded current attempt")
+            if status == StepStatus.FAILED.value and (
+                not attempts or attempts[-1]["status"] not in {"failed", "error"}
+            ):
+                raise RunnerError("failed step lacks a failed current attempt")
+            if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and attempts:
+                raise RunnerError("automatic skipped step cannot contain query attempts")
 
         if cursor < len(steps):
             if state.get("status") != RunStatus.ACTIVE.value:
@@ -663,6 +881,10 @@ def _build_parser() -> argparse.ArgumentParser:
     record_parser = subparsers.add_parser("record")
     record_parser.add_argument("--run-id", required=True)
     record_parser.add_argument("--event-file", default="-")
+    validate_parser = subparsers.add_parser("validate-final")
+    validate_parser.add_argument("--run-id", required=True)
+    validate_parser.add_argument("--analysis-json", required=True)
+    validate_parser.add_argument("--investigation-index", type=int, required=True)
     return parser
 
 
@@ -691,9 +913,22 @@ def main(argv: list[str] | None = None) -> int:
             result = runner.status(args.run_id)
         elif args.command == "export":
             result = runner.export(args.run_id)
+        elif args.command == "validate-final":
+            analysis = _read_json_input(args.analysis_json)
+            result = FinalEvidenceValidator().validate(
+                runner.load_state(args.run_id),
+                analysis,
+                args.investigation_index,
+            )
         else:  # pragma: no cover - argparse prevents this branch
             raise RunnerError(f"unknown command: {args.command}")
-    except (ContractError, QueryBuildError, RunnerError, OSError) as exc:
+    except (
+        ContractError,
+        FinalValidationError,
+        QueryBuildError,
+        RunnerError,
+        OSError,
+    ) as exc:
         print(
             json.dumps({"error": str(exc)}, ensure_ascii=False, sort_keys=True),
             file=sys.stderr,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import difflib
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,7 @@ class QueryBuilder:
     ) -> None:
         if not isinstance(sql, str) or not sql.strip():
             raise QueryBuildError("rendered SQL must be a non-empty string")
-        normalized = sql.strip()
+        normalized = self._sql_without_comments(sql).strip()
         if not re.match(r"(?is)^(WITH\b|SELECT\b)", normalized):
             raise QueryBuildError("only read-only SELECT/WITH SQL is allowed")
         forbidden_statements = re.search(
@@ -145,6 +146,70 @@ class QueryBuilder:
                     raise QueryBuildError(
                         f"SQL injects another primary dimension field: {other_field}"
                     )
+
+    def validate_repair(
+        self,
+        original_sql: str,
+        repaired_sql: str,
+        binding: QueryBinding,
+        parameters: dict[str, Any],
+    ) -> str:
+        if not isinstance(repaired_sql, str) or not repaired_sql.strip():
+            raise QueryBuildError("repaired_sql must be a non-empty string")
+        if sha256_text(original_sql) == sha256_text(repaired_sql):
+            raise QueryBuildError("repaired SQL must differ from the failed SQL")
+        self.validate_sql(repaired_sql, binding, parameters)
+
+        original_semantic = self._sql_without_comments(original_sql)
+        repaired_semantic = self._sql_without_comments(repaired_sql)
+        original_sources = self._physical_data_sources(original_semantic)
+        repaired_sources = self._physical_data_sources(repaired_semantic)
+        if original_sources != repaired_sources:
+            raise QueryBuildError(
+                "repair cannot add, remove, or replace a physical data source"
+            )
+
+        protected = list(binding.protected_tokens)
+        if binding.dimension_config:
+            protected.append(binding.dimension_config["source_field"])
+        for token in protected:
+            original_count = len(
+                re.findall(rf"(?i)\b{re.escape(token)}\b", original_semantic)
+            )
+            repaired_count = len(
+                re.findall(rf"(?i)\b{re.escape(token)}\b", repaired_semantic)
+            )
+            if original_count != repaired_count:
+                raise QueryBuildError(
+                    f"repair changed protected token usage for {token}: "
+                    f"{original_count} -> {repaired_count}"
+                )
+        for predicate in binding.required_predicates:
+            pattern = r"\s*".join(re.escape(part) for part in predicate.split())
+            original_count = len(re.findall(rf"(?i)\b{pattern}\b", original_semantic))
+            repaired_count = len(re.findall(rf"(?i)\b{pattern}\b", repaired_semantic))
+            if original_count != repaired_count:
+                raise QueryBuildError(
+                    f"repair changed required predicate usage: {predicate}"
+                )
+
+        date_pattern = re.compile(r"'\d{4}-\d{2}-\d{2}'")
+        if set(date_pattern.findall(original_semantic)) != set(
+            date_pattern.findall(repaired_semantic)
+        ):
+            raise QueryBuildError("repair cannot change the registered date scope")
+
+        diff = "".join(
+            difflib.unified_diff(
+                original_sql.splitlines(keepends=True),
+                repaired_sql.splitlines(keepends=True),
+                fromfile="failed.sql",
+                tofile="repaired.sql",
+            )
+        )
+        if not diff:
+            raise QueryBuildError("repair did not produce a reviewable SQL diff")
+        return diff
 
     def _load_query_spec(
         self, path: Path
@@ -279,3 +344,17 @@ class QueryBuilder:
         if PARAMETER_PATTERN.search(sql):
             raise QueryBuildError("unresolved SQL parameters remain after rendering")
         return sql
+
+    def _sql_without_comments(self, sql: str) -> str:
+        without_blocks = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        return re.sub(r"--[^\n]*", " ", without_blocks)
+
+    def _physical_data_sources(self, sql: str) -> set[str]:
+        return {
+            match.group(1).lower()
+            for match in re.finditer(
+                r"(?i)\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*\."
+                r"[A-Za-z_][A-Za-z0-9_]*)\b",
+                sql,
+            )
+        }
