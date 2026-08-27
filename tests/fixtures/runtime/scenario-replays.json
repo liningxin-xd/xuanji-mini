@@ -1,0 +1,77 @@
+[
+  {
+    "id": "D-01",
+    "chain": "download",
+    "game_type": "app",
+    "metric": "下载完成率",
+    "candidate_steps": {"game_id": 2},
+    "failed_steps": [],
+    "expected_query_steps": [
+      "game_id",
+      "is_reserve_auto_download",
+      "device_brand",
+      "channel_group",
+      "app_major_version",
+      "os_major_version",
+      "apk_size_tier"
+    ]
+  },
+  {
+    "id": "D-04",
+    "chain": "download",
+    "game_type": "sandbox",
+    "metric": "下载失败率",
+    "candidate_steps": {},
+    "failed_steps": ["is_reserve_auto_download"],
+    "expected_query_steps": [
+      "game_id",
+      "is_reserve_auto_download",
+      "device_brand",
+      "channel_group",
+      "app_major_version",
+      "os_major_version",
+      "apk_size_tier"
+    ]
+  },
+  {
+    "id": "I-03",
+    "chain": "install",
+    "game_type": "app",
+    "metric": "下载安装完成率",
+    "candidate_steps": {},
+    "failed_steps": ["install_stage"],
+    "expected_query_steps": [
+      "game_id",
+      "install_stage",
+      "device_brand",
+      "storage_headroom_tier",
+      "os_major_version",
+      "apk_size_tier"
+    ]
+  },
+  {
+    "id": "I-07",
+    "chain": "install",
+    "game_type": "sandbox",
+    "metric": "下载安装完成率",
+    "candidate_steps": {},
+    "failed_steps": [],
+    "expected_query_steps": [
+      "game_id",
+      "device_brand",
+      "storage_headroom_tier",
+      "os_major_version",
+      "apk_size_tier"
+    ],
+    "expected_automatic_step": "install_stage"
+  },
+  {
+    "id": "semantic_analysis-regression",
+    "chain": "download",
+    "game_type": "app",
+    "metric": "下载完成率",
+    "error_class": "semantic_analysis",
+    "expected_next_action": "repair_query",
+    "expected_cursor": 0
+  }
+]

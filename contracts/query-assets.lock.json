@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "path": "references/queries/registered-monitor-root.yaml",
+      "sha256": "2c2d039068d13d128433a21a91905585d549e31b6560bb9478a6f87f905da194"
+    },
+    {
+      "path": "references/queries/download-game-attribution.yaml",
+      "sha256": "c73b7be9248bb5a1b247a9d9cf3e1415892bdca7cbf9db413d887e76acedb3ca"
+    },
+    {
+      "path": "references/queries/download-failed-rate-game-attribution.yaml",
+      "sha256": "878760aaefddba94fecbe85bedaf947b691be897052fb20148cd277fd340430c"
+    },
+    {
+      "path": "references/queries/download-failed-pv-rate-game-attribution.yaml",
+      "sha256": "f52ac512d84de8114672246f66c38d5674e79453fbe5e4ba8263bf4a2f54a74b"
+    },
+    {
+      "path": "references/queries/download-stop-rate-game-attribution.yaml",
+      "sha256": "7961e832d140ee16247a1517a95ed63ccb085c64fbbf7a0e698957d81e65c161"
+    },
+    {
+      "path": "references/queries/download-primary-attribution-template.md",
+      "sha256": "d017ce04f88b89470664d595baf80fccf2db061ff4ffb1f191112d9cf9be6281"
+    },
+    {
+      "path": "references/queries/download-failed-rate-primary-attribution-template.md",
+      "sha256": "0866bd906c38e960d52061d36167b9dbcb0ff03fd17977728f50b6f30037c4c6"
+    },
+    {
+      "path": "references/queries/download-failed-pv-rate-primary-attribution-template.md",
+      "sha256": "ef3934c97e2b89d21164f3e3a9b0c1455e5b522b889f3de37ba9fd0f4b862a0a"
+    },
+    {
+      "path": "references/queries/download-stop-rate-primary-attribution-template.md",
+      "sha256": "eb96584562d4dfe5584e73d2c33aa0594ffbaab18a83b8a05348900d170013b4"
+    },
+    {
+      "path": "references/queries/install-game-attribution.yaml",
+      "sha256": "25bd12d7b16eeca2902453260596e6f7ea05354bb141b22112c2495d55ecc5a6"
+    },
+    {
+      "path": "references/queries/install-stage-loss-decomposition.yaml",
+      "sha256": "5d3c28e2ee071113546bc333d4366e448a72b0b84bd0f2f0886a1310d10c943c"
+    },
+    {
+      "path": "references/queries/install-primary-attribution-template.md",
+      "sha256": "bc3fdb7513f471c4efde66cfffb3808ac42e3dfa99349371a382f7765c0e3689"
+    },
+    {
+      "path": "references/queries/install-post-start-version-template.md",
+      "sha256": "b9c79dbe3e95f8b0f1e04f1ffc21341dc7fcb2545fcc09f1dce6bb3cb09697c3"
+    },
+    {
+      "path": "references/queries/secondary-attribution-template.md",
+      "sha256": "88265f65bd4d7201653edea25c66b51ab96d8fef0c287ce1de8073571820333e"
+    },
+    {
+      "path": "references/queries/game-operation-events.yaml",
+      "sha256": "7edd25fa5a22455691ee6aad183d9b3853c8550efbce916328744ae662d1b408"
+    },
+    {
+      "path": "references/queries/primary-attribution-dimensions.md",
+      "sha256": "4566fef7828fb248ea9946f3b6e27096eb6806edf84fdf92802e5a2f6ee8af48"
+    }
+  ]
+}

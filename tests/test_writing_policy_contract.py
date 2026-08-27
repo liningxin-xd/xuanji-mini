@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_PATH = ROOT / "SKILL.md"
 PLAYBOOK_PATH = ROOT / "references" / "download-install-playbook.md"
 WRITING_POLICY_PATH = ROOT / "references" / "diagnosis-writing-policy.md"
+RUNTIME_WRITING_GUIDE_PATH = ROOT / "references" / "runtime-writing-guide.md"
 
 
 class WritingPolicyContractTest(unittest.TestCase):
@@ -14,15 +15,17 @@ class WritingPolicyContractTest(unittest.TestCase):
         cls.skill = SKILL_PATH.read_text(encoding="utf-8")
         cls.playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
         cls.policy = WRITING_POLICY_PATH.read_text(encoding="utf-8")
+        cls.runtime_guide = RUNTIME_WRITING_GUIDE_PATH.read_text(encoding="utf-8")
 
     def test_skill_routes_user_visible_copy_to_the_writing_policy(self):
         self.assertIn(
-            "[告警诊断文案规范](references/diagnosis-writing-policy.md)",
+            "[Runtime 文案指南](references/runtime-writing-guide.md)",
             self.skill,
         )
         self.assertIn("结构化事实冻结后", self.skill)
-        self.assertIn("不得执行独立的二次润色", self.skill)
-        self.assertIn("不得改变 Playbook 已确定的状态", self.skill)
+        self.assertIn("不执行独立二次润色", self.skill)
+        self.assertIn("不改变 Runtime 已确定的状态", self.skill)
+        self.assertIn("只返回一个 JSON object", self.runtime_guide)
 
     def test_playbook_keeps_semantic_boundaries_without_copy_templates(self):
         self.assertIn("结论语义边界", self.playbook)

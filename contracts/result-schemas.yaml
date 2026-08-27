@@ -1,0 +1,107 @@
+version: 1
+
+defaults:
+  row_limit_exclusive: 250
+  baseline_day_count: 7
+  minimum_sample: 100
+  minimum_share: 0.01
+  minimum_adverse_impact: 0.0005
+  contribution_tolerance: 0.000001
+  quality_values:
+    - unknown
+    - invalid
+    - not_applicable
+    - unmatched
+    - ambiguous_*
+    - invalid_*
+    - __none__
+    - __other__
+    - __quality__
+    - __other_below_threshold__
+
+metrics:
+  下载完成率:
+    direction: higher_is_better
+    numerator_subset: true
+  下载失败率:
+    direction: lower_is_better
+    numerator_subset: true
+  下载失败次数比率:
+    direction: lower_is_better
+    numerator_subset: false
+  下载人为停止率:
+    direction: lower_is_better
+    numerator_subset: true
+  下载安装完成率:
+    direction: higher_is_better
+    numerator_subset: true
+
+schemas:
+  query_spec_bucket:
+    validator: contribution_buckets
+    columns_from_query_spec: true
+    business_bucket_kind: game
+    require_source_bucket_audit: false
+  download_primary_bucket:
+    validator: contribution_buckets
+    business_bucket_kind: dimension
+    require_source_bucket_audit: true
+    columns:
+      analysis_date: date
+      game_type: string
+      bucket_kind: string
+      dimension_value: string
+      dimension_label: string
+      collapsed_source_bucket_count: integer
+      source_bucket_count: integer
+      baseline_day_count: integer
+      current_denominator: integer
+      baseline_denominator: integer
+      current_numerator: integer
+      baseline_numerator: integer
+      overall_current_denominator: integer
+      overall_baseline_denominator: integer
+      overall_current_numerator: integer
+      overall_baseline_numerator: integer
+      overall_current_dimension_matched_denominator: integer
+      overall_baseline_dimension_matched_denominator: integer
+      overall_current_dimension_unmatched_denominator: integer
+      overall_baseline_dimension_unmatched_denominator: integer
+      overall_current_dimension_match_rate: number
+      overall_baseline_dimension_match_rate: number
+      invalid_metric_row_count: integer
+  install_primary_bucket:
+    validator: contribution_buckets
+    business_bucket_kind: dimension
+    require_source_bucket_audit: true
+    columns:
+      analysis_date: date
+      game_type: string
+      bucket_kind: string
+      dimension_value: string
+      dimension_label: string
+      collapsed_source_bucket_count: integer
+      source_bucket_count: integer
+      baseline_day_count: integer
+      current_denominator: integer
+      baseline_denominator: integer
+      current_numerator: integer
+      baseline_numerator: integer
+      overall_current_denominator: integer
+      overall_baseline_denominator: integer
+      overall_current_numerator: integer
+      overall_baseline_numerator: integer
+      overall_current_dimension_matched_denominator: integer
+      overall_baseline_dimension_matched_denominator: integer
+      overall_current_dimension_unmatched_denominator: integer
+      overall_baseline_dimension_unmatched_denominator: integer
+      overall_current_dimension_match_rate: number
+      overall_baseline_dimension_match_rate: number
+      overall_current_observation_days_min: integer_or_null
+      overall_current_observation_days_max: integer_or_null
+      overall_baseline_observation_days_min: integer_or_null
+      overall_baseline_observation_days_max: integer_or_null
+      invalid_metric_row_count: integer
+  install_stage:
+    validator: install_stage
+    columns_from_query_spec: true

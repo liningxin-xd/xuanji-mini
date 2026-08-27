@@ -343,6 +343,8 @@ storage_headroom_tier -> apk_size_tier, device_brand, os_major_version
 
 进入归因时使用 `mode=full_queue`，并严格按以下清单执行和记录：
 
+`attribution_execution.execution_mode` 必须保留 runner 冻结的 `trusted_host_adapter` 或 `self_reported_development`；生产调查只允许前者，不得省略或改写以隐藏执行信任等级。
+
 ```text
 下载 app/sandbox:
 game_id -> is_reserve_auto_download -> device_brand -> channel_group
@@ -362,7 +364,7 @@ game_id -> install_stage(skipped_not_applicable) -> device_brand
 - 候选家族成功时使用 `status=succeeded`，并写非负整数 `candidate_count`；没有候选也写 `candidate_count=0`。
 - 查询、字段、完整性或闭合失败时使用 `status=failed` 和非空 `reason`，随后继续下一步。
 - 只有沙盒的 `install_stage` 可以使用 `status=skipped_not_applicable`，并写非空 `reason`。
-- DView 返回真实 query ID 时可写 `query_id`；没有时省略，不得伪造。质量风险可写为去重后的非空 `warning_codes` 数组。
+- runner 固定队列的每次查询必须写当次执行唯一的非空 `query_id`；不得伪造、跨步骤或 attempt 复用。质量风险写为由 runner 生成、去重后的非空 `warning_codes` 数组。
 
 实际执行二级归因时，`attribution_execution` 另写最多一个 `secondary_steps[]` 项：
 

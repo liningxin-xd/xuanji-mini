@@ -1,0 +1,151 @@
+version: 1
+execution_mode: trusted_host_adapter
+triage_path: references/sql-fast-triage.md
+
+download_metrics:
+  下载完成率:
+    game_query:
+      path: references/queries/download-game-attribution.yaml
+    primary_template:
+      path: references/queries/download-primary-attribution-template.md
+    data_sources:
+      - tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    protected_tokens:
+      - download_sample_flag
+      - is_download_complete
+  下载失败率:
+    game_query:
+      path: references/queries/download-failed-rate-game-attribution.yaml
+    primary_template:
+      path: references/queries/download-failed-rate-primary-attribution-template.md
+    data_sources:
+      - tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    protected_tokens:
+      - download_sample_flag
+      - is_explicit_failed
+  下载失败次数比率:
+    game_query:
+      path: references/queries/download-failed-pv-rate-game-attribution.yaml
+    primary_template:
+      path: references/queries/download-failed-pv-rate-primary-attribution-template.md
+    data_sources:
+      - tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    protected_tokens:
+      - game_download_cnt_1d
+      - game_download_failed_cnt_1d
+  下载人为停止率:
+    game_query:
+      path: references/queries/download-stop-rate-game-attribution.yaml
+    primary_template:
+      path: references/queries/download-stop-rate-primary-attribution-template.md
+    data_sources:
+      - tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    protected_tokens:
+      - download_sample_flag
+      - is_human_stop
+
+install:
+  metric: 下载安装完成率
+  game_query:
+    path: references/queries/install-game-attribution.yaml
+  stage_query:
+    path: references/queries/install-stage-loss-decomposition.yaml
+    allowed_game_types:
+      - app
+  primary_template:
+    path: references/queries/install-primary-attribution-template.md
+  data_sources:
+    - tap_dw.ads_report_store_platform_device_game_install_chain_attribution_1d
+  protected_tokens:
+    - official_download_complete
+    - official_install_complete
+  required_predicates:
+    - is_metric_anchor = 1
+
+dimensions:
+  download:
+    is_reserve_auto_download:
+      source_field: is_reserve_auto_download
+      quality_source_expression: "1"
+      normalizer: reserve_binary
+      allowed_template: download_primary
+    device_brand:
+      source_field: device_brand
+      quality_source_expression: device_dimension_matched
+      normalizer: standard
+      allowed_template: download_primary
+    channel_group:
+      source_field: channel_group
+      quality_source_expression: "1"
+      normalizer: standard
+      allowed_template: download_primary
+    app_major_version:
+      source_field: app_major_version
+      quality_source_expression: "1"
+      normalizer: standard
+      allowed_template: download_primary
+    os_major_version:
+      source_field: os_major_version
+      quality_source_expression: active_os_matched
+      normalizer: standard
+      allowed_template: download_primary
+    apk_size_tier:
+      source_field: apk_size_tier
+      quality_source_expression: "1"
+      normalizer: standard
+      allowed_template: download_primary
+  install:
+    device_brand:
+      source_field: device_brand
+      quality_source_expression: device_dimension_matched
+      normalizer: standard
+      allowed_template: install_primary
+    storage_headroom_tier:
+      source_field: storage_headroom_tier
+      quality_source_expression: device_dimension_matched
+      normalizer: standard
+      allowed_template: install_primary
+    os_major_version:
+      source_field: os_major_version
+      quality_source_expression: active_os_matched
+      normalizer: standard
+      allowed_template: install_primary
+    apk_size_tier:
+      source_field: apk_size_tier
+      quality_source_expression: "1"
+      normalizer: standard
+      allowed_template: install_primary
+
+dimension_normalizers:
+  standard:
+    value_expression: |-
+      CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source IS NULL
+          OR TRIM(CAST(dimension_source AS STRING)) = '' THEN '__none__'
+        ELSE CAST(dimension_source AS STRING)
+      END
+    label_expression: |-
+      MAX(CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source IS NULL
+          OR TRIM(CAST(dimension_source AS STRING)) = '' THEN '__none__'
+        ELSE CAST(dimension_source AS STRING)
+      END)
+  reserve_binary:
+    value_expression: |-
+      CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source IN (0, 1)
+          THEN CAST(dimension_source AS STRING)
+        WHEN dimension_source IS NULL THEN '__none__'
+        ELSE CONCAT('invalid_', CAST(dimension_source AS STRING))
+      END
+    label_expression: |-
+      MAX(CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source = 1 THEN 'reserve_auto_download'
+        WHEN dimension_source = 0 THEN 'other_download'
+        WHEN dimension_source IS NULL THEN '__none__'
+        ELSE 'invalid'
+      END)
