@@ -1,0 +1,196 @@
+version: 1
+object_tables:
+  - tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+routes:
+  - normalized_rule_name: "【apk下载完成率】最近1天_低于80%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载完成率
+    rule_kind: absolute_1d
+    alert_operator: "<"
+    alert_threshold: 0.80
+    monitor_field: game_download_complete_rate_1d
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk下载完成率】对比过去7天均值_低于98%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载完成率
+    rule_kind: relative_7d
+    alert_operator: "<"
+    alert_threshold: 0.98
+    monitor_field: wave_game_download_complete_rate_prev_7d
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk下载完成率】连续3周下降"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载完成率
+    rule_kind: trend_3w
+    alert_operator: "!="
+    alert_threshold: 0
+    monitor_field: is_game_download_complete_rate_7d_trend_down
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk下载失败率】最近1天_高于3%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载失败率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.03
+    monitor_field: game_download_failed_rate_1d
+    monitor_numerator_field: game_download_failed_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk下载失败次数比率】最近1天_高于10%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载失败次数比率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.10
+    monitor_field: game_download_failed_pv_rate_1d
+    monitor_numerator_field: game_download_failed_cnt_1d
+    monitor_denominator_field: game_download_cnt_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk人为停止率】最近1天_高于6%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: app
+    canonical_metric: 下载人为停止率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.06
+    monitor_field: game_download_stop_rate_1d
+    monitor_numerator_field: game_download_stop_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【apk下载完成->安装完成率】最近1天_低于73%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: install
+    game_type: app
+    canonical_metric: 下载安装完成率
+    rule_kind: absolute_1d
+    alert_operator: "<"
+    alert_threshold: 0.73
+    monitor_field: game_download_complete_and_install_complete_prev_2d_rate_p3d
+    monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
+    monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
+    analysis_lag_days: 2
+  - normalized_rule_name: "【apk下载完成->安装完成率】对比过去7天均值_低于96%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: install
+    game_type: app
+    canonical_metric: 下载安装完成率
+    rule_kind: relative_7d
+    alert_operator: "<"
+    alert_threshold: 0.96
+    monitor_field: wave_game_download_complete_and_install_complete_prev_2d_rate_p3d_prev_7d
+    monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
+    monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
+    analysis_lag_days: 2
+  - normalized_rule_name: "【apk下载完成->安装完成率】连续3周下降"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: install
+    game_type: app
+    canonical_metric: 下载安装完成率
+    rule_kind: trend_3w
+    alert_operator: "!="
+    alert_threshold: 0
+    monitor_field: is_game_download_complete_and_install_complete_prev_2d_rate_p3d_7d_trend_down
+    monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
+    monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
+    analysis_lag_days: 2
+  - normalized_rule_name: "【沙盒下载完成率】最近1天_低于75%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载完成率
+    rule_kind: absolute_1d
+    alert_operator: "<"
+    alert_threshold: 0.75
+    monitor_field: game_download_complete_rate_1d
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒下载完成率】对比过去7天均值_低于94%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载完成率
+    rule_kind: relative_7d
+    alert_operator: "<"
+    alert_threshold: 0.94
+    monitor_field: wave_game_download_complete_rate_prev_7d
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒下载完成率】连续3周下降"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载完成率
+    rule_kind: trend_3w
+    alert_operator: "!="
+    alert_threshold: 0
+    monitor_field: is_game_download_complete_rate_7d_trend_down
+    monitor_numerator_field: game_download_complete_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒下载失败率】最近1天_高于1%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载失败率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.01
+    monitor_field: game_download_failed_rate_1d
+    monitor_numerator_field: game_download_failed_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒下载失败次数比率】最近1天_高于3%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载失败次数比率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.03
+    monitor_field: game_download_failed_pv_rate_1d
+    monitor_numerator_field: game_download_failed_cnt_1d
+    monitor_denominator_field: game_download_cnt_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒人为停止率】最近1天_高于1.8%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: download
+    game_type: sandbox
+    canonical_metric: 下载人为停止率
+    rule_kind: absolute_1d
+    alert_operator: ">"
+    alert_threshold: 0.018
+    monitor_field: game_download_stop_rate_1d
+    monitor_numerator_field: game_download_stop_device_num_1d
+    monitor_denominator_field: game_download_device_num_1d
+    analysis_lag_days: 0
+  - normalized_rule_name: "【沙盒下载完成->安装完成率】最近1天_低于99%"
+    object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
+    chain: install
+    game_type: sandbox
+    canonical_metric: 下载安装完成率
+    rule_kind: absolute_1d
+    alert_operator: "<"
+    alert_threshold: 0.99
+    monitor_field: game_download_complete_and_install_complete_prev_2d_rate_p3d
+    monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
+    monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
+    analysis_lag_days: 2

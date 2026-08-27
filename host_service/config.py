@@ -23,6 +23,7 @@ class HostServiceSettings:
     receipt_key_id: str
     receipt_secret: bytes = field(repr=False)
     runs_root: Path
+    tasks_root: Path
     results_root: Path
 
     @classmethod
@@ -56,6 +57,10 @@ class HostServiceSettings:
             values.get("XUANJI_RUNS_ROOT", "/var/lib/xuanji/runs"),
             "XUANJI_RUNS_ROOT",
         )
+        tasks_root = _absolute_path(
+            values.get("XUANJI_TASKS_ROOT", "/var/lib/xuanji/tasks"),
+            "XUANJI_TASKS_ROOT",
+        )
         results_root = _absolute_path(
             values.get("XUANJI_RESULTS_ROOT", "/var/lib/xuanji/results"),
             "XUANJI_RESULTS_ROOT",
@@ -71,6 +76,7 @@ class HostServiceSettings:
             receipt_key_id=receipt_key_id,
             receipt_secret=receipt_secret,
             runs_root=runs_root,
+            tasks_root=tasks_root,
             results_root=results_root,
         )
 

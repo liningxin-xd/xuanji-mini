@@ -68,6 +68,7 @@ class AttributionRunner:
         metric: str,
         alert_date: str,
         analysis_date: str | None = None,
+        canonical_root_metric: dict[str, Any] | None = None,
         receipt_mode: str = "trusted_host",
         resume: bool = False,
     ) -> dict[str, Any]:
@@ -84,6 +85,23 @@ class AttributionRunner:
         analysis_date = expected_analysis_date
         if receipt_mode not in {"trusted_host", "self_reported"}:
             raise RunnerError("receipt_mode must be trusted_host or self_reported")
+        if canonical_root_metric is not None and not self._valid_root_metric(
+            canonical_root_metric
+        ):
+            raise RunnerError("canonical_root_metric must contain finite root facts")
+        if receipt_mode == "trusted_host" and canonical_root_metric is None:
+            raise RunnerError(
+                "trusted_host runs require a root preflight canonical metric"
+            )
+        frozen_root = (
+            {
+                "current_value": float(canonical_root_metric["current_value"]),
+                "baseline_value": float(canonical_root_metric["baseline_value"]),
+                "delta": float(canonical_root_metric["delta"]),
+            }
+            if canonical_root_metric is not None
+            else None
+        )
         self.contracts.verify_assets()
         plan = self.contracts.select_plan(chain, game_type, metric)
         run_dir = self._run_dir(run_id)
@@ -110,6 +128,13 @@ class AttributionRunner:
                 for key, value in expected.items()
                 if state.get(key) != value
             }
+            if frozen_root is not None and not self._root_metrics_match(
+                state.get("canonical_root_metric"), frozen_root
+            ):
+                mismatches["canonical_root_metric"] = {
+                    "expected": frozen_root,
+                    "actual": state.get("canonical_root_metric"),
+                }
             if mismatches:
                 raise RunnerError(
                     f"resume arguments do not match immutable run state: {mismatches}"
@@ -178,7 +203,7 @@ class AttributionRunner:
             "metric": metric,
             "alert_date": alert_date,
             "analysis_date": analysis_date,
-            "canonical_root_metric": None,
+            "canonical_root_metric": frozen_root,
             "cursor": 0,
             "ready_for_final_validation": False,
             "evidence_export_sha256": None,
@@ -1050,25 +1075,21 @@ class AttributionRunner:
                 raise RunnerError("automatic skipped step cannot contain query attempts")
 
         canonical_root = state.get("canonical_root_metric")
-        if not successful_candidate_roots:
-            if canonical_root is not None:
-                raise RunnerError("state freezes a root metric without a successful family")
-        else:
-            if not self._valid_root_metric(canonical_root):
-                raise RunnerError("state canonical_root_metric is invalid")
-            if not self._root_metrics_match(
-                canonical_root, successful_candidate_roots[0]
-            ):
-                raise RunnerError(
-                    "state canonical_root_metric does not match the first successful family"
-                )
-            if any(
-                not self._root_metrics_match(canonical_root, root)
-                for root in successful_candidate_roots[1:]
-            ):
-                raise RunnerError(
-                    "successful family does not rehook state canonical_root_metric"
-                )
+        if state.get("receipt_mode") == "trusted_host" and not self._valid_root_metric(
+            canonical_root
+        ):
+            raise RunnerError("trusted state lacks its root preflight canonical metric")
+        if canonical_root is not None and not self._valid_root_metric(canonical_root):
+            raise RunnerError("state canonical_root_metric is invalid")
+        if successful_candidate_roots and canonical_root is None:
+            raise RunnerError("successful family lacks a canonical root metric")
+        if any(
+            not self._root_metrics_match(canonical_root, root)
+            for root in successful_candidate_roots
+        ):
+            raise RunnerError(
+                "successful family does not rehook state canonical_root_metric"
+            )
 
         if cursor < len(steps):
             if state.get("status") != RunStatus.ACTIVE.value:
@@ -1222,6 +1243,8 @@ class AttributionRunner:
             raise RunnerError("validated candidate family lacks finite root metric facts")
         canonical = state.get("canonical_root_metric")
         if canonical is None:
+            if state.get("receipt_mode") == "trusted_host":
+                raise RunnerError("trusted run cannot infer its root from a family")
             state["canonical_root_metric"] = root
         elif not self._root_metrics_match(canonical, root):
             raise ResultValidationError(

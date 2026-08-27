@@ -87,6 +87,7 @@ class PrimaryInvestigationHost:
         game_type: str,
         metric: str,
         alert_date: str,
+        canonical_root_metric: dict[str, Any],
     ) -> dict[str, Any]:
         """Create or identically resume one schema-v4 run and execute its queue."""
 
@@ -96,6 +97,7 @@ class PrimaryInvestigationHost:
             game_type=game_type,
             metric=metric,
             alert_date=alert_date,
+            canonical_root_metric=canonical_root_metric,
             receipt_mode="trusted_host",
             resume=True,
         )
