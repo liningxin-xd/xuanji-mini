@@ -78,7 +78,12 @@ class RootPreflight:
             raise RootPreflightError(
                 "insufficient_definition", "registered object table is invalid"
             )
-        rows, private_queries, snapshot_sha256 = self._load_or_query_snapshot(
+        (
+            rows,
+            private_queries,
+            snapshot_sha256,
+            snapshot_reused,
+        ) = self._load_or_query_snapshot(
             alert_date=alert_date,
             game_type=game_type,
             object_table=object_table,
@@ -191,6 +196,8 @@ class RootPreflight:
                 "delta": root_delta,
             },
             "root_snapshot_sha256": snapshot_sha256,
+            "root_snapshot_reused": snapshot_reused,
+            "root_query_count": 0 if snapshot_reused else 8,
             "private_queries": private_queries,
         }
 
@@ -201,7 +208,7 @@ class RootPreflight:
         game_type: str,
         object_table: str,
         snapshot_root: Path | str | None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str, bool]:
         scope = {
             "root_query_spec_sha256": self.contracts.asset_hashes[ROOT_QUERY_PATH],
             "object_table": object_table,
@@ -215,12 +222,13 @@ class RootPreflight:
             else None
         )
         if snapshot_path is not None and snapshot_path.exists():
-            return self._read_snapshot(
+            rows, private_queries, snapshot_sha256 = self._read_snapshot(
                 snapshot_path,
                 expected_scope=scope,
                 alert_date=alert_date,
                 game_type=game_type,
             )
+            return rows, private_queries, snapshot_sha256, True
 
         rows: list[dict[str, Any]] = []
         raw_results: list[dict[str, Any]] = []
@@ -264,7 +272,7 @@ class RootPreflight:
                 snapshot_path,
                 {**unsigned, "snapshot_sha256": snapshot_sha256},
             )
-        return rows, private_queries, snapshot_sha256
+        return rows, private_queries, snapshot_sha256, False
 
     def _read_snapshot(
         self,

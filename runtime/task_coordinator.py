@@ -29,6 +29,8 @@ _PRIVATE_FIELDS = {
     "private_queries",
     "root_snapshot_sha256",
     "root_snapshot_sha256s",
+    "root_snapshot_reused",
+    "root_query_count",
 }
 
 

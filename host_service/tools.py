@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+import time
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
@@ -67,6 +69,7 @@ def create_mcp(
             ),
             phase="run_task",
             task_id=task_id,
+            investigation_id=None,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -99,6 +102,7 @@ def create_mcp(
             ),
             phase="submit_repair",
             task_id=task_id,
+            investigation_id=investigation_id,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -120,6 +124,7 @@ def create_mcp(
             ),
             phase="finalize",
             task_id=task_id,
+            investigation_id=investigation_id,
         )
 
     return mcp
@@ -130,21 +135,62 @@ async def _safe_call(
     *,
     phase: str,
     task_id: str,
+    investigation_id: str | None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     try:
         result = await operation
     except Exception as exc:  # noqa: BLE001
-        safe_task_id = task_id if _LOG_TASK_ID.fullmatch(task_id) else "invalid"
-        _LOGGER.error(
-            "xuanji operational failure task_id=%s phase=%s exception_type=%s",
-            safe_task_id,
-            phase,
-            type(exc).__name__,
+        _log_failure(
+            task_id=task_id,
+            investigation_id=investigation_id,
+            phase=phase,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            exception_type=type(exc).__name__,
         )
         raise ToolError("xuanji Host request failed") from None
     if not isinstance(result, dict):
+        _log_failure(
+            task_id=task_id,
+            investigation_id=investigation_id,
+            phase=phase,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            exception_type="InvalidResultEnvelope",
+        )
         raise ToolError("xuanji Host returned an invalid result envelope")
     return result
+
+
+def _log_failure(
+    *,
+    task_id: str,
+    investigation_id: str | None,
+    phase: str,
+    duration_ms: int,
+    exception_type: str,
+) -> None:
+    payload = {
+        "task_id": task_id if _LOG_TASK_ID.fullmatch(task_id) else "invalid",
+        "investigation_id": (
+            investigation_id
+            if isinstance(investigation_id, str)
+            and _LOG_TASK_ID.fullmatch(investigation_id)
+            else None
+        ),
+        "phase": phase,
+        "duration_ms": duration_ms,
+        "root_query_count": None,
+        "attribution_query_count": None,
+        "root_snapshot_reused": None,
+        "writer_pack_bytes": 0,
+        "investigation_status": None,
+        "overall_status": None,
+        "exception_type": exception_type,
+    }
+    _LOGGER.error(
+        "xuanji_operation %s",
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
 
 
 def _transport_security(public_url: str) -> TransportSecuritySettings:
