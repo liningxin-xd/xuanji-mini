@@ -13,6 +13,12 @@ download_metrics:
     protected_tokens:
       - download_sample_flag
       - is_download_complete
+    secondary_metric:
+      denominator_source_field: download_sample_flag
+      numerator_source_field: is_download_complete
+      invalid_metric_predicate: >-
+        metric_denominator IS NULL OR metric_denominator <> 1 OR
+        metric_numerator IS NULL OR metric_numerator NOT IN (0, 1)
   下载失败率:
     game_query:
       path: references/queries/download-failed-rate-game-attribution.yaml
@@ -23,6 +29,12 @@ download_metrics:
     protected_tokens:
       - download_sample_flag
       - is_explicit_failed
+    secondary_metric:
+      denominator_source_field: download_sample_flag
+      numerator_source_field: is_explicit_failed
+      invalid_metric_predicate: >-
+        metric_denominator IS NULL OR metric_denominator <> 1 OR
+        metric_numerator IS NULL OR metric_numerator NOT IN (0, 1)
   下载失败次数比率:
     game_query:
       path: references/queries/download-failed-pv-rate-game-attribution.yaml
@@ -33,6 +45,12 @@ download_metrics:
     protected_tokens:
       - game_download_cnt_1d
       - game_download_failed_cnt_1d
+    secondary_metric:
+      denominator_source_field: game_download_cnt_1d
+      numerator_source_field: game_download_failed_cnt_1d
+      invalid_metric_predicate: >-
+        metric_denominator IS NULL OR metric_denominator <= 0 OR
+        metric_numerator IS NULL OR metric_numerator < 0
   下载人为停止率:
     game_query:
       path: references/queries/download-stop-rate-game-attribution.yaml
@@ -43,6 +61,12 @@ download_metrics:
     protected_tokens:
       - download_sample_flag
       - is_human_stop
+    secondary_metric:
+      denominator_source_field: download_sample_flag
+      numerator_source_field: is_human_stop
+      invalid_metric_predicate: >-
+        metric_denominator IS NULL OR metric_denominator <> 1 OR
+        metric_numerator IS NULL OR metric_numerator NOT IN (0, 1)
 
 install:
   metric: 下载安装完成率
@@ -61,6 +85,21 @@ install:
     - official_install_complete
   required_predicates:
     - is_metric_anchor = 1
+
+secondary:
+  template:
+    path: references/queries/secondary-attribution-template.md
+  parent_dimensions:
+    download:
+      game_id:
+        source_field: game_id
+        quality_source_expression: "1"
+        normalizer: standard
+    install:
+      game_id:
+        source_field: game_id
+        quality_source_expression: "1"
+        normalizer: standard
 
 dimensions:
   download:

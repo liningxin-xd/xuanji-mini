@@ -1,0 +1,16 @@
+version: 1
+
+relations:
+  download:
+    game_id:
+      - device_brand
+      - channel_group
+      - app_major_version
+      - os_major_version
+      - apk_size_tier
+  install:
+    game_id:
+      - device_brand
+      - storage_headroom_tier
+      - os_major_version
+      - apk_size_tier

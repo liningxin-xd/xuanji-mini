@@ -58,7 +58,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 )
                 if game_mode != "none":
                     self._set_game_scenario(raw_result, game_mode)
-            else:
+            elif ticket["step_id"] != "secondary":
                 raw_result = raw_result_for_ticket(runner, run_id, ticket)
                 if game_mode != "none":
                     current_num, baseline_num, current_den, baseline_den = {
@@ -73,6 +73,8 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                         current_den=current_den,
                         baseline_den=baseline_den,
                     )
+            else:
+                raw_result = raw_result_for_ticket(runner, run_id, ticket)
             runner.record(
                 run_id,
                 self_reported_result_event(
@@ -184,7 +186,10 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             contracts.analysis_profile("primary_v1")["post_primary_plan"]
         )
         profile = contracts.analysis_profile("primary_v2")
-        self.assertEqual(["counterfactual"], profile["enabled_post_primary_steps"])
+        self.assertEqual(
+            ["counterfactual", "secondary"],
+            profile["enabled_post_primary_steps"],
+        )
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
         self.assertEqual(5, plan["max_additional_queries"])
         self.assertEqual(
@@ -237,14 +242,14 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         runner, query_count = self._complete("v2-dominant")
         pack = runner.build_writer_pack("v2-dominant")
         state = runner.load_state("v2-dominant")
-        self.assertEqual(7, query_count)
+        self.assertEqual(8, query_count)
         self.assertEqual("primary_v2", pack["analysis_profile"])
         self.assertEqual(0.0, pack["counterfactual"]["removal_delta_bp"])
         self.assertEqual(1.0, pack["counterfactual"]["restoration_ratio"])
         self.assertTrue(pack["counterfactual"]["dominant"])
         self.assertEqual("completed", state["post_primary"]["status"])
         self.assertEqual(
-            ["succeeded", "skipped_by_policy", "skipped_by_policy", "skipped_by_policy"],
+            ["succeeded", "succeeded", "skipped_by_policy", "skipped_by_policy"],
             [step["status"] for step in state["post_primary"]["steps"]],
         )
         encoded = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))
@@ -309,20 +314,43 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         second.build_writer_pack("v2-repeat-b")
         first_post = first.load_state("v2-repeat-a")["post_primary"]
         second_post = second.load_state("v2-repeat-b")["post_primary"]
+        for post_primary in (first_post, second_post):
+            secondary = post_primary["steps"][1]
+            for attempt in secondary.get("attempts", []):
+                attempt["query_id"] = "stable-query-id"
+                attempt["event_path"] = "stable-event-path"
         self.assertEqual(first_post, second_post)
 
     def test_executing_post_primary_plan_resumes_deterministically(self):
         runner, _ = self._complete("v2-calibration-resume")
         state = runner.load_state("v2-calibration-resume")
         state["post_primary"] = runner.calibration_runner.create_plan(state)
+        state["ready_for_final_validation"] = False
         runner._write_state(state)
         planned = runner.load_state("v2-calibration-resume")["post_primary"]
         self.assertEqual("executing", planned["status"])
         self.assertEqual("planned", planned["steps"][0]["status"])
+        ticket = runner.next_action("v2-calibration-resume")
+        self.assertEqual("secondary", ticket["step_id"])
+        runner.record(
+            "v2-calibration-resume",
+            self_reported_result_event(
+                ticket,
+                raw_result_for_ticket(
+                    runner, "v2-calibration-resume", ticket
+                ),
+                "v2-calibration-resume-secondary-resumed",
+            ),
+        )
+        self.assertEqual(
+            "queue_complete",
+            runner.next_action("v2-calibration-resume")["action"],
+        )
         runner.build_writer_pack("v2-calibration-resume")
         resumed = runner.load_state("v2-calibration-resume")["post_primary"]
         self.assertEqual("completed", resumed["status"])
         self.assertEqual("succeeded", resumed["steps"][0]["status"])
+        self.assertEqual("succeeded", resumed["steps"][1]["status"])
 
     def test_profile_is_immutable_across_run_resume(self):
         runner, _ = self._complete("v2-profile")

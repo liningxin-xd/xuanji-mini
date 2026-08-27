@@ -13,3 +13,4 @@ profiles:
     post_primary_plan: post_primary_v1
     enabled_post_primary_steps:
       - counterfactual
+      - secondary

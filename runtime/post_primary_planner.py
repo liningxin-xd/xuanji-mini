@@ -14,6 +14,8 @@ class PostPrimaryPlanError(ValueError):
 class PostPrimaryPlanner:
     STEP_STATUSES = {
         "planned",
+        "in_progress",
+        "repair_required",
         "succeeded",
         "failed",
         "skipped_by_policy",
@@ -73,9 +75,12 @@ class PostPrimaryPlanner:
             if planned["status"] == "skipped_by_policy" and actual != planned:
                 raise PostPrimaryPlanError("disabled post-primary step changed")
         if post_primary["status"] == "completed" and any(
-            step["status"] == "planned" for step in steps
+            step["status"] in {"planned", "in_progress", "repair_required"}
+            for step in steps
         ):
-            raise PostPrimaryPlanError("completed post-primary plan has planned steps")
+            raise PostPrimaryPlanError(
+                "completed post-primary plan has a non-terminal step"
+            )
 
     def primary_evidence(self, state: dict[str, Any]) -> dict[str, Any]:
         steps = state.get("steps")
@@ -87,6 +92,9 @@ class PostPrimaryPlanner:
             "schema_version": 1,
             "plan_id": state["plan_id"],
             "plan_contract_sha256": state["plan_contract_sha256"],
+            "secondary_relations_sha256": state.get(
+                "secondary_relations_sha256"
+            ),
             "chain": state["chain"],
             "game_type": state["game_type"],
             "metric": state["metric"],

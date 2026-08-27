@@ -167,6 +167,8 @@ class FinalEvidenceValidator:
             if query_id not in known_query_ids:
                 raise FinalValidationError(f"query_id is not recorded by this run: {query_id}")
 
+        secondary = self._validate_secondary_execution(state, execution)
+
         top_findings = investigation.get("top_findings", [])
         if not isinstance(top_findings, list):
             raise FinalValidationError("top_findings must be an array when present")
@@ -175,24 +177,49 @@ class FinalEvidenceValidator:
             if not isinstance(finding, dict):
                 raise FinalValidationError("each top finding must be an object")
             self._require_text(finding, "finding")
-            if finding.get("attribution_level") != "primary":
-                raise FinalValidationError(
-                    "V1 fixed-queue validation accepts only primary findings"
-                )
+            attribution_level = finding.get("attribution_level")
+            if attribution_level not in {"primary", "secondary"}:
+                raise FinalValidationError("finding attribution_level is invalid")
             dimension = finding.get("dimension")
             if not isinstance(dimension, str) or not dimension:
                 raise FinalValidationError("primary finding lacks a dimension")
-            if dimension not in candidate_counts or candidate_counts[dimension] <= 0:
-                raise FinalValidationError(
-                    f"finding does not back-reference a positive candidate step: {dimension}"
-                )
+            if attribution_level == "primary":
+                if dimension not in candidate_counts or candidate_counts[dimension] <= 0:
+                    raise FinalValidationError(
+                        "finding does not back-reference a positive candidate "
+                        f"step: {dimension}"
+                    )
+                candidates = candidate_details.get(dimension, [])
+                count_key = f"primary:{dimension}"
+                count_limit = candidate_counts[dimension]
+            else:
+                if secondary is None or secondary.get("status") != "succeeded":
+                    raise FinalValidationError(
+                        "secondary finding lacks a succeeded secondary step"
+                    )
+                if dimension != secondary["child_dimension"]:
+                    raise FinalValidationError(
+                        "secondary finding dimension does not match its step"
+                    )
+                for field in (
+                    "parent_dimension",
+                    "parent_value",
+                    "parent_label",
+                ):
+                    if finding.get(field) != secondary[field]:
+                        raise FinalValidationError(
+                            f"secondary finding {field} does not match its parent"
+                        )
+                candidates = secondary["candidates"]
+                count_key = f"secondary:{dimension}"
+                count_limit = secondary["candidate_count"]
             if not any(
                 isinstance(finding.get(key), str) and finding[key].strip()
                 for key in ("label", "value")
             ):
                 raise FinalValidationError("primary finding lacks a slice identity")
             candidate = self._matching_candidate(
-                finding, candidate_details.get(dimension, [])
+                finding, candidates
             )
             if candidate is None:
                 raise FinalValidationError(
@@ -213,11 +240,17 @@ class FinalEvidenceValidator:
                 raise FinalValidationError(
                     f"finding adverse_impact_bp does not match candidate: {dimension}"
                 )
-            finding_counts[dimension] += 1
-        for dimension, count in finding_counts.items():
-            if count > candidate_counts[dimension]:
+            finding_counts[count_key] += 1
+        for key, count in finding_counts.items():
+            if key.startswith("primary:"):
+                limit = candidate_counts[key.removeprefix("primary:")]
+            elif secondary is not None:
+                limit = secondary["candidate_count"]
+            else:  # pragma: no cover - rejected above
+                limit = 0
+            if count > limit:
                 raise FinalValidationError(
-                    f"findings exceed candidate_count for {dimension}"
+                    f"findings exceed candidate_count for {key}"
                 )
 
         self._validate_counterfactual(state, investigation)
@@ -225,6 +258,8 @@ class FinalEvidenceValidator:
         positive_candidate_count = sum(
             count for count in candidate_counts.values() if count > 0
         )
+        if secondary is not None and secondary.get("status") == "succeeded":
+            positive_candidate_count += secondary["candidate_count"]
         if investigation_status == "completed":
             if positive_candidate_count == 0:
                 raise FinalValidationError(
@@ -296,12 +331,77 @@ class FinalEvidenceValidator:
             raise FinalValidationError(f"{field} must be an array of non-empty strings")
 
     def _known_query_ids(self, state: dict[str, Any]) -> set[str]:
-        return {
+        query_ids = {
             attempt["query_id"]
             for step in state["steps"]
             for attempt in step["attempts"]
             if isinstance(attempt.get("query_id"), str) and attempt["query_id"]
         }
+        post_primary = state.get("post_primary")
+        if isinstance(post_primary, dict):
+            query_ids.update(
+                attempt["query_id"]
+                for step in post_primary.get("steps", [])
+                for attempt in step.get("attempts", [])
+                if isinstance(attempt.get("query_id"), str)
+                and attempt["query_id"]
+            )
+        return query_ids
+
+    def _validate_secondary_execution(
+        self, state: dict[str, Any], execution: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        post_primary = state.get("post_primary")
+        secondary = None
+        if isinstance(post_primary, dict):
+            secondary = next(
+                (
+                    step
+                    for step in post_primary.get("steps", [])
+                    if step.get("id") == "secondary"
+                ),
+                None,
+            )
+        expected_steps = []
+        normalized = None
+        if isinstance(secondary, dict) and secondary.get("status") in {
+            "succeeded",
+            "failed",
+        }:
+            expected = {
+                "parent_dimension": secondary["parent_dimension"],
+                "parent_value": secondary["parent_value"],
+                "parent_label": secondary["parent_label"],
+                "step": secondary["child_dimension"],
+                "status": secondary["status"],
+            }
+            if secondary["status"] == "succeeded":
+                expected["candidate_count"] = secondary["candidate_count"]
+            else:
+                expected["reason"] = secondary["reason"]
+            query_id = self._last_query_id(secondary)
+            if query_id:
+                expected["query_id"] = query_id
+            if secondary.get("warning_codes"):
+                expected["warning_codes"] = secondary["warning_codes"]
+            expected_steps.append(expected)
+            normalized = {
+                "status": secondary["status"],
+                "parent_dimension": secondary["parent_dimension"],
+                "parent_value": secondary["parent_value"],
+                "parent_label": secondary["parent_label"],
+                "child_dimension": secondary["child_dimension"],
+                "candidate_count": secondary.get("candidate_count", 0),
+                "candidates": secondary.get("candidates", []),
+            }
+        actual = execution.get("secondary_steps", [])
+        if not isinstance(actual, list) or len(actual) > 1:
+            raise FinalValidationError("at most one secondary step is allowed")
+        if actual != expected_steps:
+            raise FinalValidationError(
+                "secondary_steps do not match the frozen post-primary result"
+            )
+        return normalized
 
     def _last_query_id(self, step: dict[str, Any]) -> str | None:
         for attempt in reversed(step["attempts"]):

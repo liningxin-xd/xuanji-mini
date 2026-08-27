@@ -6,6 +6,7 @@ from typing import Any
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
 from .post_primary_planner import PostPrimaryPlanError, PostPrimaryPlanner
+from .secondary_selector import SecondarySelectionError, SecondarySelector
 
 
 class CalibrationError(ValueError):
@@ -17,6 +18,7 @@ class CalibrationRunner:
         self.contracts = contracts
         self.planner = PostPrimaryPlanner(contracts)
         self.counterfactual = CounterfactualCalculator(contracts)
+        self.secondary_selector = SecondarySelector(contracts)
 
     def create_plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
         return self.planner.create(state)
@@ -31,6 +33,7 @@ class CalibrationRunner:
             self.planner.validate_identity(state, post_primary)
         except PostPrimaryPlanError as exc:
             raise CalibrationError(str(exc)) from exc
+        self._validate_counterfactual(state, post_primary)
         if post_primary["status"] == "completed":
             self._validate_completed(state, post_primary)
             return deepcopy(post_primary)
@@ -39,24 +42,58 @@ class CalibrationRunner:
         for step in result["steps"]:
             if step["status"] != "planned":
                 continue
-            if step["id"] != "counterfactual":
+            if step["id"] == "counterfactual":
+                try:
+                    outcome = self.counterfactual.calculate(state)
+                except CounterfactualError as exc:
+                    step.update(
+                        {
+                            "status": "failed",
+                            "failure_code": exc.code,
+                        }
+                    )
+                else:
+                    step.update(outcome)
+                continue
+            if step["id"] == "secondary":
+                try:
+                    outcome = self.secondary_selector.select(state, result)
+                except SecondarySelectionError as exc:
+                    raise CalibrationError(str(exc)) from exc
+                step.update(outcome)
+                if step["status"] == "planned":
+                    break
+                continue
+            if step["status"] == "planned":
                 raise CalibrationError(
                     f"enabled post-primary step is not implemented: {step['id']}"
                 )
-            try:
-                outcome = self.counterfactual.calculate(state)
-            except CounterfactualError as exc:
-                step.update(
-                    {
-                        "status": "failed",
-                        "failure_code": exc.code,
-                    }
-                )
-            else:
-                step.update(outcome)
-        result["status"] = "completed"
-        self._validate_completed(state, result)
+        if all(
+            step["status"]
+            in {"succeeded", "failed", "skipped_by_policy"}
+            for step in result["steps"]
+        ):
+            result["status"] = "completed"
+            self._validate_completed(state, result)
         return result
+
+    def _validate_counterfactual(
+        self, state: dict[str, Any], post_primary: dict[str, Any]
+    ) -> None:
+        actual = post_primary["steps"][0]
+        if actual.get("status") == "planned":
+            return
+        expected = {"id": "counterfactual", "status": "planned"}
+        try:
+            outcome = self.counterfactual.calculate(state)
+        except CounterfactualError as exc:
+            expected.update({"status": "failed", "failure_code": exc.code})
+        else:
+            expected.update(outcome)
+        if canonical_sha256(actual) != canonical_sha256(expected):
+            raise CalibrationError(
+                "counterfactual result does not match primary evidence"
+            )
 
     def _validate_completed(
         self, state: dict[str, Any], post_primary: dict[str, Any]
@@ -66,15 +103,63 @@ class CalibrationRunner:
         if planned is None:
             raise CalibrationError("primary_v1 cannot complete post-primary analysis")
         expected = deepcopy(planned)
-        for step in expected["steps"]:
-            if step["status"] != "planned":
-                continue
-            try:
-                outcome = self.counterfactual.calculate(state)
-            except CounterfactualError as exc:
-                step.update({"status": "failed", "failure_code": exc.code})
-            else:
-                step.update(outcome)
-        expected["status"] = "completed"
-        if canonical_sha256(post_primary) != canonical_sha256(expected):
-            raise CalibrationError("post-primary result does not match primary evidence")
+        expected_counterfactual = expected["steps"][0]
+        try:
+            outcome = self.counterfactual.calculate(state)
+        except CounterfactualError as exc:
+            expected_counterfactual.update(
+                {"status": "failed", "failure_code": exc.code}
+            )
+        else:
+            expected_counterfactual.update(outcome)
+        actual_counterfactual = post_primary["steps"][0]
+        if canonical_sha256(actual_counterfactual) != canonical_sha256(
+            expected_counterfactual
+        ):
+            raise CalibrationError(
+                "counterfactual result does not match primary evidence"
+            )
+
+        expected_for_selection = deepcopy(post_primary)
+        expected_for_selection["steps"][0] = expected_counterfactual
+        try:
+            secondary_selection = self.secondary_selector.select(
+                state, expected_for_selection
+            )
+        except SecondarySelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        actual_secondary = post_primary["steps"][1]
+        selection_fields = {
+            "parent_dimension",
+            "parent_value",
+            "parent_label",
+            "parent_candidate_id",
+            "child_dimension",
+            "parent_selection_reason",
+            "child_selection_reason",
+        }
+        if secondary_selection["status"] == "skipped_by_policy":
+            expected_secondary = {
+                "id": "secondary",
+                **secondary_selection,
+            }
+            if canonical_sha256(actual_secondary) != canonical_sha256(
+                expected_secondary
+            ):
+                raise CalibrationError(
+                    "secondary skip does not match primary evidence"
+                )
+        else:
+            if actual_secondary.get("status") not in {"succeeded", "failed"}:
+                raise CalibrationError("completed secondary step is not terminal")
+            for field in selection_fields:
+                if actual_secondary.get(field) != secondary_selection.get(field):
+                    raise CalibrationError(
+                        f"secondary {field} does not match primary evidence"
+                    )
+
+        for actual, expected_step in zip(
+            post_primary["steps"][2:], planned["steps"][2:], strict=True
+        ):
+            if actual != expected_step:
+                raise CalibrationError("disabled post-primary step changed")

@@ -9,7 +9,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## 分析档案
 
-部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得把它变成模型工具参数。`primary_v1` 保持固定一级队列；`primary_v2` 在同一完整一级队列后执行已登记的确定性后置模块。当前 `primary_v2` 只启用零查询剔除反事实，二级、游戏背景和错误码仍由策略跳过。
+部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得把它变成模型工具参数。`primary_v1` 保持固定一级队列；`primary_v2` 在同一完整一级队列后执行已登记的确定性后置模块。当前 `primary_v2` 启用零查询剔除反事实和一次 `game_id` 单父二级归因；游戏背景和错误码仍由策略跳过。
 
 ## 工具协议
 
@@ -58,4 +58,4 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 - Host ToolError 表示运行异常；保留相同 task 供重试，不伪造 `query_failed` 调查。
 - 不输出或索取 SQL、raw rows、query ID、receipt、result hash、state 路径、token 或 secret。
 - 不把相关性、贡献或算术剔除写成已确认机制根因。
-- `primary_v1` 不执行后置模块；当前 `primary_v2` 不执行二级归因、背景、错误码扩展、严格漏斗、四象限、准实验、负对照、查询并行或通用缓存。
+- `primary_v1` 不执行后置模块；当前 `primary_v2` 不执行背景、错误码扩展、三级归因、多父节点、严格漏斗、四象限、准实验、负对照、查询并行或通用缓存。

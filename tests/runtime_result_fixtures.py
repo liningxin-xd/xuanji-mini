@@ -45,6 +45,19 @@ def raw_result_for_ticket(
     break_source_closure: bool = False,
 ) -> dict[str, Any]:
     state = runner.load_state(run_id)
+    if ticket["step_id"] == "secondary":
+        secondary = next(
+            step
+            for step in state["post_primary"]["steps"]
+            if step["id"] == "secondary"
+        )
+        binding = runner._binding_from_step(secondary)
+        schema = runner.contracts.result_schema(binding.result_schema_id)
+        columns = schema["columns_by_chain"][state["chain"]]
+        return {
+            "columns": list(columns),
+            "rows": _secondary_bucket_rows(columns, state, secondary),
+        }
     step = state["steps"][state["cursor"]]
     binding = runner._binding_from_step(step)
     schema = runner.contracts.result_schema(binding.result_schema_id)
@@ -65,6 +78,94 @@ def raw_result_for_ticket(
         if break_source_closure:
             rows[0]["source_bucket_count"] += 1
     return {"columns": list(columns), "rows": rows}
+
+
+def _secondary_bucket_rows(
+    columns: dict[str, str],
+    state: dict[str, Any],
+    secondary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    game_step = next(step for step in state["steps"] if step["id"] == "game_id")
+    parent = next(
+        candidate
+        for candidate in game_step["candidates"]
+        if candidate["value"] == secondary["parent_value"]
+    )
+    parent_counts = parent["private_counts"]
+    root_counts = {
+        "current_numerator": game_step["root_current_numerator"],
+        "current_denominator": game_step["root_current_denominator"],
+        "baseline_numerator": game_step["root_baseline_numerator"],
+        "baseline_denominator": game_step["root_baseline_denominator"],
+    }
+    outside_counts = {
+        name: root_counts[name] - parent_counts[name]
+        for name in root_counts
+    }
+    buckets = (
+        ("child", "secondary-a", "Secondary A", parent_counts),
+        ("outside_parent", "outside_parent", "outside_parent", outside_counts),
+    )
+    observation_days = 3 if state["game_type"] == "app" else 1
+    rows: list[dict[str, Any]] = []
+    for kind, value, label, counts in buckets:
+        row = _empty_row(columns)
+        current_denominator = int(counts["current_denominator"])
+        baseline_denominator = int(counts["baseline_denominator"])
+        values = {
+            "analysis_date": state["analysis_date"],
+            "game_type": state["game_type"],
+            "parent_value": secondary["parent_value"],
+            "bucket_kind": kind,
+            "dimension_value": value,
+            "dimension_label": label,
+            "collapsed_source_bucket_count": 1,
+            "source_bucket_count": len(buckets),
+            "baseline_day_count": 7,
+            "current_denominator": current_denominator,
+            "baseline_denominator": baseline_denominator,
+            "current_numerator": int(counts["current_numerator"]),
+            "baseline_numerator": int(counts["baseline_numerator"]),
+            "current_row_count": current_denominator,
+            "baseline_row_count": baseline_denominator,
+            "duplicate_row_count": 0,
+            "invalid_metric_row_count": 0,
+            "overall_current_denominator": int(
+                root_counts["current_denominator"]
+            ),
+            "overall_baseline_denominator": int(
+                root_counts["baseline_denominator"]
+            ),
+            "overall_current_numerator": int(root_counts["current_numerator"]),
+            "overall_baseline_numerator": int(root_counts["baseline_numerator"]),
+            "overall_current_row_count": int(
+                root_counts["current_denominator"]
+            ),
+            "overall_baseline_row_count": int(
+                root_counts["baseline_denominator"]
+            ),
+            "overall_duplicate_row_count": 0,
+            "overall_invalid_metric_row_count": 0,
+            "current_observation_days_min": (
+                observation_days if current_denominator > 0 else None
+            ),
+            "current_observation_days_max": (
+                observation_days if current_denominator > 0 else None
+            ),
+            "baseline_observation_days_min": (
+                observation_days if baseline_denominator > 0 else None
+            ),
+            "baseline_observation_days_max": (
+                observation_days if baseline_denominator > 0 else None
+            ),
+            "overall_current_observation_days_min": observation_days,
+            "overall_current_observation_days_max": observation_days,
+            "overall_baseline_observation_days_min": observation_days,
+            "overall_baseline_observation_days_max": observation_days,
+        }
+        row.update({name: item for name, item in values.items() if name in row})
+        rows.append(row)
+    return rows
 
 
 def _bucket_rows(

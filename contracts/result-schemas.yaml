@@ -100,3 +100,68 @@ schemas:
   install_stage:
     validator: install_stage
     columns_from_query_spec: true
+  secondary_bucket:
+    validator: secondary_contribution_buckets
+    business_bucket_kind: child
+    require_source_bucket_audit: true
+    columns_by_chain:
+      download:
+        analysis_date: date
+        game_type: string
+        parent_value: string
+        bucket_kind: string
+        dimension_value: string
+        dimension_label: string
+        collapsed_source_bucket_count: integer
+        source_bucket_count: integer
+        baseline_day_count: integer
+        current_denominator: integer
+        baseline_denominator: integer
+        current_numerator: integer
+        baseline_numerator: integer
+        current_row_count: integer
+        baseline_row_count: integer
+        duplicate_row_count: integer
+        invalid_metric_row_count: integer
+        overall_current_denominator: integer
+        overall_baseline_denominator: integer
+        overall_current_numerator: integer
+        overall_baseline_numerator: integer
+        overall_current_row_count: integer
+        overall_baseline_row_count: integer
+        overall_duplicate_row_count: integer
+        overall_invalid_metric_row_count: integer
+      install:
+        analysis_date: date
+        game_type: string
+        parent_value: string
+        bucket_kind: string
+        dimension_value: string
+        dimension_label: string
+        collapsed_source_bucket_count: integer
+        source_bucket_count: integer
+        baseline_day_count: integer
+        current_denominator: integer
+        baseline_denominator: integer
+        current_numerator: integer
+        baseline_numerator: integer
+        current_row_count: integer
+        baseline_row_count: integer
+        current_observation_days_min: integer_or_null
+        current_observation_days_max: integer_or_null
+        baseline_observation_days_min: integer_or_null
+        baseline_observation_days_max: integer_or_null
+        duplicate_row_count: integer
+        invalid_metric_row_count: integer
+        overall_current_denominator: integer
+        overall_baseline_denominator: integer
+        overall_current_numerator: integer
+        overall_baseline_numerator: integer
+        overall_current_row_count: integer
+        overall_baseline_row_count: integer
+        overall_current_observation_days_min: integer_or_null
+        overall_current_observation_days_max: integer_or_null
+        overall_baseline_observation_days_min: integer_or_null
+        overall_baseline_observation_days_max: integer_or_null
+        overall_duplicate_row_count: integer
+        overall_invalid_metric_row_count: integer
