@@ -37,6 +37,11 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 ## 4. 生产 Host 执行
 
 - 只通过现有只读 DView MCP；禁止自建连接、shell、curl、DDL 或 DML。
+- 平台层按 [Primary Host Boundary Integration](references/host-boundary-integration.md)
+  注册 `xuanji_run_investigation`、`xuanji_submit_repair` 和 `xuanji_finalize`；
+  只把这三个窄接口暴露给模型。
+- 不能修改现有 DView MCP 时，独立部署 [Native Primary Host](references/native-host-deployment.md)；
+  由该服务在 UI 以下通过 MCP client 调用现有只读 `/mcp/query`，不得让模型发起嵌套调用。
 - Host 在模型进程外持有至少 32 字节 receipt secret，并用同一 `TrustedReceiptVerifier` 创建 Runner 与 `HostDViewAdapter`。
 - `ProductionDViewExecutor` 接收当前 DView MCP 的真实响应，保留真实 query ID，并转换为有序 `columns + rows`。
 - Host 调用 `HostDViewAdapter.execute_until_blocked(run_id)`；普通成功和家族级失败都自动继续固定队列。
@@ -45,7 +50,9 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 - 沙盒 `install_stage` 由 Runner 自动标记 `skipped_not_applicable`。
 - 单个家族失败不得截断或重排队列，也不得升级为整个调查失败。
 
-生产 Host 不向模型逐条发送 SQL、rows、receipt 或内部 hash。调用方只能提交真实的 `query_returned` / `query_error`，步骤终态、候选和 warning 全部由 Runtime 生成。
+生产 Host 不向模型逐条发送 SQL、rows、query ID、receipt 或内部 hash。完整已校验 analysis
+通过 Host 内部 sink 交给上层 writer；模型只接收脱敏后的 final copy 和 validation receipt 摘要。
+调用方只能提交真实的 `query_returned` / `query_error`，步骤终态、候选和 warning 全部由 Runtime 生成。
 
 ## 5. 开发 CLI
 
