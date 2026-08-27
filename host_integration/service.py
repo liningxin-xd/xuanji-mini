@@ -59,6 +59,7 @@ class PrimaryInvestigationHost:
         runs_root: Path | str,
         validated_result_sink: ValidatedResultSink,
         repository_root: Path | str = ROOT,
+        analysis_profile: str = "primary_v1",
     ):
         if not callable(validated_result_sink):
             raise RunnerError("validated_result_sink must be a Host-owned callable")
@@ -70,6 +71,7 @@ class PrimaryInvestigationHost:
             repository_root,
             runs_root=runs_root,
             trusted_receipt_verifier=signer,
+            analysis_profile=analysis_profile,
         )
         self._dview_query = dview_query
         self._adapter = HostDViewAdapter(

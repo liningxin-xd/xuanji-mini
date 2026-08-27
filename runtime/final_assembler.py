@@ -87,18 +87,46 @@ class FinalAssembler:
             finding = patch["finding_texts"].get(candidate["candidate_id"])
             if finding is None:
                 continue
-            findings.append(
-                {
-                    "dimension": candidate["dimension"],
-                    "value": candidate["value"],
-                    "label": candidate["label"],
-                    "attribution_level": "primary",
-                    "adverse_impact_bp": candidate["adverse_impact_bp"],
-                    "finding": finding,
-                }
-            )
+            attribution_level = candidate.get("attribution_level", "primary")
+            assembled = {
+                "dimension": candidate["dimension"],
+                "value": candidate["value"],
+                "label": candidate["label"],
+                "attribution_level": attribution_level,
+                "adverse_impact_bp": candidate["adverse_impact_bp"],
+                "finding": finding,
+            }
+            if attribution_level == "secondary":
+                assembled.update(
+                    {
+                        "parent_dimension": candidate["parent_dimension"],
+                        "parent_value": candidate["parent_value"],
+                        "parent_label": candidate["parent_label"],
+                    }
+                )
+            findings.append(assembled)
         if findings:
             investigation["top_findings"] = findings
+
+        counterfactual = writer_pack.get("counterfactual")
+        if counterfactual is not None:
+            if status != "completed" or not isinstance(counterfactual, dict):
+                raise FinalAssemblyError(
+                    "counterfactual requires a completed machine writer pack"
+                )
+            required = (
+                "dimension",
+                "value",
+                "label",
+                "removal_delta_bp",
+                "restoration_ratio",
+                "finding",
+            )
+            if any(field not in counterfactual for field in required):
+                raise FinalAssemblyError("machine counterfactual is incomplete")
+            investigation["counterfactual"] = {
+                field: deepcopy(counterfactual[field]) for field in required
+            }
 
         return {
             "source": context["source"],

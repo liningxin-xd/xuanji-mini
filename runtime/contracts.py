@@ -42,6 +42,14 @@ EXPECTED_PLAN_STEPS = {
     ),
 }
 
+EXPECTED_ANALYSIS_PROFILES = {"primary_v1", "primary_v2"}
+EXPECTED_POST_PRIMARY_STEPS = (
+    "counterfactual",
+    "secondary",
+    "game_background",
+    "error_code",
+)
+
 EXPECTED_LOCKED_ASSETS = {
     "references/queries/registered-monitor-root.yaml",
     "references/queries/download-game-attribution.yaml",
@@ -163,16 +171,28 @@ class RepositoryContracts:
             self.contract_root / "metric-definitions.lock.json"
         )
         self.result_schemas_path = self.contract_root / "result-schemas.yaml"
+        self.analysis_profiles_path = self.contract_root / "analysis-profiles.yaml"
+        self.post_primary_plan_path = self.contract_root / "post-primary-plan.yaml"
+        self.secondary_relations_path = (
+            self.contract_root / "secondary-relations.yaml"
+        )
 
         self._plans_raw = _load_yaml_mapping(self.execution_plans_path)
         self._registry = _load_yaml_mapping(self.query_registry_path)
         self._asset_lock = _load_json_mapping(self.asset_lock_path)
         self._metric_definitions = _load_json_mapping(self.metric_definitions_path)
         self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
+        self._analysis_profiles = _load_yaml_mapping(self.analysis_profiles_path)
+        self._post_primary_plans = _load_yaml_mapping(self.post_primary_plan_path)
+        self._secondary_relations = _load_yaml_mapping(
+            self.secondary_relations_path
+        )
         self._plans = self._validate_plans()
+        self._validate_analysis_profiles()
         self._asset_hashes = self._load_asset_hashes()
         self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
+        self._validate_secondary_relations()
         self._validate_result_schemas()
 
     @property
@@ -204,6 +224,14 @@ class RepositoryContracts:
         return sha256_bytes(self.result_schemas_path.read_bytes())
 
     @property
+    def secondary_relations_sha256(self) -> str:
+        return sha256_bytes(self.secondary_relations_path.read_bytes())
+
+    @property
+    def default_analysis_profile(self) -> str:
+        return self._analysis_profiles["default_profile"]
+
+    @property
     def definition_bundle_sha256(self) -> str:
         return self._metric_definitions["bundle_sha256"]
 
@@ -224,11 +252,105 @@ class RepositoryContracts:
             raise ContractError(f"compiled metric definition is missing: {metric}")
         return deepcopy(definition)
 
+    def analysis_profile(self, profile: str) -> dict[str, Any]:
+        value = self._analysis_profiles["profiles"].get(profile)
+        if not isinstance(value, dict):
+            raise ContractError(f"unknown analysis profile: {profile}")
+        return deepcopy(value)
+
+    def analysis_profile_sha256(self, profile: str) -> str:
+        return canonical_sha256(
+            {"profile": profile, "contract": self.analysis_profile(profile)}
+        )
+
+    def post_primary_plan(self, plan_id: str) -> dict[str, Any]:
+        value = self._post_primary_plans["plans"].get(plan_id)
+        if not isinstance(value, dict):
+            raise ContractError(f"unknown post-primary plan: {plan_id}")
+        return deepcopy(value)
+
+    def post_primary_plan_contract_sha256(self, plan_id: str) -> str:
+        return canonical_sha256(
+            {"plan_id": plan_id, "contract": self.post_primary_plan(plan_id)}
+        )
+
     def result_schema(self, schema_id: str) -> dict[str, Any]:
         schema = self._result_schemas["schemas"].get(schema_id)
         if not isinstance(schema, dict):
             raise ContractError(f"unknown result schema: {schema_id}")
         return deepcopy(schema)
+
+    def secondary_relation_children(
+        self, chain: str, parent_dimension: str = "game_id"
+    ) -> tuple[str, ...]:
+        chain_relations = self._secondary_relations["relations"].get(chain)
+        if not isinstance(chain_relations, dict):
+            raise ContractError(f"secondary chain is not registered: {chain}")
+        children = chain_relations.get(parent_dimension)
+        if not isinstance(children, list) or not children:
+            raise ContractError(
+                f"secondary parent is not registered: {chain}/{parent_dimension}"
+            )
+        return tuple(children)
+
+    def secondary_binding(
+        self,
+        *,
+        chain: str,
+        metric: str,
+        parent_dimension: str,
+        parent_value: str,
+        child_dimension: str,
+    ) -> QueryBinding:
+        if child_dimension not in self.secondary_relation_children(
+            chain, parent_dimension
+        ):
+            raise ContractError(
+                f"secondary relation is not registered: "
+                f"{chain}/{parent_dimension}->{child_dimension}"
+            )
+        secondary = self._registry["secondary"]
+        parent_raw = secondary["parent_dimensions"][chain][parent_dimension]
+        parent_config = self._materialize_dimension_config(parent_raw)
+        child_config = self._dimension_config(chain, child_dimension)
+        if chain == "download":
+            metric_config = self._registry["download_metrics"].get(metric)
+            if not isinstance(metric_config, dict):
+                raise ContractError(f"download metric is not registered: {metric}")
+            metric_projection = metric_config["secondary_metric"]
+        elif chain == "install":
+            metric_config = self._registry["install"]
+            if metric != metric_config["metric"]:
+                raise ContractError(f"install metric is not registered: {metric}")
+            metric_projection = None
+        else:
+            raise ContractError(f"secondary chain is not registered: {chain}")
+        dimension_config = {
+            "secondary": True,
+            "parent_dimension": parent_dimension,
+            "parent_value": parent_value,
+            "parent_source_field": parent_config["source_field"],
+            "parent_quality_source_expression": parent_config[
+                "quality_source_expression"
+            ],
+            "parent_value_expression": parent_config["value_expression"],
+            "child_dimension": child_dimension,
+            "child_source_field": child_config["source_field"],
+            "child_quality_source_expression": child_config[
+                "quality_source_expression"
+            ],
+            "child_value_expression": child_config["value_expression"],
+            "source_field": child_config["source_field"],
+            "metric_projection": deepcopy(metric_projection),
+        }
+        return self._binding(
+            secondary["template"]["path"],
+            "secondary_markdown_template",
+            metric_config,
+            result_schema_id="secondary_bucket",
+            dimension=child_dimension,
+            dimension_config=dimension_config,
+        )
 
     def query_spec_result_contract(
         self, binding: QueryBinding
@@ -380,11 +502,14 @@ class RepositoryContracts:
         config = self._registry["dimensions"][chain].get(step_id)
         if not isinstance(config, dict):
             raise ContractError(f"dimension is not registered for {chain}: {step_id}")
-        normalizer = self._registry["dimension_normalizers"].get(
-            config["normalizer"]
-        )
+        return self._materialize_dimension_config(config)
+
+    def _materialize_dimension_config(
+        self, config: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalizer = self._registry["dimension_normalizers"].get(config["normalizer"])
         if not isinstance(normalizer, dict):
-            raise ContractError(f"normalizer is not registered for {step_id}")
+            raise ContractError("dimension normalizer is not registered")
         result = dict(config)
         result["value_expression"] = normalizer["value_expression"]
         result["label_expression"] = normalizer["label_expression"]
@@ -461,6 +586,62 @@ class RepositoryContracts:
                 sha256=canonical_sha256(raw),
             )
         return plans
+
+    def _validate_analysis_profiles(self) -> None:
+        profiles = self._analysis_profiles
+        if profiles.get("version") != 1:
+            raise ContractError("analysis profile version must be 1")
+        raw_profiles = profiles.get("profiles")
+        if not isinstance(raw_profiles, dict) or set(raw_profiles) != (
+            EXPECTED_ANALYSIS_PROFILES
+        ):
+            raise ContractError("analysis profiles must define primary_v1 and primary_v2")
+        if profiles.get("default_profile") != "primary_v1":
+            raise ContractError("primary_v1 must remain the default analysis profile")
+
+        post_plans = self._post_primary_plans
+        if post_plans.get("version") != 1 or set(post_plans.get("plans", {})) != {
+            "post_primary_v1"
+        }:
+            raise ContractError("post-primary plans must define post_primary_v1")
+        plan = post_plans["plans"]["post_primary_v1"]
+        steps = plan.get("steps") if isinstance(plan, dict) else None
+        if not isinstance(steps, list) or tuple(
+            item.get("id") for item in steps if isinstance(item, dict)
+        ) != EXPECTED_POST_PRIMARY_STEPS:
+            raise ContractError("post-primary step order does not match the contract")
+        expected_queries = {
+            "counterfactual": ("deterministic", 0),
+            "secondary": ("query", 1),
+            "game_background": ("query", 3),
+            "error_code": ("query", 1),
+        }
+        for step in steps:
+            expected = expected_queries.get(step.get("id"))
+            if expected is None or (step.get("kind"), step.get("max_queries")) != expected:
+                raise ContractError(f"invalid post-primary step contract: {step}")
+        if plan.get("max_additional_queries") != sum(
+            item[1] for item in expected_queries.values()
+        ):
+            raise ContractError("post-primary query budget must total five")
+
+        primary_v1 = raw_profiles["primary_v1"]
+        primary_v2 = raw_profiles["primary_v2"]
+        if primary_v1 != {
+            "primary_plan": "fixed_queue_v1",
+            "post_primary_plan": None,
+            "enabled_post_primary_steps": [],
+        }:
+            raise ContractError("primary_v1 profile behavior must remain frozen")
+        if (
+            primary_v2.get("primary_plan") != "fixed_queue_v1"
+            or primary_v2.get("post_primary_plan") != "post_primary_v1"
+            or primary_v2.get("enabled_post_primary_steps")
+            != ["counterfactual", "secondary"]
+        ):
+            raise ContractError(
+                "primary_v2 must enable counterfactual and one secondary step"
+            )
 
     def _load_asset_hashes(self) -> dict[str, str]:
         if self._asset_lock.get("version") != 1:
@@ -626,6 +807,98 @@ class RepositoryContracts:
                 if config.get("allowed_template") != expected_template:
                     raise ContractError(f"template mismatch for {dimension}")
 
+        secondary = registry.get("secondary")
+        if not isinstance(secondary, dict) or set(secondary) != {
+            "template",
+            "parent_dimensions",
+        }:
+            raise ContractError("secondary query registry is invalid")
+        template = secondary["template"]
+        if (
+            not isinstance(template, dict)
+            or template.get("path")
+            != "references/queries/secondary-attribution-template.md"
+            or template["path"] not in self._asset_hashes
+        ):
+            raise ContractError("secondary template is not a locked query asset")
+        parent_dimensions = secondary["parent_dimensions"]
+        if not isinstance(parent_dimensions, dict) or set(parent_dimensions) != {
+            "download",
+            "install",
+        }:
+            raise ContractError("secondary parent dimensions are incomplete")
+        for chain, parents in parent_dimensions.items():
+            if not isinstance(parents, dict) or set(parents) != {"game_id"}:
+                raise ContractError(
+                    f"{chain} secondary must register only game_id as a parent"
+                )
+            parent = parents["game_id"]
+            if parent != {
+                "source_field": "game_id",
+                "quality_source_expression": "1",
+                "normalizer": "standard",
+            }:
+                raise ContractError(f"{chain} game_id parent contract changed")
+
+        for metric, config in download_metrics.items():
+            projection = config.get("secondary_metric")
+            if not isinstance(projection, dict) or set(projection) != {
+                "denominator_source_field",
+                "numerator_source_field",
+                "invalid_metric_predicate",
+            }:
+                raise ContractError(
+                    f"download secondary metric projection is invalid: {metric}"
+                )
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in projection.values()
+            ):
+                raise ContractError(
+                    f"download secondary metric projection is empty: {metric}"
+                )
+
+    def _validate_secondary_relations(self) -> None:
+        contract = self._secondary_relations
+        if contract.get("version") != 1 or set(contract) != {
+            "version",
+            "relations",
+        }:
+            raise ContractError("secondary relations contract version is invalid")
+        expected = {
+            "download": (
+                "device_brand",
+                "channel_group",
+                "app_major_version",
+                "os_major_version",
+                "apk_size_tier",
+            ),
+            "install": (
+                "device_brand",
+                "storage_headroom_tier",
+                "os_major_version",
+                "apk_size_tier",
+            ),
+        }
+        relations = contract.get("relations")
+        if not isinstance(relations, dict) or set(relations) != set(expected):
+            raise ContractError("secondary relation chains are invalid")
+        for chain, children in expected.items():
+            chain_relations = relations[chain]
+            if (
+                not isinstance(chain_relations, dict)
+                or set(chain_relations) != {"game_id"}
+                or tuple(chain_relations["game_id"]) != children
+            ):
+                raise ContractError(f"{chain} secondary relation order changed")
+            if any(
+                child not in self._registry["dimensions"][chain]
+                for child in children
+            ):
+                raise ContractError(
+                    f"{chain} secondary relation references an unknown child"
+                )
+
     def _validate_query_config(
         self, name: str, config: Any, required_assets: tuple[str, ...]
     ) -> None:
@@ -667,6 +940,7 @@ class RepositoryContracts:
             "download_primary_bucket",
             "install_primary_bucket",
             "install_stage",
+            "secondary_bucket",
         }:
             raise ContractError("result schemas do not cover every query binding kind")
         for name, config in metrics.items():
@@ -678,6 +952,7 @@ class RepositoryContracts:
             if schema.get("validator") not in {
                 "contribution_buckets",
                 "install_stage",
+                "secondary_contribution_buckets",
             }:
                 raise ContractError(f"invalid result validator: {schema_id}")
             columns = schema.get("columns")
@@ -689,3 +964,20 @@ class RepositoryContracts:
                 )
             ):
                 raise ContractError(f"invalid result columns: {schema_id}")
+            columns_by_chain = schema.get("columns_by_chain")
+            if columns_by_chain is not None:
+                if (
+                    schema_id != "secondary_bucket"
+                    or not isinstance(columns_by_chain, dict)
+                    or set(columns_by_chain) != {"download", "install"}
+                    or any(
+                        not isinstance(chain_columns, dict)
+                        or not chain_columns
+                        or any(
+                            not isinstance(key, str) or not isinstance(value, str)
+                            for key, value in chain_columns.items()
+                        )
+                        for chain_columns in columns_by_chain.values()
+                    )
+                ):
+                    raise ContractError("secondary result columns are invalid")

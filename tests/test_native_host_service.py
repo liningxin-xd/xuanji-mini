@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -99,6 +100,7 @@ class _FixtureDViewClient:
             self._repository_root,
             runs_root=self._settings.runs_root,
             trusted_receipt_verifier=signer,
+            analysis_profile=self._settings.analysis_profile,
         )
         for run_root in self._settings.runs_root.iterdir():
             ticket = runner.next_action(run_root.name)
@@ -140,9 +142,18 @@ class NativeHostConfigurationTest(unittest.IsolatedAsyncioTestCase):
             "XUANJI_RESULTS_ROOT": "/var/lib/xuanji/results",
         }
         settings = HostServiceSettings.from_env(values)
+        self.assertEqual("primary_v1", settings.analysis_profile)
         rendered = repr(settings)
         for marker in ("host-secret", "dview-secret", "receipt-secret"):
             self.assertNotIn(marker, rendered)
+
+        values["XUANJI_ANALYSIS_PROFILE"] = "primary_v2"
+        self.assertEqual(
+            "primary_v2", HostServiceSettings.from_env(values).analysis_profile
+        )
+        values["XUANJI_ANALYSIS_PROFILE"] = "model_selected"
+        with self.assertRaisesRegex(HostConfigurationError, "primary_v1 or primary_v2"):
+            HostServiceSettings.from_env(values)
 
     async def test_static_bearer_token_verifier_uses_constant_time_identity(self):
         verifier = StaticBearerTokenVerifier("t" * 32)
@@ -370,6 +381,44 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(field, rendered_logs)
             for marker in ("SELECT ", "query_id", "raw_result", "private-native"):
                 self.assertNotIn(marker, rendered_logs)
+
+    async def test_primary_v2_is_host_selected_without_an_extra_query(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(settings, Path(__file__).parents[1])
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id="native-download-v2", dqc_payload=payload
+                )
+            self.assertEqual("write_conclusion", result["action"])
+            self.assertEqual("primary_v2", result["writer_pack"]["analysis_profile"])
+            self.assertNotIn("counterfactual", result["writer_pack"])
+            self.assertEqual(
+                "no_legal_game_candidate",
+                result["writer_pack"]["post_primary_steps"][0]["reason"],
+            )
+            rendered_logs = "\n".join(logs.output)
+            self.assertIn('"attribution_query_count":7', rendered_logs)
+            self.assertNotIn("XUANJI_ANALYSIS_PROFILE", json.dumps(result))
 
 
 class ValidatedResultSinkTest(unittest.TestCase):

@@ -72,6 +72,7 @@ class RegisteredAlertCoordinator:
         task_result_store: ResultArtifactStore,
         tasks_root: Path | str,
         repository_root: Path | str,
+        analysis_profile: str = "primary_v1",
     ):
         self.investigation_host = investigation_host
         self.root_preflight = root_preflight
@@ -81,6 +82,8 @@ class RegisteredAlertCoordinator:
         self.tasks_root = Path(tasks_root).resolve()
         self.repository_root = Path(repository_root).resolve()
         self.contracts = RepositoryContracts(self.repository_root)
+        self.analysis_profile = analysis_profile
+        self.contracts.analysis_profile(self.analysis_profile)
         self.normalizer = AlertNormalizer()
         self.resolver = RouteResolver(DqcRouteRegistry(self.repository_root))
         self.assembler = TaskAssembler()
@@ -325,7 +328,7 @@ class RegisteredAlertCoordinator:
     ) -> dict[str, Any]:
         preflight = investigation.get("root_preflight")
         writer_pack = {
-            "analysis_profile": "primary_v1",
+            "analysis_profile": self.analysis_profile,
             "task_id": state["task_id"],
             "investigation_id": investigation["investigation_id"],
             "metric": investigation["metric_hint"],
@@ -404,6 +407,7 @@ class RegisteredAlertCoordinator:
             "task_id": task_id,
             "payload_sha256": payload_sha256,
             "definition_bundle_sha256": self.contracts.definition_bundle_sha256,
+            "analysis_profile": self.analysis_profile,
             "status": "executing",
             "overall_status": None,
             "current_investigation_index": 0,
@@ -479,6 +483,8 @@ class RegisteredAlertCoordinator:
             != self.contracts.definition_bundle_sha256
         ):
             raise TaskCoordinatorError("task metric definition bundle changed")
+        if state.get("analysis_profile", "primary_v1") != self.analysis_profile:
+            raise TaskCoordinatorError("task analysis profile changed")
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:

@@ -137,8 +137,24 @@ class QueryBuilder:
         if binding.dimension is not None:
             config = binding.dimension_config or {}
             source_field = config.get("source_field")
-            if not isinstance(source_field, str) or not re.search(
-                rf"(?i)\b{re.escape(source_field)}\b", normalized
+            required_dimension_fields = {source_field}
+            if config.get("secondary") is True:
+                required_dimension_fields.add(config.get("parent_source_field"))
+                parent_value = config.get("parent_value")
+                if (
+                    not isinstance(parent_value, str)
+                    or not parent_value
+                    or "outside_parent" not in normalized
+                    or ("'" + parent_value.replace("'", "''") + "'")
+                    not in normalized
+                ):
+                    raise QueryBuildError(
+                        "secondary SQL changed its parent identity or closure bucket"
+                    )
+            if any(
+                not isinstance(field, str)
+                or not re.search(rf"(?i)\b{re.escape(field)}\b", normalized)
+                for field in required_dimension_fields
             ):
                 raise QueryBuildError(
                     f"current dimension source is missing: {binding.dimension}"
@@ -177,6 +193,9 @@ class QueryBuilder:
         protected = list(binding.protected_tokens)
         if binding.dimension_config:
             protected.append(binding.dimension_config["source_field"])
+            parent_source = binding.dimension_config.get("parent_source_field")
+            if isinstance(parent_source, str):
+                protected.append(parent_source)
         for token in protected:
             original_count = len(
                 re.findall(rf"(?i)\b{re.escape(token)}\b", original_semantic)
@@ -197,6 +216,13 @@ class QueryBuilder:
                 raise QueryBuildError(
                     f"repair changed required predicate usage: {predicate}"
                 )
+        if binding.dimension_config and binding.dimension_config.get("secondary"):
+            parent_value = binding.dimension_config["parent_value"]
+            parent_literal = "'" + parent_value.replace("'", "''") + "'"
+            if original_semantic.count(parent_literal) != repaired_semantic.count(
+                parent_literal
+            ):
+                raise QueryBuildError("repair cannot change the frozen parent value")
 
         date_pattern = re.compile(r"'\d{4}-\d{2}-\d{2}'")
         if set(date_pattern.findall(original_semantic)) != set(

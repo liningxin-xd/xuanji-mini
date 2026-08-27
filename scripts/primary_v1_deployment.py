@@ -87,6 +87,10 @@ def validate_documents(
     config = _one(documents, "ConfigMap", _CONFIG_NAME).get("data")
     if not isinstance(config, dict):
         raise DeploymentContractError("deployment ConfigMap data is invalid")
+    if config.get("XUANJI_ANALYSIS_PROFILE") != "primary_v1":
+        raise DeploymentContractError(
+            "primary_v1 deployment must pin XUANJI_ANALYSIS_PROFILE=primary_v1"
+        )
     for name, value in _ROOTS.items():
         if config.get(name) != value:
             raise DeploymentContractError(f"{name} must remain {value}")

@@ -26,6 +26,11 @@ class ResultValidationOutcome:
     root_current_value: float | None
     root_baseline_value: float | None
     root_delta: float | None
+    root_current_numerator: float | None
+    root_current_denominator: float | None
+    root_baseline_numerator: float | None
+    root_baseline_denominator: float | None
+    family_adverse_impact_bp: float | None
 
 
 class ResultValidator:
@@ -232,6 +237,12 @@ class ResultValidator:
                 ):
                     continue
                 candidate = contribution.as_candidate(step_id)
+                candidate["private_counts"] = {
+                    "current_numerator": row["current_numerator"],
+                    "current_denominator": row["current_denominator"],
+                    "baseline_numerator": row["baseline_numerator"],
+                    "baseline_denominator": row["baseline_denominator"],
+                }
                 if "bucket_baseline_active_day_count" in row:
                     candidate["bucket_baseline_active_day_count"] = row[
                         "bucket_baseline_active_day_count"
@@ -259,6 +270,15 @@ class ResultValidator:
             root_current_value=root_current_value,
             root_baseline_value=root_baseline_value,
             root_delta=root_delta,
+            root_current_numerator=float(first["overall_current_numerator"]),
+            root_current_denominator=float(first["overall_current_denominator"]),
+            root_baseline_numerator=float(first["overall_baseline_numerator"]),
+            root_baseline_denominator=float(first["overall_baseline_denominator"]),
+            family_adverse_impact_bp=sum(
+                item.adverse_impact * 10000
+                for item in contributions
+                if item.bucket_kind != "quality"
+            ),
         )
 
     def _validate_install_stage(
@@ -360,6 +380,11 @@ class ResultValidator:
             root_current_value=None,
             root_baseline_value=None,
             root_delta=None,
+            root_current_numerator=None,
+            root_current_denominator=None,
+            root_baseline_numerator=None,
+            root_baseline_denominator=None,
+            family_adverse_impact_bp=None,
         )
 
     def _validate_context(

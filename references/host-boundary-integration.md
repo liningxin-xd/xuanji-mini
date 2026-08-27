@@ -1,6 +1,6 @@
 # Primary Host Boundary Integration
 
-`primary_v1` production execution exposes exactly three task-level model tools
+Both analysis profiles expose exactly three task-level model tools
 from a Host process below the model/UI boundary:
 
 - `xuanji_run_task`: freezes one raw DQC payload, resolves zero or more
@@ -19,6 +19,11 @@ trusted schema-v4 runs only after root preflight selects `full_queue` and passes
 the frozen canonical root metric into every family. Investigation-level methods
 must not be registered as model tools.
 
+The deployment-only `XUANJI_ANALYSIS_PROFILE` selects `primary_v1` or
+`primary_v2`; it is never a tool argument. Both profiles execute the same frozen
+primary queue. `primary_v2` then runs only the post-primary steps enabled by the
+machine contract and returns one merged writer pack without another model call.
+
 The platform integration constructs the coordinator with the private
 `PrimaryInvestigationHost`, DView callable, Host-owned receipt authority,
 isolated run/task roots, and machine-only run/task sinks. The DView callable,
@@ -30,10 +35,10 @@ independent `host_service` and follow [Native Primary Host Deployment](native-ho
 Its server-side MCP client calls the existing read-only DView endpoint below the
 UI boundary. Calling DView from a model-visible terminal remains invalid.
 
-Task resume requires the identical payload hash, compiled metric-definition
+Task resume requires the identical payload hash, analysis profile, compiled metric-definition
 bundle, and a valid task-state integrity hash. Run resume additionally requires
 current schema-v4 state, identical
-immutable identity and contract hashes, and the same canonical root metric. A
+immutable identity and profile-specific contract hashes, and the same canonical root metric. A
 changed task payload, writer patch, or run identity is rejected.
 
 Normal tool results never contain SQL, raw rows, query IDs, receipts, or raw

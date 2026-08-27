@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .contracts import (
     sha256_bytes,
     sha256_text,
 )
+from .calibration_runner import CalibrationError, CalibrationRunner
 from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .final_assembler import FinalAssembler, FinalAssemblyError
 from .final_validator import FinalEvidenceValidator, FinalValidationError
@@ -25,6 +27,8 @@ from .models import QueryBinding, RunStatus, StepStatus, TERMINAL_STEP_STATUSES
 from .query_builder import QueryBuildError, QueryBuilder
 from .receipts import ReceiptVerificationError, TrustedReceiptVerifier
 from .result_validator import ResultValidationError, ResultValidator
+from .secondary_query_builder import SecondaryQueryBuilder
+from .secondary_result_validator import SecondaryResultValidator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,11 +45,22 @@ class AttributionRunner:
         root: Path | str = ROOT,
         runs_root: Path | str | None = None,
         trusted_receipt_verifier: TrustedReceiptVerifier | None = None,
+        analysis_profile: str | None = None,
     ):
         self.root = Path(root).resolve()
         self.contracts = RepositoryContracts(self.root)
         self.query_builder = QueryBuilder(self.contracts)
         self.result_validator = ResultValidator(self.contracts)
+        self.secondary_query_builder = SecondaryQueryBuilder(self.contracts)
+        self.secondary_result_validator = SecondaryResultValidator(self.contracts)
+        configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
+        self.analysis_profile = (
+            analysis_profile
+            or configured_profile
+            or self.contracts.default_analysis_profile
+        )
+        self.contracts.analysis_profile(self.analysis_profile)
+        self.calibration_runner = CalibrationRunner(self.contracts)
         self.trusted_receipt_verifier = trusted_receipt_verifier
         configured_runs_root = os.environ.get("XUANJI_RUNS_ROOT")
         if runs_root is not None:
@@ -122,6 +137,11 @@ class AttributionRunner:
                 "query_registry_sha256": self.contracts.query_registry_sha256,
                 "triage_sha256": self.contracts.triage_sha256,
                 "result_schemas_sha256": self.contracts.result_schemas_sha256,
+                "secondary_relations_sha256": (
+                    self.contracts.secondary_relations_sha256
+                    if self.analysis_profile == "primary_v2"
+                    else None
+                ),
             }
             mismatches = {
                 key: {"expected": value, "actual": state.get(key)}
@@ -134,6 +154,12 @@ class AttributionRunner:
                 mismatches["canonical_root_metric"] = {
                     "expected": frozen_root,
                     "actual": state.get("canonical_root_metric"),
+                }
+            state_profile = state.get("analysis_profile", "primary_v1")
+            if state_profile != self.analysis_profile:
+                mismatches["analysis_profile"] = {
+                    "expected": self.analysis_profile,
+                    "actual": state_profile,
                 }
             if mismatches:
                 raise RunnerError(
@@ -170,6 +196,11 @@ class AttributionRunner:
                     "root_current_value": None,
                     "root_baseline_value": None,
                     "root_delta": None,
+                    "root_current_numerator": None,
+                    "root_current_denominator": None,
+                    "root_baseline_numerator": None,
+                    "root_baseline_denominator": None,
+                    "family_adverse_impact_bp": None,
                     "failure_code": None,
                     "reason": None,
                     "warning_codes": [],
@@ -198,6 +229,20 @@ class AttributionRunner:
             "query_registry_sha256": self.contracts.query_registry_sha256,
             "triage_sha256": self.contracts.triage_sha256,
             "result_schemas_sha256": self.contracts.result_schemas_sha256,
+            "secondary_relations_sha256": (
+                self.contracts.secondary_relations_sha256
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
+            "analysis_profile": self.analysis_profile,
+            "analysis_profile_sha256": self.contracts.analysis_profile_sha256(
+                self.analysis_profile
+            ),
+            "post_primary_plan_sha256": (
+                self.contracts.post_primary_plan_contract_sha256("post_primary_v1")
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
             "chain": chain,
             "game_type": game_type,
             "metric": metric,
@@ -209,6 +254,7 @@ class AttributionRunner:
             "evidence_export_sha256": None,
             "final_analysis_sha256": None,
             "validation_receipt": None,
+            "post_primary": None,
             "steps": steps,
             "processed_events": {},
         }
@@ -224,7 +270,7 @@ class AttributionRunner:
     def next_action(self, run_id: str) -> dict[str, Any]:
         state = self._load_state(run_id)
         if state["cursor"] >= len(state["steps"]):
-            return self._queue_complete_ticket(state)
+            return self._next_post_primary_action(state)
 
         changed = False
         while state["cursor"] < len(state["steps"]):
@@ -242,7 +288,7 @@ class AttributionRunner:
             self._mark_queue_complete(state)
             state["revision"] += 1
             self._write_state(state)
-            return self._queue_complete_ticket(state)
+            return self._next_post_primary_action(state)
 
         step = state["steps"][state["cursor"]]
         if step["status"] == StepStatus.REPAIR_REQUIRED.value:
@@ -300,9 +346,16 @@ class AttributionRunner:
                 "event_sha256": event_hash,
                 **self._status_payload(state),
             }
-        if state["cursor"] >= len(state["steps"]):
-            raise RunnerError("queue is complete; no further events are accepted")
-        step = state["steps"][state["cursor"]]
+        is_post_primary = state["cursor"] >= len(state["steps"])
+        if is_post_primary:
+            step = self._active_secondary_step(state)
+            if step is None:
+                raise RunnerError(
+                    "queue and post-primary analysis are complete; "
+                    "no further events are accepted"
+                )
+        else:
+            step = state["steps"][state["cursor"]]
         if event.get("step_id") != step["id"]:
             raise RunnerError(
                 f"event targets non-current step {event.get('step_id')}; "
@@ -351,16 +404,29 @@ class AttributionRunner:
             if binding is None:  # pragma: no cover - automatic steps issue no ticket
                 raise RunnerError("query result has no immutable binding")
             try:
-                outcome = self.result_validator.validate(
-                    raw_result=raw_result,
-                    binding=binding,
-                    step_id=step["id"],
-                    metric=state["metric"],
-                    analysis_date=state["analysis_date"],
-                    game_type=state["game_type"],
-                    produces_candidates=step["produces_candidates"],
-                )
-                self._validate_canonical_root_metric(state, step, outcome)
+                if is_post_primary:
+                    outcome = self.secondary_result_validator.validate(
+                        raw_result=raw_result,
+                        binding=binding,
+                        chain=state["chain"],
+                        metric=state["metric"],
+                        analysis_date=state["analysis_date"],
+                        game_type=state["game_type"],
+                        parent_value=step["parent_value"],
+                        parent_counts=self._secondary_parent_counts(state, step),
+                        root_counts=self._secondary_root_counts(state),
+                    )
+                else:
+                    outcome = self.result_validator.validate(
+                        raw_result=raw_result,
+                        binding=binding,
+                        step_id=step["id"],
+                        metric=state["metric"],
+                        analysis_date=state["analysis_date"],
+                        game_type=state["game_type"],
+                        produces_candidates=step["produces_candidates"],
+                    )
+                    self._validate_canonical_root_metric(state, step, outcome)
             except ResultValidationError as exc:
                 attempt["status"] = "failed"
                 attempt["validation"] = {
@@ -387,6 +453,11 @@ class AttributionRunner:
                 step["root_current_value"] = outcome.root_current_value
                 step["root_baseline_value"] = outcome.root_baseline_value
                 step["root_delta"] = outcome.root_delta
+                step["root_current_numerator"] = outcome.root_current_numerator
+                step["root_current_denominator"] = outcome.root_current_denominator
+                step["root_baseline_numerator"] = outcome.root_baseline_numerator
+                step["root_baseline_denominator"] = outcome.root_baseline_denominator
+                step["family_adverse_impact_bp"] = outcome.family_adverse_impact_bp
                 step["warning_codes"] = list(outcome.warning_codes)
         else:
             raw_error = {
@@ -422,10 +493,20 @@ class AttributionRunner:
             "step_id": step["id"],
             "event_path": str(event_path),
         }
-        if advance_cursor:
+        if advance_cursor and not is_post_primary:
             state["cursor"] += 1
             if state["cursor"] >= len(state["steps"]):
                 self._mark_queue_complete(state)
+        elif advance_cursor:
+            try:
+                post_primary = self.calibration_runner.execute(state)
+            except CalibrationError as exc:
+                raise RunnerError(str(exc)) from exc
+            state["post_primary"] = post_primary
+            state["ready_for_final_validation"] = bool(
+                isinstance(post_primary, dict)
+                and post_primary.get("status") == "completed"
+            )
         state["revision"] += 1
         self._write_state(state)
         return {
@@ -446,6 +527,14 @@ class AttributionRunner:
                 raise RunnerError(
                     f"cannot export non-terminal step {step['id']}: {step['status']}"
                 )
+        state = self._ensure_post_primary(state)
+        if state.get("analysis_profile", "primary_v1") == "primary_v2" and (
+            not isinstance(state.get("post_primary"), dict)
+            or state["post_primary"].get("status") != "completed"
+        ):
+            raise RunnerError(
+                "cannot export before post-primary analysis is terminal"
+            )
         evidence = self._export_evidence(state)
         evidence_sha256 = canonical_sha256(evidence)
         export_path = self._run_dir(run_id) / "exports/attribution-execution.json"
@@ -550,12 +639,219 @@ class AttributionRunner:
             if step["warning_codes"]:
                 exported["warning_codes"] = list(step["warning_codes"])
             exported_steps.append(exported)
-        return {
+        evidence = {
             "mode": "full_queue",
             "chain": state["chain"],
             "game_type": state["game_type"],
             "execution_mode": state["execution_mode"],
             "steps": exported_steps,
+        }
+        if state.get("analysis_profile", "primary_v1") == "primary_v2":
+            post_primary = state.get("post_primary")
+            if not isinstance(post_primary, dict) or post_primary.get("status") != (
+                "completed"
+            ):
+                raise RunnerError("primary_v2 post-primary analysis is incomplete")
+            post_steps = []
+            secondary_steps = []
+            for step in post_primary["steps"]:
+                audit_step = {"step": step["id"], "status": step["status"]}
+                for field in ("reason", "failure_code", "limit_code"):
+                    if isinstance(step.get(field), str):
+                        audit_step[field] = step[field]
+                post_steps.append(audit_step)
+                if step["id"] != "secondary" or step["status"] not in {
+                    "succeeded",
+                    "failed",
+                }:
+                    continue
+                secondary_step = {
+                    "parent_dimension": step["parent_dimension"],
+                    "parent_value": step["parent_value"],
+                    "parent_label": step["parent_label"],
+                    "step": step["child_dimension"],
+                    "status": step["status"],
+                }
+                if step["status"] == "succeeded":
+                    secondary_step["candidate_count"] = step["candidate_count"]
+                else:
+                    secondary_step["reason"] = step["reason"]
+                query_id = self._last_query_id(step)
+                if query_id:
+                    secondary_step["query_id"] = query_id
+                if step.get("warning_codes"):
+                    secondary_step["warning_codes"] = list(step["warning_codes"])
+                secondary_steps.append(secondary_step)
+            evidence.update(
+                {
+                    "analysis_profile": "primary_v2",
+                    "primary_evidence_sha256": post_primary[
+                        "primary_evidence_sha256"
+                    ],
+                    "post_primary": {
+                        "status": post_primary["status"],
+                        "steps": post_steps,
+                    },
+                }
+            )
+            if secondary_steps:
+                evidence["secondary_steps"] = secondary_steps
+        return evidence
+
+    def _ensure_post_primary(self, state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("analysis_profile", "primary_v1") == "primary_v1":
+            return state
+        changed = False
+        if state.get("post_primary") is None:
+            plan = self.calibration_runner.create_plan(state)
+            if plan is None:
+                raise RunnerError("primary_v2 lacks its post-primary plan")
+            state["post_primary"] = plan
+            state["ready_for_final_validation"] = False
+            changed = True
+        try:
+            result = self.calibration_runner.execute(state)
+        except CalibrationError as exc:
+            raise RunnerError(str(exc)) from exc
+        if result != state.get("post_primary"):
+            state["post_primary"] = result
+            changed = True
+        ready = bool(
+            isinstance(result, dict) and result.get("status") == "completed"
+        )
+        if state.get("ready_for_final_validation") != ready:
+            state["ready_for_final_validation"] = ready
+            changed = True
+        if changed:
+            state["revision"] += 1
+            self._write_state(state)
+        return state
+
+    def _next_post_primary_action(self, state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("analysis_profile", "primary_v1") == "primary_v1":
+            return self._queue_complete_ticket(state)
+        state = self._ensure_post_primary(state)
+        post_primary = state.get("post_primary")
+        if not isinstance(post_primary, dict):
+            raise RunnerError("primary_v2 lacks post-primary state")
+        if post_primary.get("status") == "completed":
+            return self._queue_complete_ticket(state)
+        secondary = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "secondary"
+            ),
+            None,
+        )
+        if not isinstance(secondary, dict):
+            raise RunnerError("post-primary plan lacks its secondary step")
+        if secondary["status"] == "repair_required":
+            return self._repair_ticket(state, secondary)
+        if secondary["status"] == "planned":
+            built = self.secondary_query_builder.build(
+                chain=state["chain"],
+                metric=state["metric"],
+                business_date=state["analysis_date"],
+                game_type=state["game_type"],
+                parent_dimension=secondary["parent_dimension"],
+                parent_value=secondary["parent_value"],
+                child_dimension=secondary["child_dimension"],
+            )
+            binding_snapshot = self._binding_snapshot(built.binding)
+            secondary.update(
+                {
+                    "binding": binding_snapshot,
+                    "binding_sha256": canonical_sha256(binding_snapshot),
+                    "attempts": [],
+                    "candidate_count": None,
+                    "candidates": [],
+                    "root_current_value": None,
+                    "root_baseline_value": None,
+                    "root_delta": None,
+                    "root_current_numerator": None,
+                    "root_current_denominator": None,
+                    "root_baseline_numerator": None,
+                    "root_baseline_denominator": None,
+                    "family_adverse_impact_bp": None,
+                    "failure_code": None,
+                    "reason": None,
+                    "warning_codes": [],
+                }
+            )
+            sql_path = self._sql_relative_path(
+                len(state["steps"]), "secondary", 0
+            )
+            self._atomic_write_text(self._run_dir(state["run_id"]) / sql_path, built.sql)
+            secondary["attempts"].append(
+                {
+                    "attempt_no": 0,
+                    "status": "issued",
+                    "sql_sha256": built.sha256,
+                    "sql_path": sql_path,
+                    "query_id": None,
+                    "error": None,
+                    "event_path": None,
+                    "raw_result_sha256": None,
+                    "validation": None,
+                }
+            )
+            secondary["status"] = "in_progress"
+            state["revision"] += 1
+            self._write_state(state)
+        if secondary["status"] != "in_progress":
+            raise RunnerError(
+                f"secondary step cannot issue a query: {secondary['status']}"
+            )
+        return self._execution_ticket(state, secondary)
+
+    def _active_secondary_step(
+        self, state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        post_primary = state.get("post_primary")
+        if not isinstance(post_primary, dict) or post_primary.get("status") != "executing":
+            return None
+        secondary = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "secondary"
+            ),
+            None,
+        )
+        if isinstance(secondary, dict) and secondary.get("status") in {
+            "in_progress",
+            "repair_required",
+        }:
+            return secondary
+        return None
+
+    def _secondary_parent_counts(
+        self, state: dict[str, Any], secondary: dict[str, Any]
+    ) -> dict[str, Any]:
+        game_step = next(step for step in state["steps"] if step["id"] == "game_id")
+        candidate = next(
+            (
+                item
+                for item in game_step["candidates"]
+                if item.get("value") == secondary["parent_value"]
+                and item.get("label") == secondary["parent_label"]
+            ),
+            None,
+        )
+        if not isinstance(candidate, dict) or not isinstance(
+            candidate.get("private_counts"), dict
+        ):
+            raise RunnerError("secondary parent no longer rehooks its game candidate")
+        return dict(candidate["private_counts"])
+
+    def _secondary_root_counts(self, state: dict[str, Any]) -> dict[str, Any]:
+        game_step = next(step for step in state["steps"] if step["id"] == "game_id")
+        return {
+            "current_numerator": game_step["root_current_numerator"],
+            "current_denominator": game_step["root_current_denominator"],
+            "baseline_numerator": game_step["root_baseline_numerator"],
+            "baseline_denominator": game_step["root_baseline_denominator"],
         }
 
     def load_state(self, run_id: str) -> dict[str, Any]:
@@ -573,6 +869,19 @@ class AttributionRunner:
         binding = self._binding_from_step(step)
         if binding is None:  # pragma: no cover - automatic steps issue no ticket
             raise RunnerError("query ticket has no immutable binding")
+        parameters = {
+            "business_date": state["analysis_date"],
+            "game_type": state["game_type"],
+        }
+        config = binding.dimension_config or {}
+        if config.get("secondary") is True:
+            parameters.update(
+                {
+                    "parent_dimension": config["parent_dimension"],
+                    "parent_value": config["parent_value"],
+                    "child_dimension": config["child_dimension"],
+                }
+            )
         ticket = {
             "action": "execute_query",
             "run_id": state["run_id"],
@@ -584,10 +893,7 @@ class AttributionRunner:
             "binding_sha256": step["binding_sha256"],
             "result_schema_id": binding.result_schema_id,
             "rendered_sql_sha256": attempt["sql_sha256"],
-            "parameters": {
-                "business_date": state["analysis_date"],
-                "game_type": state["game_type"],
-            },
+            "parameters": parameters,
             "rendered_sql": sql,
             "receipt_mode": state["receipt_mode"],
             "allowed_outcomes": ["query_returned", "query_error"],
@@ -755,15 +1061,24 @@ class AttributionRunner:
             "action": "queue_complete",
             "run_id": state["run_id"],
             "revision": state["revision"],
-            "ready_for_final_validation": True,
+            "ready_for_final_validation": state["ready_for_final_validation"],
         }
 
     def _status_payload(self, state: dict[str, Any]) -> dict[str, Any]:
         cursor = state["cursor"]
         current = state["steps"][cursor] if cursor < len(state["steps"]) else None
+        if current is None:
+            current = self._active_secondary_step(state)
         repair_count = sum(
             1
-            for step in state["steps"]
+            for step in [
+                *state["steps"],
+                *(
+                    [self._active_secondary_step(state)]
+                    if self._active_secondary_step(state) is not None
+                    else []
+                ),
+            ]
             for attempt in step["attempts"]
             if attempt.get("repair") is not None
         )
@@ -789,7 +1104,11 @@ class AttributionRunner:
             ],
             "repair_count": repair_count,
             "completed_candidate_count": completed_candidates,
-            "remaining_steps": [step["id"] for step in state["steps"][cursor:]],
+            "remaining_steps": (
+                [step["id"] for step in state["steps"][cursor:]]
+                if cursor < len(state["steps"])
+                else ([current["id"]] if current is not None else [])
+            ),
             "ready_for_final_validation": state["ready_for_final_validation"],
             "blocking_reason": (
                 "current step requires a SQL repair"
@@ -822,14 +1141,44 @@ class AttributionRunner:
         if state.get("schema_version") != 4:
             raise RunnerError("unsupported state schema version")
         self._validate_run_id(state.get("run_id"))
+        analysis_profile = state.get("analysis_profile", "primary_v1")
         expected_contract_hashes = {
             "execution_plan_sha256": self.contracts.execution_plan_sha256,
             "query_registry_sha256": self.contracts.query_registry_sha256,
             "triage_sha256": self.contracts.triage_sha256,
             "result_schemas_sha256": self.contracts.result_schemas_sha256,
+            "secondary_relations_sha256": (
+                self.contracts.secondary_relations_sha256
+                if analysis_profile == "primary_v2"
+                else None
+            ),
         }
         for field, expected_hash in expected_contract_hashes.items():
             if state.get(field) != expected_hash:
+                raise RunnerError(f"state {field} no longer matches the contract")
+        if analysis_profile != self.analysis_profile:
+            raise RunnerError("state analysis profile does not match the Host profile")
+        try:
+            self.contracts.analysis_profile(analysis_profile)
+        except ContractError as exc:
+            raise RunnerError(str(exc)) from exc
+        profile_hashes = {
+            "analysis_profile_sha256": self.contracts.analysis_profile_sha256(
+                analysis_profile
+            ),
+            "post_primary_plan_sha256": (
+                self.contracts.post_primary_plan_contract_sha256("post_primary_v1")
+                if analysis_profile == "primary_v2"
+                else None
+            ),
+        }
+        for field, expected_hash in profile_hashes.items():
+            actual = state.get(field)
+            if field == "analysis_profile_sha256" and actual is None and (
+                analysis_profile == "primary_v1"
+            ):
+                continue
+            if actual != expected_hash:
                 raise RunnerError(f"state {field} no longer matches the contract")
         expected_analysis_date = self._derive_analysis_date(
             state.get("chain"), state.get("alert_date")
@@ -1002,8 +1351,23 @@ class AttributionRunner:
                             "delta": float(root_values[2]),
                         }
                     )
+                    self._validate_private_primary_counts(
+                        step,
+                        required=analysis_profile == "primary_v2",
+                    )
                 elif any(value is not None for value in root_values):
                     raise RunnerError("diagnostic step cannot contain root metric facts")
+                elif any(
+                    step.get(field) is not None
+                    for field in (
+                        "root_current_numerator",
+                        "root_current_denominator",
+                        "root_baseline_numerator",
+                        "root_baseline_denominator",
+                        "family_adverse_impact_bp",
+                    )
+                ):
+                    raise RunnerError("diagnostic step cannot contain private root counts")
             elif candidate_count is not None:
                 raise RunnerError("non-succeeded step cannot have candidate_count")
             elif step.get("candidates") != []:
@@ -1014,6 +1378,11 @@ class AttributionRunner:
                     "root_current_value",
                     "root_baseline_value",
                     "root_delta",
+                    "root_current_numerator",
+                    "root_current_denominator",
+                    "root_baseline_numerator",
+                    "root_baseline_denominator",
+                    "family_adverse_impact_bp",
                 )
             ):
                 raise RunnerError("non-succeeded step cannot contain root metric facts")
@@ -1074,6 +1443,12 @@ class AttributionRunner:
             if status == StepStatus.SKIPPED_NOT_APPLICABLE.value and attempts:
                 raise RunnerError("automatic skipped step cannot contain query attempts")
 
+        post_primary = state.get("post_primary")
+        if analysis_profile == "primary_v2" and isinstance(post_primary, dict):
+            self._validate_secondary_runtime_state(
+                state, post_primary, known_query_ids
+            )
+
         canonical_root = state.get("canonical_root_metric")
         if state.get("receipt_mode") == "trusted_host" and not self._valid_root_metric(
             canonical_root
@@ -1105,14 +1480,23 @@ class AttributionRunner:
                 )
             ):
                 raise RunnerError("active run contains final evidence metadata")
+            if state.get("post_primary") is not None:
+                raise RunnerError("active run cannot contain post-primary state")
         else:
             if state.get("status") not in {
                 RunStatus.QUEUE_COMPLETE.value,
                 RunStatus.FINALIZED.value,
             }:
                 raise RunnerError("complete queue has an invalid run status")
-            if state.get("ready_for_final_validation") is not True:
-                raise RunnerError("complete queue must be ready for final validation")
+            post_primary = state.get("post_primary")
+            expected_ready = analysis_profile == "primary_v1" or (
+                isinstance(post_primary, dict)
+                and post_primary.get("status") == "completed"
+            )
+            if state.get("ready_for_final_validation") is not expected_ready:
+                raise RunnerError(
+                    "complete queue final-validation readiness is inconsistent"
+                )
             evidence_hash = state.get("evidence_export_sha256")
             if evidence_hash is not None and (
                 not isinstance(evidence_hash, str)
@@ -1140,6 +1524,344 @@ class AttributionRunner:
                 )
                 if receipt_hash != canonical_sha256(receipt_without_hash):
                     raise RunnerError("validation receipt integrity check failed")
+            if analysis_profile == "primary_v1":
+                if post_primary is not None:
+                    raise RunnerError("primary_v1 cannot contain post-primary state")
+            elif post_primary is not None:
+                try:
+                    self.calibration_runner.planner.validate_identity(
+                        state, post_primary
+                    )
+                    if post_primary.get("status") == "completed":
+                        self.calibration_runner.execute(state)
+                except (CalibrationError, ValueError) as exc:
+                    raise RunnerError(str(exc)) from exc
+            if isinstance(state.get("evidence_export_sha256"), str) and (
+                analysis_profile == "primary_v2"
+                and (
+                    not isinstance(post_primary, dict)
+                    or post_primary.get("status") != "completed"
+                )
+            ):
+                raise RunnerError("exported primary_v2 run lacks completed calibration")
+
+    def _validate_private_primary_counts(
+        self, step: dict[str, Any], *, required: bool
+    ) -> None:
+        fields = (
+            "root_current_numerator",
+            "root_current_denominator",
+            "root_baseline_numerator",
+            "root_baseline_denominator",
+            "family_adverse_impact_bp",
+        )
+        values = [step.get(field) for field in fields]
+        if all(value is None for value in values):
+            if required:
+                raise RunnerError("primary_v2 step lacks private root counts")
+            return
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0
+            for value in values
+        ):
+            raise RunnerError("primary step private root counts are invalid")
+        normalized = list(map(float, values))
+        (
+            current_numerator,
+            current_denominator,
+            baseline_numerator,
+            baseline_denominator,
+            _,
+        ) = normalized
+        if current_denominator <= 0 or baseline_denominator <= 0:
+            raise RunnerError("primary step private root denominators must be positive")
+        if not math.isclose(
+            current_numerator / current_denominator,
+            float(step["root_current_value"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            baseline_numerator / baseline_denominator,
+            float(step["root_baseline_value"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise RunnerError("primary step private root counts do not match root rates")
+        for candidate in step["candidates"]:
+            counts = candidate.get("private_counts")
+            if not isinstance(counts, dict) or set(counts) != {
+                "current_numerator",
+                "current_denominator",
+                "baseline_numerator",
+                "baseline_denominator",
+            }:
+                raise RunnerError("primary candidate private counts are invalid")
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                for value in counts.values()
+            ):
+                raise RunnerError("primary candidate private counts are invalid")
+
+    def _validate_secondary_runtime_state(
+        self,
+        state: dict[str, Any],
+        post_primary: dict[str, Any],
+        known_query_ids: set[str],
+    ) -> None:
+        secondary = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "secondary"
+            ),
+            None,
+        )
+        if not isinstance(secondary, dict):
+            raise RunnerError("post-primary state lacks secondary")
+        counterfactual = post_primary.get("steps", [None])[0]
+        if not isinstance(counterfactual, dict) or counterfactual.get("status") == (
+            "planned"
+        ):
+            if secondary != {"id": "secondary", "status": "planned"}:
+                raise RunnerError(
+                    "secondary cannot advance before counterfactual is frozen"
+                )
+            return
+        try:
+            expected_selection = self.calibration_runner.secondary_selector.select(
+                state, post_primary
+            )
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
+        if expected_selection["status"] == "skipped_by_policy":
+            if secondary != {"id": "secondary", **expected_selection}:
+                raise RunnerError("secondary skip no longer matches primary evidence")
+            return
+        selection_fields = (
+            "parent_dimension",
+            "parent_value",
+            "parent_label",
+            "parent_candidate_id",
+            "child_dimension",
+            "parent_selection_reason",
+            "child_selection_reason",
+        )
+        if any(
+            secondary.get(field) != expected_selection.get(field)
+            for field in selection_fields
+        ):
+            raise RunnerError("secondary selection no longer matches primary evidence")
+        if secondary.get("status") == "planned":
+            allowed = {"id", "status", *selection_fields}
+            if set(secondary) != allowed:
+                raise RunnerError("planned secondary contains runtime evidence")
+            return
+
+        expected_binding = self.contracts.secondary_binding(
+            chain=state["chain"],
+            metric=state["metric"],
+            parent_dimension=secondary["parent_dimension"],
+            parent_value=secondary["parent_value"],
+            child_dimension=secondary["child_dimension"],
+        )
+        expected_snapshot = self._binding_snapshot(expected_binding)
+        if secondary.get("binding") != expected_snapshot or secondary.get(
+            "binding_sha256"
+        ) != canonical_sha256(expected_snapshot):
+            raise RunnerError("secondary binding no longer matches the registry")
+        attempts = secondary.get("attempts")
+        if not isinstance(attempts, list) or not attempts or len(attempts) > 3:
+            raise RunnerError("secondary must contain one query with at most two repairs")
+        run_dir = self._run_dir(state["run_id"]).resolve()
+        for index, attempt in enumerate(attempts):
+            if not isinstance(attempt, dict) or attempt.get("attempt_no") != index:
+                raise RunnerError("secondary attempt sequence changed")
+            sql_path_value = attempt.get("sql_path")
+            digest = attempt.get("sql_sha256")
+            if (
+                not isinstance(sql_path_value, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise RunnerError("secondary attempt SQL identity is invalid")
+            sql_path = (run_dir / sql_path_value).resolve()
+            try:
+                sql_path.relative_to(run_dir)
+                sql = sql_path.read_text(encoding="utf-8")
+            except (ValueError, FileNotFoundError) as exc:
+                raise RunnerError("secondary attempt SQL is missing") from exc
+            if sha256_text(sql) != digest:
+                raise RunnerError("secondary attempt SQL hash changed")
+            self.query_builder.validate_sql(
+                sql,
+                expected_binding,
+                {
+                    "business_date": state["analysis_date"],
+                    "game_type": state["game_type"],
+                },
+            )
+            query_id = attempt.get("query_id")
+            if query_id is not None:
+                if not isinstance(query_id, str) or not query_id.strip():
+                    raise RunnerError("secondary query_id is invalid")
+                if query_id in known_query_ids:
+                    raise RunnerError("query_id is reused by secondary")
+                known_query_ids.add(query_id)
+            event_path_value = attempt.get("event_path")
+            if query_id is None:
+                if event_path_value is not None:
+                    raise RunnerError("unexecuted secondary attempt has an event")
+                continue
+            if not isinstance(event_path_value, str):
+                raise RunnerError("executed secondary attempt lacks its event")
+            event_path = (run_dir / event_path_value).resolve()
+            try:
+                event_path.relative_to(run_dir)
+                event = json.loads(event_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                raise RunnerError("secondary receipt event is unavailable") from exc
+            event_hash = canonical_sha256(event)
+            if event_path.name != f"{event_hash}.json" or state[
+                "processed_events"
+            ].get(event_hash, {}).get("event_path") != event_path_value:
+                raise RunnerError("secondary receipt event identity changed")
+            if event.get("query_id") != query_id or event.get(
+                "submitted_sql_sha256"
+            ) != digest:
+                raise RunnerError("secondary receipt does not match its attempt")
+            self._verify_receipt(state, event)
+            if event.get("event") == "query_returned":
+                raw_result = event.get("raw_result")
+                raw_hash = event.get("raw_result_sha256")
+                if (
+                    not isinstance(raw_result, dict)
+                    or raw_hash != canonical_sha256(raw_result)
+                    or attempt.get("raw_result_sha256") != raw_hash
+                ):
+                    raise RunnerError("secondary raw result evidence changed")
+            elif event.get("event") == "query_error":
+                event_error = {
+                    "class": event.get("error_class"),
+                    "code": event.get("error_code"),
+                    "message": event.get("error_message"),
+                }
+                if attempt.get("error") != event_error:
+                    raise RunnerError("secondary query error evidence changed")
+            else:
+                raise RunnerError("secondary receipt event type is invalid")
+
+        status = secondary.get("status")
+        latest = attempts[-1]
+        if status == "in_progress":
+            if latest.get("status") != "issued" or latest.get("query_id") is not None:
+                raise RunnerError("in_progress secondary is not awaiting a query")
+            return
+        if status == "repair_required":
+            error = latest.get("error") or {}
+            if (
+                latest.get("status") != "error"
+                or error.get("class") != "semantic_analysis"
+                or latest["attempt_no"] >= 2
+            ):
+                raise RunnerError("secondary repair state is invalid")
+            return
+        if status not in {"succeeded", "failed"}:
+            raise RunnerError(f"secondary runtime status is invalid: {status}")
+
+        if latest.get("status") in {"succeeded", "failed"}:
+            event = json.loads(
+                (run_dir / latest["event_path"]).read_text(encoding="utf-8")
+            )
+            try:
+                outcome = self.secondary_result_validator.validate(
+                    raw_result=event["raw_result"],
+                    binding=expected_binding,
+                    chain=state["chain"],
+                    metric=state["metric"],
+                    analysis_date=state["analysis_date"],
+                    game_type=state["game_type"],
+                    parent_value=secondary["parent_value"],
+                    parent_counts=self._secondary_parent_counts(state, secondary),
+                    root_counts=self._secondary_root_counts(state),
+                )
+            except ResultValidationError as exc:
+                if status != "failed" or latest.get("validation") != {
+                    "status": "failed",
+                    "failure_code": exc.code,
+                    "reason": str(exc),
+                }:
+                    raise RunnerError(
+                        "secondary validation failure no longer matches raw evidence"
+                    ) from exc
+                if secondary.get("failure_code") != exc.code or secondary.get(
+                    "reason"
+                ) != f"{exc.code}: {exc}":
+                    raise RunnerError(
+                        "secondary failure classification changed"
+                    ) from exc
+                return
+            if status != "succeeded" or latest.get("status") != "succeeded":
+                raise RunnerError("secondary status contradicts valid raw evidence")
+            expected_fields = {
+                "candidate_count": outcome.candidate_count,
+                "candidates": list(outcome.candidates),
+                "root_current_value": outcome.root_current_value,
+                "root_baseline_value": outcome.root_baseline_value,
+                "root_delta": outcome.root_delta,
+                "root_current_numerator": outcome.root_current_numerator,
+                "root_current_denominator": outcome.root_current_denominator,
+                "root_baseline_numerator": outcome.root_baseline_numerator,
+                "root_baseline_denominator": outcome.root_baseline_denominator,
+                "family_adverse_impact_bp": outcome.family_adverse_impact_bp,
+                "warning_codes": list(outcome.warning_codes),
+                "failure_code": None,
+                "reason": None,
+            }
+            if any(
+                canonical_sha256(secondary.get(field))
+                != canonical_sha256(expected)
+                for field, expected in expected_fields.items()
+            ):
+                raise RunnerError(
+                    "secondary result no longer matches its raw evidence"
+                )
+            return
+
+        if latest.get("status") != "error" or status != "failed":
+            raise RunnerError("terminal secondary query error state is invalid")
+        raw_error = latest.get("error")
+        repair_suffix = (
+            " after two evidence-based repairs"
+            if isinstance(raw_error, dict)
+            and raw_error.get("class") == "semantic_analysis"
+            and latest["attempt_no"] == 2
+            else ""
+        )
+        expected_reason = (
+            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
+            f"{raw_error['message']}"
+            if isinstance(raw_error, dict)
+            and all(key in raw_error for key in ("class", "code", "message"))
+            else None
+        )
+        if (
+            not isinstance(raw_error, dict)
+            or secondary.get("failure_code") != self._query_failure_code(raw_error)
+            or secondary.get("reason") != expected_reason
+            or latest.get("validation")
+            != {
+                "status": "failed",
+                "failure_code": self._query_failure_code(raw_error),
+                "reason": expected_reason,
+            }
+        ):
+            raise RunnerError("secondary query failure classification changed")
 
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)
@@ -1148,7 +1870,9 @@ class AttributionRunner:
 
     def _mark_queue_complete(self, state: dict[str, Any]) -> None:
         state["status"] = RunStatus.QUEUE_COMPLETE.value
-        state["ready_for_final_validation"] = True
+        state["ready_for_final_validation"] = (
+            state.get("analysis_profile", "primary_v1") == "primary_v1"
+        )
 
     def _require_submitted_hash(
         self, event: dict[str, Any], attempt: dict[str, Any]
@@ -1213,6 +1937,15 @@ class AttributionRunner:
                         f"query_id is already bound to step {step['id']}; "
                         f"cannot bind it to {step_id}"
                     )
+        post_primary = state.get("post_primary")
+        if isinstance(post_primary, dict):
+            for post_step in post_primary.get("steps", []):
+                for attempt in post_step.get("attempts", []):
+                    if attempt.get("query_id") == query_id:
+                        raise RunnerError(
+                            f"query_id is already bound to post-primary step "
+                            f"{post_step['id']}; cannot bind it to {step_id}"
+                        )
 
     def _required_sha256(self, value: dict[str, Any], key: str) -> str:
         result = self._required_non_empty_string(value, key)
