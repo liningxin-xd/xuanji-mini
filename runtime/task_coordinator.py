@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .alert_normalizer import AlertNormalizer
-from .contracts import canonical_sha256, sha256_bytes
+from .contracts import RepositoryContracts, canonical_sha256, sha256_bytes
 from .root_preflight import RootPreflight, RootPreflightError
 from .route_resolver import RouteResolver
 from .task_assembler import TaskAssembler, writer_pack_size
@@ -79,6 +79,14 @@ class RegisteredAlertCoordinator:
         self.resolver = RouteResolver()
         self.assembler = TaskAssembler()
         self.repository_root = Path(repository_root).resolve()
+        self.contracts = RepositoryContracts(self.repository_root)
+        if (
+            self.root_preflight.contracts.definition_bundle_sha256
+            != self.contracts.definition_bundle_sha256
+        ):
+            raise TaskCoordinatorError(
+                "root preflight uses a different metric definition bundle"
+            )
 
     def run_task(self, *, task_id: str, dqc_payload: Any) -> dict[str, Any]:
         self._validate_task_id(task_id)
@@ -407,6 +415,7 @@ class RegisteredAlertCoordinator:
             "schema_version": 1,
             "task_id": task_id,
             "payload_sha256": payload_sha256,
+            "definition_bundle_sha256": self.contracts.definition_bundle_sha256,
             "status": "executing",
             "overall_status": None,
             "current_investigation_index": 0,
@@ -477,6 +486,11 @@ class RegisteredAlertCoordinator:
             raise TaskCoordinatorError("task state integrity check failed")
         if state.get("task_id") != task_id:
             raise TaskCoordinatorError("task state identity changed")
+        if (
+            state.get("definition_bundle_sha256")
+            != self.contracts.definition_bundle_sha256
+        ):
+            raise TaskCoordinatorError("task metric definition bundle changed")
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:

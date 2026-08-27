@@ -18,8 +18,9 @@ State is stored atomically with mode `0600` at:
 ```
 
 The state contains the normalized alert, ordered investigations, current
-investigation index, immutable run identities, writer patch hashes, and an
-integrity hash. It remains private to the Host.
+investigation index, immutable run identities, compiled metric-definition
+bundle hash, writer patch hashes, and an integrity hash. It remains private to
+the Host. Resume fails closed if the current definition bundle differs.
 
 ## Investigation Formation
 

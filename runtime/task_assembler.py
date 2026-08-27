@@ -198,6 +198,7 @@ class TaskAssembler:
             "status": "valid",
             "task_id": state["task_id"],
             "payload_sha256": state["payload_sha256"],
+            "definition_bundle_sha256": state["definition_bundle_sha256"],
             "overall_status": overall_status,
             "investigation_count": len(results),
             "successful_investigation_count": success_count,
