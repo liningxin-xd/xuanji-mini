@@ -30,8 +30,9 @@ independent `host_service` and follow [Native Primary Host Deployment](native-ho
 Its server-side MCP client calls the existing read-only DView endpoint below the
 UI boundary. Calling DView from a model-visible terminal remains invalid.
 
-Task resume requires the identical payload hash and a valid task-state integrity
-hash. Run resume additionally requires current schema-v4 state, identical
+Task resume requires the identical payload hash, compiled metric-definition
+bundle, and a valid task-state integrity hash. Run resume additionally requires
+current schema-v4 state, identical
 immutable identity and contract hashes, and the same canonical root metric. A
 changed task payload, writer patch, or run identity is rejected.
 
@@ -47,6 +48,12 @@ recursive redaction of that task result plus receipt hashes; it is not the
 artifact a pipeline writer should persist. Both sinks are idempotent. An
 identical finalize retry is accepted, while a conflicting writer patch or sink
 payload is rejected.
+
+Unexpected Runtime exceptions cross only the outer MCP error boundary. That
+boundary writes a private compact operational record containing task ID, phase,
+and exception type, then returns a generic ToolError without exception text.
+Only `RootPreflightError` and already classified DView evidence may become an
+analytical blocked status.
 
 Repository tests prove exact three-tool exposure, serial task behavior, public
 redaction, fixed queues, and sink conflict rejection. Production acceptance

@@ -22,9 +22,10 @@ class WritingPolicyContractTest(unittest.TestCase):
             "[Runtime 文案指南](references/runtime-writing-guide.md)",
             self.skill,
         )
-        self.assertIn("结构化事实冻结后", self.skill)
-        self.assertIn("不执行独立二次润色", self.skill)
-        self.assertIn("不改变 Runtime 已确定的状态", self.skill)
+        self.assertNotIn("结构化事实冻结后", self.skill)
+        self.assertIn("结构化事实冻结后", self.runtime_guide)
+        self.assertIn("不执行独立二次润色", self.runtime_guide)
+        self.assertIn("不改变 Runtime 已确定的状态", self.runtime_guide)
         self.assertIn("只返回一个 JSON object", self.runtime_guide)
 
     def test_playbook_keeps_semantic_boundaries_without_copy_templates(self):

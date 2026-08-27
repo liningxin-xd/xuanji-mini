@@ -64,7 +64,7 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertEqual("ok", result["status"])
         self.assertEqual(16, result["verified_count"])
 
-    def test_skill_requires_the_runtime_runner_protocol(self):
+    def test_production_skill_excludes_the_development_runner_protocol(self):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         for command in (
             "python3 -m runtime.runner init",
@@ -75,13 +75,12 @@ class RuntimeCliTest(unittest.TestCase):
             "python3 -m runtime.runner assemble-final",
             "python3 -m runtime.runner validate-final",
         ):
-            self.assertIn(command, skill)
-        self.assertIn("不得直接修改 `.runs/*/state.json`", skill)
-        self.assertIn("HostDViewAdapter.execute_until_blocked(run_id)", skill)
-        self.assertIn("ProductionDViewExecutor", skill)
-        self.assertIn("`query_returned` / `query_error`", skill)
-        self.assertIn("`self_reported` 不具有", skill)
-        self.assertIn("不得用于生产调查", skill)
+            self.assertNotIn(command, skill)
+        self.assertNotIn("HostDViewAdapter.execute_until_blocked(run_id)", skill)
+        self.assertNotIn("ProductionDViewExecutor", skill)
+        self.assertNotIn("`query_returned` / `query_error`", skill)
+        for tool in ("xuanji_run_task", "xuanji_submit_repair", "xuanji_finalize"):
+            self.assertIn(tool, skill)
         self.assertNotIn("实际提交 SQL 与票据一致性仍依赖调用方", skill)
 
     def test_cli_round_trip_reaches_export_and_final_validation(self):

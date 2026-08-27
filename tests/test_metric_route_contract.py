@@ -1,5 +1,5 @@
 import hashlib
-import os
+import json
 import re
 import unittest
 from pathlib import Path
@@ -8,6 +8,8 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - exercised only in minimal environments
     yaml = None
+
+from runtime.contracts import RepositoryContracts, canonical_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,36 +130,30 @@ class MetricRouteContractTest(unittest.TestCase):
         )
         self.assertEqual([], missing)
 
-    def test_canonical_metrics_exist_in_data_analysis_knowledge_base(self):
-        skill_root_value = os.environ.get("TAPTAP_DATA_ANALYSIS_SKILL_ROOT")
-        if not skill_root_value:
-            self.skipTest("TAPTAP_DATA_ANALYSIS_SKILL_ROOT is not configured")
-        if yaml is None:
-            self.skipTest("PyYAML is not installed")
-
-        skill_root = Path(skill_root_value)
-        manifest = yaml.safe_load(
-            (skill_root / "knowledge-base" / "manifest.yaml").read_text(encoding="utf-8")
+    def test_compiled_metric_definitions_cover_routes_and_drive_direction(self):
+        lock = json.loads(
+            (ROOT / "contracts" / "metric-definitions.lock.json").read_text(
+                encoding="utf-8"
+            )
         )
-        store_domain = next(
-            domain for domain in manifest["domains"] if domain["name"] == "商店（移动端）"
-        )
-        metric_index_path = skill_root / "knowledge-base" / store_domain["metric_index"]
-        metric_index = yaml.safe_load(metric_index_path.read_text(encoding="utf-8"))
+        unsigned = dict(lock)
+        bundle_hash = unsigned.pop("bundle_sha256")
+        self.assertEqual(bundle_hash, canonical_sha256(unsigned))
 
         canonical_metrics = {row["canonical_metric"] for row in _route_rows()}
-        for canonical_metric in canonical_metrics:
-            matches = [
-                entry for entry in metric_index if canonical_metric in entry["aliases"]
-            ]
-            self.assertEqual(1, len(matches), canonical_metric)
-
-            metric_definition = yaml.safe_load(
-                (metric_index_path.parent / matches[0]["file"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(canonical_metric, metric_definition["metric"])
-            for required_field in ("业务口径", "技术口径", "sql"):
-                self.assertTrue(metric_definition[required_field], canonical_metric)
+        self.assertEqual(
+            canonical_metrics,
+            {item["metric"] for item in lock["metrics"]},
+        )
+        contracts = RepositoryContracts(ROOT)
+        for item in lock["metrics"]:
+            with self.subTest(metric=item["metric"]):
+                self.assertEqual(
+                    item["direction"],
+                    contracts.metric_result_contract(item["metric"])["direction"],
+                )
+                self.assertRegex(item["source_definition_sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual({"app", "sandbox"}, set(item["observation_window"]))
 
     def test_markdown_routes_humans_to_the_machine_contract(self):
         routing = ROUTING_PATH.read_text(encoding="utf-8")

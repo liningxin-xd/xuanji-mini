@@ -159,14 +159,19 @@ class RepositoryContracts:
         self.execution_plans_path = self.contract_root / "execution-plans.yaml"
         self.query_registry_path = self.contract_root / "query-registry.yaml"
         self.asset_lock_path = self.contract_root / "query-assets.lock.json"
+        self.metric_definitions_path = (
+            self.contract_root / "metric-definitions.lock.json"
+        )
         self.result_schemas_path = self.contract_root / "result-schemas.yaml"
 
         self._plans_raw = _load_yaml_mapping(self.execution_plans_path)
         self._registry = _load_yaml_mapping(self.query_registry_path)
         self._asset_lock = _load_json_mapping(self.asset_lock_path)
+        self._metric_definitions = _load_json_mapping(self.metric_definitions_path)
         self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
         self._plans = self._validate_plans()
         self._asset_hashes = self._load_asset_hashes()
+        self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
         self._validate_result_schemas()
 
@@ -199,6 +204,10 @@ class RepositoryContracts:
         return sha256_bytes(self.result_schemas_path.read_bytes())
 
     @property
+    def definition_bundle_sha256(self) -> str:
+        return self._metric_definitions["bundle_sha256"]
+
+    @property
     def result_defaults(self) -> dict[str, Any]:
         return deepcopy(self._result_schemas["defaults"])
 
@@ -206,7 +215,14 @@ class RepositoryContracts:
         contract = self._result_schemas["metrics"].get(metric)
         if not isinstance(contract, dict):
             raise ContractError(f"result contract is missing metric: {metric}")
-        return deepcopy(contract)
+        definition = self.metric_definition(metric)
+        return {**deepcopy(contract), "direction": definition["direction"]}
+
+    def metric_definition(self, metric: str) -> dict[str, Any]:
+        definition = self._metric_definition_by_name.get(metric)
+        if not isinstance(definition, dict):
+            raise ContractError(f"compiled metric definition is missing: {metric}")
+        return deepcopy(definition)
 
     def result_schema(self, schema_id: str) -> dict[str, Any]:
         schema = self._result_schemas["schemas"].get(schema_id)
@@ -467,6 +483,75 @@ class RepositoryContracts:
             raise ContractError("query asset lock does not cover the V1 asset set")
         return result
 
+    def _validate_metric_definitions(self) -> dict[str, dict[str, Any]]:
+        bundle = self._metric_definitions
+        if bundle.get("schema_version") != 1:
+            raise ContractError("metric definition lock schema version must be 1")
+        expected_hash = bundle.get("bundle_sha256")
+        unsigned = dict(bundle)
+        unsigned.pop("bundle_sha256", None)
+        if not isinstance(expected_hash, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_hash
+        ):
+            raise ContractError("metric definition bundle hash is invalid")
+        if expected_hash != canonical_sha256(unsigned):
+            raise ContractError("metric definition bundle integrity check failed")
+        if set(bundle) != {"schema_version", "metrics", "bundle_sha256"}:
+            raise ContractError("metric definition bundle fields are invalid")
+
+        expected_metrics = {
+            metric for plan in self._plans.values() for metric in plan.allowed_metrics
+        }
+        raw_metrics = bundle.get("metrics")
+        if not isinstance(raw_metrics, list) or len(raw_metrics) != len(
+            expected_metrics
+        ):
+            raise ContractError("metric definition bundle coverage is invalid")
+        result: dict[str, dict[str, Any]] = {}
+        for item in raw_metrics:
+            if not isinstance(item, dict) or set(item) != {
+                "metric",
+                "direction",
+                "observation_window",
+                "source_definition_path",
+                "source_definition_sha256",
+            }:
+                raise ContractError("compiled metric definition fields are invalid")
+            metric = item.get("metric")
+            if not isinstance(metric, str) or metric in result:
+                raise ContractError("compiled metric definition identity is invalid")
+            if item.get("direction") not in {
+                "higher_is_better",
+                "lower_is_better",
+            }:
+                raise ContractError(f"compiled metric direction is invalid: {metric}")
+            windows = item.get("observation_window")
+            if not isinstance(windows, dict) or set(windows) != {"app", "sandbox"}:
+                raise ContractError(
+                    f"compiled metric observation windows are invalid: {metric}"
+                )
+            if not all(
+                isinstance(value, str) and value.strip() for value in windows.values()
+            ):
+                raise ContractError(
+                    f"compiled metric observation window is empty: {metric}"
+                )
+            source_path = item.get("source_definition_path")
+            source_hash = item.get("source_definition_sha256")
+            if (
+                not isinstance(source_path, str)
+                or not source_path.startswith("knowledge-base/")
+                or not isinstance(source_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
+            ):
+                raise ContractError(
+                    f"compiled metric source identity is invalid: {metric}"
+                )
+            result[metric] = deepcopy(item)
+        if set(result) != expected_metrics:
+            raise ContractError("metric definition bundle does not cover V1 metrics")
+        return result
+
     def _validate_registry(self) -> None:
         registry = self._registry
         if registry.get("version") != 1:
@@ -585,10 +670,9 @@ class RepositoryContracts:
         }:
             raise ContractError("result schemas do not cover every query binding kind")
         for name, config in metrics.items():
-            if config.get("direction") not in {
-                "higher_is_better",
-                "lower_is_better",
-            } or not isinstance(config.get("numerator_subset"), bool):
+            if set(config) != {"numerator_subset"} or not isinstance(
+                config.get("numerator_subset"), bool
+            ):
                 raise ContractError(f"invalid metric result contract: {name}")
         for schema_id, schema in schemas.items():
             if schema.get("validator") not in {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
@@ -20,6 +22,8 @@ _HOST_ANNOTATIONS = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=True,
 )
+_LOGGER = logging.getLogger(__name__)
+_LOG_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def create_mcp(
@@ -60,7 +64,9 @@ def create_mcp(
             host_runtime.run_task(
                 task_id=task_id,
                 dqc_payload=dqc_payload,
-            )
+            ),
+            phase="run_task",
+            task_id=task_id,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -90,7 +96,9 @@ def create_mcp(
                 repair_reason=repair_reason,
                 error_evidence=error_evidence,
                 repaired_sql=repaired_sql,
-            )
+            ),
+            phase="submit_repair",
+            task_id=task_id,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -109,19 +117,31 @@ def create_mcp(
                 task_id=task_id,
                 investigation_id=investigation_id,
                 writer_patch=writer_patch,
-            )
+            ),
+            phase="finalize",
+            task_id=task_id,
         )
 
     return mcp
 
 
-async def _safe_call(operation: Any) -> dict[str, Any]:
+async def _safe_call(
+    operation: Any,
+    *,
+    phase: str,
+    task_id: str,
+) -> dict[str, Any]:
     try:
         result = await operation
-    # Every internal exception crosses a model-visible boundary here. Expose only
-    # its type; exception text may contain SQL, query IDs, or private paths.
     except Exception as exc:  # noqa: BLE001
-        raise ToolError(f"xuanji Host request failed ({type(exc).__name__})") from None
+        safe_task_id = task_id if _LOG_TASK_ID.fullmatch(task_id) else "invalid"
+        _LOGGER.error(
+            "xuanji operational failure task_id=%s phase=%s exception_type=%s",
+            safe_task_id,
+            phase,
+            type(exc).__name__,
+        )
+        raise ToolError("xuanji Host request failed") from None
     if not isinstance(result, dict):
         raise ToolError("xuanji Host returned an invalid result envelope")
     return result

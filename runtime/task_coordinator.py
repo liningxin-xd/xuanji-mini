@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .alert_normalizer import AlertNormalizer
-from .contracts import canonical_sha256, sha256_bytes
+from .contracts import RepositoryContracts, canonical_sha256, sha256_bytes
 from .root_preflight import RootPreflight, RootPreflightError
 from .route_resolver import RouteResolver
 from .task_assembler import TaskAssembler, writer_pack_size
@@ -27,6 +27,8 @@ _PRIVATE_FIELDS = {
     "rendered_sql_sha256",
     "submitted_sql_sha256",
     "private_queries",
+    "root_snapshot_sha256",
+    "root_snapshot_sha256s",
 }
 
 
@@ -79,6 +81,14 @@ class RegisteredAlertCoordinator:
         self.resolver = RouteResolver()
         self.assembler = TaskAssembler()
         self.repository_root = Path(repository_root).resolve()
+        self.contracts = RepositoryContracts(self.repository_root)
+        if (
+            self.root_preflight.contracts.definition_bundle_sha256
+            != self.contracts.definition_bundle_sha256
+        ):
+            raise TaskCoordinatorError(
+                "root preflight uses a different metric definition bundle"
+            )
 
     def run_task(self, *, task_id: str, dqc_payload: Any) -> dict[str, Any]:
         self._validate_task_id(task_id)
@@ -214,7 +224,11 @@ class RegisteredAlertCoordinator:
                 return self._await_machine_writer(state, investigation)
 
             try:
-                preflight = self.root_preflight.run(investigation)
+                preflight = self.root_preflight.run(
+                    investigation,
+                    snapshot_root=self._task_root(state["task_id"])
+                    / "root-snapshots",
+                )
             except RootPreflightError as exc:
                 route = investigation["route"]
                 investigation["root_preflight"] = {
@@ -228,17 +242,6 @@ class RegisteredAlertCoordinator:
                     investigation["alert_date"], route["analysis_lag_days"]
                 )
                 return self._await_machine_writer(state, investigation)
-            except Exception as exc:  # noqa: BLE001
-                investigation["root_preflight"] = {
-                    "status": "query_failed",
-                    "reason": f"root preflight failed ({type(exc).__name__})",
-                }
-                investigation["result_status"] = "query_failed"
-                investigation["machine_reason"] = investigation["root_preflight"][
-                    "reason"
-                ]
-                investigation["machine_mode"] = "root_precheck_failed"
-                return self._await_machine_writer(state, investigation)
 
             investigation["root_preflight"] = preflight
             investigation["analysis_date"] = preflight["analysis_date"]
@@ -249,23 +252,14 @@ class RegisteredAlertCoordinator:
 
             investigation["machine_mode"] = "full_queue"
             investigation["run_id"] = self._run_id(state, investigation)
-            try:
-                result = self.investigation_host.xuanji_run_investigation(
-                    run_id=investigation["run_id"],
-                    chain=preflight["chain"],
-                    game_type=preflight["game_type"],
-                    metric=preflight["metric"],
-                    alert_date=preflight["alert_date"],
-                    canonical_root_metric=preflight["canonical_root_metric"],
-                )
-            except Exception as exc:  # noqa: BLE001
-                investigation["result_status"] = "query_failed"
-                investigation["machine_reason"] = (
-                    f"full queue execution failed ({type(exc).__name__})"
-                )
-                investigation["machine_mode"] = "full_queue_failed"
-                investigation["failure_mode"] = "root_scope_failed"
-                return self._await_machine_writer(state, investigation)
+            result = self.investigation_host.xuanji_run_investigation(
+                run_id=investigation["run_id"],
+                chain=preflight["chain"],
+                game_type=preflight["game_type"],
+                metric=preflight["metric"],
+                alert_date=preflight["alert_date"],
+                canonical_root_metric=preflight["canonical_root_metric"],
+            )
             return self._record_host_action(state, investigation, result)
 
         analysis, receipt = self.assembler.assemble_task(state)
@@ -407,6 +401,7 @@ class RegisteredAlertCoordinator:
             "schema_version": 1,
             "task_id": task_id,
             "payload_sha256": payload_sha256,
+            "definition_bundle_sha256": self.contracts.definition_bundle_sha256,
             "status": "executing",
             "overall_status": None,
             "current_investigation_index": 0,
@@ -477,6 +472,11 @@ class RegisteredAlertCoordinator:
             raise TaskCoordinatorError("task state integrity check failed")
         if state.get("task_id") != task_id:
             raise TaskCoordinatorError("task state identity changed")
+        if (
+            state.get("definition_bundle_sha256")
+            != self.contracts.definition_bundle_sha256
+        ):
+            raise TaskCoordinatorError("task metric definition bundle changed")
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:

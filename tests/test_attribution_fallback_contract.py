@@ -37,7 +37,8 @@ class AttributionFallbackContractTest(unittest.TestCase):
         cls.playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
 
     def test_family_local_failure_does_not_end_the_investigation(self):
-        self.assertIn("单个家族失败不得截断或重排队列", self.skill)
+        self.assertNotIn("单个家族失败不得截断或重排队列", self.skill)
+        self.assertIn("Host 是路由、定义和调查选择的唯一控制者", self.skill)
         self.assertIn("单个步骤失败不能缩短数组", self.playbook)
         self.assertIn("不能提前返回 `unsupported_drilldown`", self.playbook)
         self.assertIn("继续下一个已登记维度家族", self.playbook)
@@ -56,10 +57,10 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertIn("逐个尝试完上述五个家族", self.playbook)
 
     def test_registered_attribution_emits_machine_checkable_full_queue(self):
-        self.assertIn("attribution_execution", self.skill)
+        self.assertNotIn("attribution_execution", self.skill)
         self.assertIn("`attribution_execution.execution_mode`", self.playbook)
         self.assertIn("`trusted_host_adapter` 或 `self_reported_development`", self.playbook)
-        self.assertIn("步骤终态、候选和 warning 全部由 Runtime 生成", self.skill)
+        self.assertNotIn("步骤终态、候选和 warning 全部由 Runtime 生成", self.skill)
         self.assertIn("## 归因执行清单", self.playbook)
         self.assertIn("writer 将拒绝缺少步骤、顺序不符", self.playbook)
         self.assertIn(

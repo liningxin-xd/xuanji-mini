@@ -18,8 +18,9 @@ State is stored atomically with mode `0600` at:
 ```
 
 The state contains the normalized alert, ordered investigations, current
-investigation index, immutable run identities, writer patch hashes, and an
-integrity hash. It remains private to the Host.
+investigation index, immutable run identities, compiled metric-definition
+bundle hash, writer patch hashes, and an integrity hash. It remains private to
+the Host. Resume fails closed if the current definition bundle differs.
 
 ## Investigation Formation
 
@@ -46,6 +47,20 @@ absolute-threshold anomaly with no 5bp of new adverse change returns a compact
 writer pack without starting attribution. Otherwise it freezes
 `canonical_root_metric` and creates the internal full-queue run. Candidate
 families must rehook that frozen root.
+
+The first investigation for one task-level root scope executes all eight days
+and atomically stores a private snapshot at:
+
+```text
+/var/lib/xuanji/tasks/<task-id>/root-snapshots/<scope-hash>.json
+```
+
+The scope hash binds the locked root QuerySpec hash, object table, game type,
+and alert date. Later investigations in the same scope revalidate and reuse the
+complete snapshot. App and sandbox scopes remain separate. Partial snapshots
+are never stored. Snapshot integrity, per-day result hashes, and all eight
+result contracts are checked before reuse; corruption is an operational error,
+not a `query_failed` investigation.
 
 ## Three-Tool Protocol
 
@@ -89,7 +104,9 @@ The complete task analysis and receipt are written atomically to:
 
 The model receives a recursively redacted preview and compact receipt hashes.
 SQL, raw rows, query IDs, raw-result hashes, and private receipts stay in Host
-state and machine-only sinks.
+state and machine-only sinks. The authoritative task receipt binds the compiled
+definition bundle hash and deduplicated root snapshot hashes; those fields are
+not added to the model-visible response.
 
 ## Resume
 
@@ -97,3 +114,9 @@ Calling `xuanji_run_task` again with the identical payload returns the pending
 repair/writer action or the completed preview. Identical finalize retries are
 idempotent. A changed payload, investigation identity, run identity, writer
 patch, state hash, or sink payload is rejected rather than overwritten.
+
+Classified DView failures continue through the typed analytical states. An
+unexpected Python exception, state corruption, or internal Host contract error
+does not create an analytical result. The outer MCP boundary records only the
+task ID, phase, and exception type, returns a generic ToolError, and leaves the
+task available for an identical retry.

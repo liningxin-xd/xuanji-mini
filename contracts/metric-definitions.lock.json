@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "metrics": [
+    {
+      "metric": "下载完成率",
+      "direction": "higher_is_better",
+      "observation_window": {
+        "app": "最近一天",
+        "sandbox": "最近一天"
+      },
+      "source_definition_path": "knowledge-base/metrics/商店（移动端）/下载完成率.yaml",
+      "source_definition_sha256": "6eb37c24c1e998931c30b6a7a020335bca09daa656da80775daa791f8e6b50ca"
+    },
+    {
+      "metric": "下载失败率",
+      "direction": "lower_is_better",
+      "observation_window": {
+        "app": "最近一天",
+        "sandbox": "最近一天"
+      },
+      "source_definition_path": "knowledge-base/metrics/商店（移动端）/下载失败率.yaml",
+      "source_definition_sha256": "85a1c2b0141ee10b1edd55e3303f200b1f5f38253da5af00b9ccb62899ab0469"
+    },
+    {
+      "metric": "下载失败次数比率",
+      "direction": "lower_is_better",
+      "observation_window": {
+        "app": "最近一天",
+        "sandbox": "最近一天"
+      },
+      "source_definition_path": "knowledge-base/metrics/商店（移动端）/下载失败次数比率.yaml",
+      "source_definition_sha256": "a8bdfc8b2d0fa82a084dfcbbd883a95a53ea9a5de2744b84f8b699abc3171f5f"
+    },
+    {
+      "metric": "下载人为停止率",
+      "direction": "lower_is_better",
+      "observation_window": {
+        "app": "最近一天",
+        "sandbox": "最近一天"
+      },
+      "source_definition_path": "knowledge-base/metrics/商店（移动端）/下载人为停止率.yaml",
+      "source_definition_sha256": "73d645504a0b8574553685484bdc12d76cab495054c3ba6e806f72c9dc9024e5"
+    },
+    {
+      "metric": "下载安装完成率",
+      "direction": "higher_is_better",
+      "observation_window": {
+        "app": "未来3天",
+        "sandbox": "最近一天"
+      },
+      "source_definition_path": "knowledge-base/metrics/商店（移动端）/下载安装完成率.yaml",
+      "source_definition_sha256": "91114cf214f36ded5afaf78ea4bc604fec83d7237ef4434d179854d4be5fa76e"
+    }
+  ],
+  "bundle_sha256": "692961029c42c102bef6ba5cc7145a061a0bc2bb74a0e07a5edd7262e6d71e95"
+}

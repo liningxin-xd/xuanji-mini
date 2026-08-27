@@ -15,10 +15,14 @@ class ContextBudgetContractTest(unittest.TestCase):
         guide = (ROOT / "references/runtime-writing-guide.md").read_text(
             encoding="utf-8"
         )
-        self.assertLessEqual(len(skill), 8 * 1024)
-        self.assertTrue(80 <= len(skill.decode("utf-8").splitlines()) <= 120)
+        self.assertLessEqual(len(skill), 4 * 1024)
+        self.assertTrue(50 <= len(skill.decode("utf-8").splitlines()) <= 70)
         self.assertTrue(30 <= len(guide.splitlines()) <= 60)
-        self.assertIn("`primary_v1` 正常路径不得读取完整", skill.decode("utf-8"))
+        decoded = skill.decode("utf-8")
+        self.assertIn("Host 是路由、定义和调查选择的唯一控制者", decoded)
+        self.assertNotIn("完整读取 [DQC 告警路由表]", decoded)
+        self.assertNotIn("通过 `taptap-data-analysis` 的 manifest", decoded)
+        self.assertIn("正常路径禁止模型读取", decoded)
 
     def test_writer_pack_stays_compact_and_excludes_internal_evidence(self):
         import tempfile
