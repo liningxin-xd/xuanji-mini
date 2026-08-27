@@ -10,10 +10,14 @@ from typing import Any
 
 import yaml
 
+from .contracts import ContractError, RepositoryContracts
+
 
 ROOT = Path(__file__).resolve().parents[1]
 _ROUTE_FIELDS = {
-    "normalized_rule_name",
+    "route_id",
+    "metric_hint",
+    "observed_rule_names",
     "object_table",
     "chain",
     "game_type",
@@ -42,7 +46,9 @@ class RouteContractError(ValueError):
 
 @dataclass(frozen=True)
 class DqcRoute:
-    normalized_rule_name: str
+    route_id: str
+    metric_hint: str
+    observed_rule_names: tuple[str, ...]
     object_table: str
     chain: str
     game_type: str
@@ -64,6 +70,40 @@ def normalize_rule_name(value: str) -> str:
     return "".join(normalized.split())
 
 
+def extract_metric_hint(rule_name: str) -> str | None:
+    normalized = normalize_rule_name(rule_name)
+    opening = normalized.find("【")
+    closing = normalized.find("】", opening + 1)
+    if opening < 0 or closing <= opening + 1:
+        return None
+    return normalized[opening + 1 : closing]
+
+
+def infer_rule_kind(rule_name: str) -> str | None:
+    normalized = normalize_rule_name(rule_name)
+    closing = normalized.find("】")
+    if closing < 0:
+        return None
+    suffix = normalized[closing + 1 :]
+    if "连续3周下降" in suffix:
+        return "trend_3w"
+    if "对比过去7天均值" in suffix:
+        return "relative_7d"
+    if "最近1天" in suffix:
+        return "absolute_1d"
+    return None
+
+
+def rule_binding_identity(rule_name: str) -> tuple[str, str] | None:
+    """Extract the configured metric hint and generic DQC rule kind."""
+
+    metric_hint = extract_metric_hint(rule_name)
+    rule_kind = infer_rule_kind(rule_name)
+    if metric_hint is None or rule_kind is None:
+        return None
+    return metric_hint, rule_kind
+
+
 class DqcRouteRegistry:
     def __init__(self, root: Path | str = ROOT):
         self.root = Path(root).resolve()
@@ -72,8 +112,8 @@ class DqcRouteRegistry:
             raw = yaml.safe_load(self.path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError) as exc:
             raise RouteContractError(f"cannot load DQC route contract: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("version") != 1:
-            raise RouteContractError("DQC route contract version must be 1")
+        if not isinstance(raw, dict) or raw.get("version") != 2:
+            raise RouteContractError("DQC route contract version must be 2")
         object_tables = raw.get("object_tables")
         routes = raw.get("routes")
         if (
@@ -81,23 +121,50 @@ class DqcRouteRegistry:
             or not object_tables
             or not all(isinstance(item, str) and item for item in object_tables)
             or not isinstance(routes, list)
-            or len(routes) != 16
+            or not routes
         ):
-            raise RouteContractError("DQC route contract must register 16 routes")
+            raise RouteContractError("DQC route contract must register routes")
         self.object_tables = tuple(object_tables)
         self.routes = tuple(self._parse_route(item) for item in routes)
-        self._by_identity: dict[tuple[str, str], DqcRoute] = {}
+        self._by_identity: dict[tuple[str, str, str], DqcRoute] = {}
+        self._by_observed_name: dict[tuple[str, str], DqcRoute] = {}
+        route_ids: set[str] = set()
         for route in self.routes:
-            identity = (route.object_table, route.normalized_rule_name)
+            if route.route_id in route_ids:
+                raise RouteContractError(f"duplicate DQC route id: {route.route_id}")
+            route_ids.add(route.route_id)
+            identity = (route.object_table, route.metric_hint, route.rule_kind)
             if identity in self._by_identity:
                 raise RouteContractError(f"duplicate DQC route identity: {identity}")
             self._by_identity[identity] = route
+            for rule_name in route.observed_rule_names:
+                observed_identity = (route.object_table, rule_name)
+                if observed_identity in self._by_observed_name:
+                    raise RouteContractError(
+                        f"duplicate observed DQC rule name: {observed_identity}"
+                    )
+                self._by_observed_name[observed_identity] = route
         self._validate_families()
+        self._validate_knowledge_base_bindings()
 
     def resolve(self, table: str | None, rule_name: str | None) -> DqcRoute | None:
         if not isinstance(table, str) or not isinstance(rule_name, str):
             return None
-        return self._by_identity.get((table, normalize_rule_name(rule_name)))
+        normalized_rule_name = normalize_rule_name(rule_name)
+        observed = self._by_observed_name.get((table, normalized_rule_name))
+        if observed is not None:
+            return observed
+        binding = rule_binding_identity(normalized_rule_name)
+        if binding is None:
+            return None
+        metric_hint, rule_kind = binding
+        return self._by_identity.get((table, metric_hint, rule_kind))
+
+    @staticmethod
+    def is_observed_rule_name(route: DqcRoute, rule_name: Any) -> bool:
+        return isinstance(rule_name, str) and normalize_rule_name(rule_name) in (
+            route.observed_rule_names
+        )
 
     def absolute_route_for(self, route: DqcRoute) -> DqcRoute:
         matches = [
@@ -116,13 +183,36 @@ class DqcRouteRegistry:
     def _parse_route(self, raw: Any) -> DqcRoute:
         if not isinstance(raw, dict) or set(raw) != _ROUTE_FIELDS:
             raise RouteContractError("each DQC route must contain the exact fields")
-        for field in _ROUTE_FIELDS - {"alert_threshold", "analysis_lag_days"}:
+        for field in _ROUTE_FIELDS - {
+            "alert_threshold",
+            "analysis_lag_days",
+            "observed_rule_names",
+        }:
             if not isinstance(raw[field], str) or not raw[field]:
                 raise RouteContractError(f"DQC route {field} must be non-empty")
-        if normalize_rule_name(raw["normalized_rule_name"]) != raw[
-            "normalized_rule_name"
-        ]:
-            raise RouteContractError("normalized_rule_name is not canonical")
+        if normalize_rule_name(raw["metric_hint"]) != raw["metric_hint"]:
+            raise RouteContractError("DQC route metric_hint is not canonical")
+        observed_rule_names = raw["observed_rule_names"]
+        if (
+            not isinstance(observed_rule_names, list)
+            or not observed_rule_names
+            or not all(isinstance(item, str) and item for item in observed_rule_names)
+        ):
+            raise RouteContractError("DQC route observed_rule_names must be non-empty")
+        normalized_observed_names = tuple(
+            normalize_rule_name(item) for item in observed_rule_names
+        )
+        if len(set(normalized_observed_names)) != len(normalized_observed_names):
+            raise RouteContractError("DQC route observed_rule_names contain duplicates")
+        for observed_name in normalized_observed_names:
+            observed_metric_hint = extract_metric_hint(observed_name)
+            if (
+                observed_metric_hint is not None
+                and observed_metric_hint != raw["metric_hint"]
+            ):
+                raise RouteContractError(
+                    "observed DQC rule name does not match its metric binding"
+                )
         if raw["object_table"] not in self.object_tables:
             raise RouteContractError("DQC route uses an unregistered object table")
         if raw["chain"] not in {"download", "install"}:
@@ -145,7 +235,12 @@ class DqcRouteRegistry:
             raise RouteContractError("DQC route analysis_lag_days is invalid")
         if (raw["chain"] == "install") != (lag == 2):
             raise RouteContractError("DQC route lag does not match its chain")
-        return DqcRoute(**raw)
+        return DqcRoute(
+            **{
+                **raw,
+                "observed_rule_names": normalized_observed_names,
+            }
+        )
 
     def _validate_families(self) -> None:
         for route in self.routes:
@@ -156,6 +251,21 @@ class DqcRouteRegistry:
                 or route.analysis_lag_days != absolute.analysis_lag_days
             ):
                 raise RouteContractError("DQC route family root fields are inconsistent")
+
+    def _validate_knowledge_base_bindings(self) -> None:
+        try:
+            contracts = RepositoryContracts(self.root)
+            for route in self.routes:
+                contracts.metric_definition(route.canonical_metric)
+                contracts.select_plan(
+                    route.chain,
+                    route.game_type,
+                    route.canonical_metric,
+                )
+        except ContractError as exc:
+            raise RouteContractError(
+                f"DQC route knowledge-base binding is invalid: {exc}"
+            ) from exc
 
 
 class RouteResolver:
@@ -245,7 +355,10 @@ class RouteResolver:
     ) -> dict[str, Any]:
         return {
             "status": "insufficient_definition",
-            "reason": "DQC rule does not exactly match the registered route contract",
+            "reason": (
+                "DQC table, metric hint, and rule kind do not match a registered "
+                "knowledge-base binding"
+            ),
             "rule_indexes": [rule.get("rule_index")],
             "project": project,
             "table": table,
@@ -271,9 +384,16 @@ class RouteResolver:
     @staticmethod
     def _profile_warnings(rule: dict[str, Any], route: DqcRoute) -> list[str]:
         warnings = []
+        if not DqcRouteRegistry.is_observed_rule_name(
+            route, rule.get("rule_name")
+        ):
+            warnings.append("route_rule_name_profile_mismatch")
         operator = rule.get("operator")
         if operator is not None and operator != _PASS_OPERATORS[route.alert_operator]:
             warnings.append("route_operator_profile_mismatch")
+        monitor_field = rule.get("monitor_field")
+        if monitor_field is not None and monitor_field != route.monitor_field:
+            warnings.append("route_monitor_field_profile_mismatch")
         threshold = rule.get("threshold")
         if threshold is not None and (
             isinstance(threshold, bool)

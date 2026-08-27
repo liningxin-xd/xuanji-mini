@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from .alert_normalizer import AlertNormalizer
 from .contracts import RepositoryContracts, canonical_sha256, sha256_bytes
 from .root_preflight import RootPreflight, RootPreflightError
-from .route_resolver import RouteResolver
+from .route_resolver import DqcRouteRegistry, RouteResolver
 from .task_assembler import TaskAssembler, writer_pack_size
 
 
@@ -79,11 +79,11 @@ class RegisteredAlertCoordinator:
         self.task_result_sink = task_result_sink
         self.task_result_store = task_result_store
         self.tasks_root = Path(tasks_root).resolve()
-        self.normalizer = AlertNormalizer()
-        self.resolver = RouteResolver()
-        self.assembler = TaskAssembler()
         self.repository_root = Path(repository_root).resolve()
         self.contracts = RepositoryContracts(self.repository_root)
+        self.normalizer = AlertNormalizer()
+        self.resolver = RouteResolver(DqcRouteRegistry(self.repository_root))
+        self.assembler = TaskAssembler()
         if (
             self.root_preflight.contracts.definition_bundle_sha256
             != self.contracts.definition_bundle_sha256
