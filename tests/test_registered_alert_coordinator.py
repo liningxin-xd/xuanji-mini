@@ -311,6 +311,8 @@ class AlertRouteAndPreflightTest(unittest.TestCase):
         self.assertEqual("full_queue", result["mode"])
         self.assertEqual("2026-08-24", result["analysis_date"])
         self.assertEqual(8, len(executor.calls))
+        self.assertEqual(8, result["root_query_count"])
+        self.assertFalse(result["root_snapshot_reused"])
         self.assertEqual(0.74, result["canonical_root_metric"]["current_value"])
         self.assertEqual(0.75, result["canonical_root_metric"]["baseline_value"])
 
@@ -531,6 +533,16 @@ class TaskCoordinatorTest(unittest.TestCase):
         )
         self.assertEqual("write_conclusion", resumed["action"])
         self.assertEqual([], resumed_executor.calls)
+        state = json.loads(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-root-restart"
+                / "state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(state["investigations"][1]["root_preflight"]["root_snapshot_reused"])
+        self.assertEqual(0, state["investigations"][1]["root_preflight"]["root_query_count"])
 
     def test_blocked_investigation_does_not_prevent_the_next_writer_pack(self):
         payload = payload_for(ROUTES[0], ROUTES[3])

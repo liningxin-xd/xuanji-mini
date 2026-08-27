@@ -45,6 +45,25 @@ levels:
 Only a trusted pipeline writer may read that directory. It must never be
 exposed as another model tool or returned by an artifact download endpoint.
 
+The committed Kubernetes source is `deploy/primary-v1/manifests.yaml`. It is a
+fail-closed template: the placeholder image cannot pass the production gate.
+Render it with the exact image digest built from the release commit:
+
+```bash
+python scripts/primary_v1_deployment.py render \
+  --image registry.example/xuanji-mini@sha256:<64-hex-digest> \
+  --host-public-url http://xuanji-primary-v1:8091 \
+  --dview-mcp-url https://dview-mcp-public.tapsvc.com/mcp/query \
+  --output /private/release/xuanji-primary-v1.yaml
+```
+
+Create the three referenced Secret resources separately in the deployment
+system: `xuanji-primary-v1-host-auth`, `xuanji-primary-v1-dview-readonly`, and
+`xuanji-primary-v1-receipt-auth`. Never render or commit their values. The
+Service is `ClusterIP`, and ingress is limited to same-namespace pods labeled
+`xuanji.taptap/client=true`. Apply cluster egress controls separately so the
+Host identity can reach only the approved DView endpoint and DNS.
+
 ## Isolated Shadow Acceptance
 
 CI builds and boots the image with a temporary volume, verifies 401 without the
@@ -65,4 +84,6 @@ Inside the service volume, verify that every investigation retained real query
 IDs and result hashes, each writer pack stayed within 12 KB, rule indexes are
 covered once, task ordering is stable, and the task sink agrees with the run
 sinks and returned receipt hashes. Failed or leaking shadows must not be
-resumed or used as evidence.
+resumed or used as evidence. The exact three-scenario procedure and artifact
+verifier are documented in
+[Primary V1 Production Shadow](primary-v1-production-shadow.md).

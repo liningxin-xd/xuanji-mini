@@ -150,8 +150,8 @@ def _assert_non_root_and_writable(container: str) -> None:
         ["docker", "inspect", "--format={{.Config.User}}", container]
     ).stdout.strip()
     runtime_uid = _run(["docker", "exec", container, "id", "-u"]).stdout.strip()
-    if configured_user in {"", "0", "root"} or runtime_uid == "0":
-        raise RuntimeError("container is running as root")
+    if configured_user != "xuanji" or runtime_uid != "10001":
+        raise RuntimeError("container is not running as the fixed xuanji UID")
     script = (
         "from pathlib import Path; "
         "p=Path('/var/lib/xuanji/runs/container-smoke-marker'); "

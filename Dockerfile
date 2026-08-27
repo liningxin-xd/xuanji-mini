@@ -14,7 +14,7 @@ COPY runtime ./runtime
 COPY contracts ./contracts
 COPY references ./references
 
-RUN useradd --create-home --shell /usr/sbin/nologin xuanji \
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin xuanji \
     && mkdir -p /var/lib/xuanji/runs /var/lib/xuanji/tasks /var/lib/xuanji/results \
     && chown -R xuanji:xuanji /app /var/lib/xuanji
 

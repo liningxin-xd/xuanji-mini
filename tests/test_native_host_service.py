@@ -302,9 +302,9 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private", str(captured.exception))
         self.assertNotIn("RuntimeError", str(captured.exception))
         rendered_logs = "\n".join(logs.output)
-        self.assertIn("task_id=failed-shadow", rendered_logs)
-        self.assertIn("phase=run_task", rendered_logs)
-        self.assertIn("exception_type=RuntimeError", rendered_logs)
+        self.assertIn('"task_id":"failed-shadow"', rendered_logs)
+        self.assertIn('"phase":"run_task"', rendered_logs)
+        self.assertIn('"exception_type":"RuntimeError"', rendered_logs)
         self.assertNotIn("SELECT secret", rendered_logs)
         self.assertNotIn("query_id=private", rendered_logs)
 
@@ -331,7 +331,10 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     }
                 ],
             }
-            result = await runtime.run_task(task_id="native-download", dqc_payload=payload)
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id="native-download", dqc_payload=payload
+                )
             self.assertEqual("write_conclusion", result["action"])
             completed = await runtime.finalize(
                 task_id="native-download",
@@ -354,6 +357,19 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "WITH ",
             ):
                 self.assertNotIn(marker, encoded)
+            rendered_logs = "\n".join(logs.output)
+            for field in (
+                '"task_id":"native-download"',
+                '"phase":"run_task"',
+                '"root_query_count":8',
+                '"attribution_query_count":',
+                '"root_snapshot_reused":false',
+                '"writer_pack_bytes":',
+                '"exception_type":null',
+            ):
+                self.assertIn(field, rendered_logs)
+            for marker in ("SELECT ", "query_id", "raw_result", "private-native"):
+                self.assertNotIn(marker, rendered_logs)
 
 
 class ValidatedResultSinkTest(unittest.TestCase):
