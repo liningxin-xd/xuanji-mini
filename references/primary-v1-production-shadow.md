@@ -3,6 +3,10 @@
 This phase validates the frozen `primary_v1` path. It does not add analysis
 features, parallel queries, cross-task caches, or additional model tools.
 
+For a local macOS run, including the safe token handoff and process-isolation
+pitfalls, read [Local Primary V1 Shadow Runbook](local-primary-v1-shadow-runbook.md)
+before starting the Host.
+
 ## Release Identity
 
 Build from the merged release commit and record both the Git commit and image
