@@ -27,6 +27,8 @@ _PRIVATE_FIELDS = {
     "rendered_sql_sha256",
     "submitted_sql_sha256",
     "private_queries",
+    "root_snapshot_sha256",
+    "root_snapshot_sha256s",
 }
 
 
@@ -222,7 +224,11 @@ class RegisteredAlertCoordinator:
                 return self._await_machine_writer(state, investigation)
 
             try:
-                preflight = self.root_preflight.run(investigation)
+                preflight = self.root_preflight.run(
+                    investigation,
+                    snapshot_root=self._task_root(state["task_id"])
+                    / "root-snapshots",
+                )
             except RootPreflightError as exc:
                 route = investigation["route"]
                 investigation["root_preflight"] = {

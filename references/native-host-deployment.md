@@ -36,6 +36,7 @@ levels:
 
 ```text
 /var/lib/xuanji/tasks/<task-id>/state.json
+/var/lib/xuanji/tasks/<task-id>/root-snapshots/<scope-hash>.json
 /var/lib/xuanji/runs/<run-id>/...
 /var/lib/xuanji/results/<run-id>/validated-result.json
 /var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json

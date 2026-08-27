@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import tempfile
 import unittest
 from copy import deepcopy
@@ -11,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from runtime.alert_normalizer import AlertNormalizer
+from runtime.contracts import RepositoryContracts
 from runtime.host_adapter import HostQueryResponse
 from runtime.root_preflight import RootPreflight, RootPreflightError
 from runtime.route_resolver import DqcRouteRegistry, RouteResolver
@@ -64,12 +66,14 @@ class FixtureRootExecutor:
         current_rate: float = 0.74,
         historical_rate: float = 0.75,
         fail_first: bool = False,
+        fail_on_call: int | None = None,
         denominator: int = 1000,
         materialized_offset: float = 0.0,
     ):
         self.current_rate = current_rate
         self.historical_rate = historical_rate
         self.fail_first = fail_first
+        self.fail_on_call = fail_on_call
         self.denominator = denominator
         self.materialized_offset = materialized_offset
         self.calls: list[tuple[str, str]] = []
@@ -82,7 +86,7 @@ class FixtureRootExecutor:
         partition_date = match.group(1)
         game_type = game.group(1)
         self.calls.append((partition_date, game_type))
-        if self.fail_first:
+        if self.fail_first or len(self.calls) == self.fail_on_call:
             self.fail_first = False
             return HostQueryResponse(
                 query_id="private-root-blocked",
@@ -114,13 +118,13 @@ class FixtureRootExecutor:
                 "game_download_device_num_1d": denominator,
                 "game_download_cnt_1d": denominator,
                 "game_download_complete_device_num_1d": numerator,
-                "game_download_failed_device_num_1d": 10,
-                "game_download_failed_cnt_1d": 10,
-                "game_download_stop_device_num_1d": 10,
+                "game_download_failed_device_num_1d": numerator,
+                "game_download_failed_cnt_1d": numerator,
+                "game_download_stop_device_num_1d": numerator,
                 "game_download_complete_rate_1d": materialized_rate,
-                "game_download_failed_rate_1d": 0.01,
-                "game_download_failed_pv_rate_1d": 0.01,
-                "game_download_stop_rate_1d": 0.01,
+                "game_download_failed_rate_1d": numerator / denominator,
+                "game_download_failed_pv_rate_1d": numerator / denominator,
+                "game_download_stop_rate_1d": numerator / denominator,
                 "game_download_complete_prev_2d_device_num_1d": denominator,
                 "game_download_complete_and_install_complete_prev_2d_device_num_p3d": numerator,
                 "game_download_complete_and_install_complete_prev_2d_rate_p3d": materialized_rate,
@@ -338,6 +342,22 @@ class AlertRouteAndPreflightTest(unittest.TestCase):
         self.assertEqual("full_queue", result["mode"])
         self.assertAlmostEqual(5.0, result["root_adverse_delta_bp"])
 
+    def test_incomplete_eight_day_result_never_writes_a_snapshot(self):
+        investigation = RouteResolver().resolve(
+            AlertNormalizer().normalize(payload_for(ROUTES[0]))
+        )[0]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_root = Path(temp_dir) / "root-snapshots"
+            with self.assertRaises(RootPreflightError):
+                RootPreflight(
+                    executor=FixtureRootExecutor(fail_on_call=4),
+                    repository_root=ROOT,
+                ).run(investigation, snapshot_root=snapshot_root)
+            self.assertEqual(
+                [],
+                list(snapshot_root.glob("*.json")) if snapshot_root.exists() else [],
+            )
+
 
 class TaskCoordinatorTest(unittest.TestCase):
     def setUp(self):
@@ -402,6 +422,110 @@ class TaskCoordinatorTest(unittest.TestCase):
             completed["validation_receipt"]["analysis_sha256"],
             authoritative["validation_receipt"]["analysis_sha256"],
         )
+        bundle_sha256 = RepositoryContracts(ROOT).definition_bundle_sha256
+        self.assertEqual(
+            bundle_sha256,
+            authoritative["validation_receipt"]["definition_bundle_sha256"],
+        )
+        state = json.loads(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-partial"
+                / "state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(bundle_sha256, state["definition_bundle_sha256"])
+        self.assertNotIn(
+            "definition_bundle_sha256",
+            completed["validation_receipt"],
+        )
+
+    def test_same_scope_metrics_reuse_one_complete_root_snapshot(self):
+        executor = FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)
+        coordinator = self.coordinator(executor)
+        first = coordinator.run_task(
+            task_id="task-shared-root",
+            dqc_payload=payload_for(ROUTES[0], ROUTES[3], ROUTES[4]),
+        )
+        self.assertEqual(8, len(executor.calls))
+        second = coordinator.finalize(
+            task_id="task-shared-root",
+            investigation_id=first["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        self.assertEqual(8, len(executor.calls))
+        third = coordinator.finalize(
+            task_id="task-shared-root",
+            investigation_id=second["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        self.assertEqual(8, len(executor.calls))
+        completed = coordinator.finalize(
+            task_id="task-shared-root",
+            investigation_id=third["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        snapshots = list(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-shared-root"
+                / "root-snapshots"
+            ).glob("*.json")
+        )
+        self.assertEqual(1, len(snapshots))
+        self.assertEqual(0o600, stat.S_IMODE(snapshots[0].stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(snapshots[0].parent.stat().st_mode))
+        authoritative = self.task_sink.load("task-shared-root")
+        self.assertEqual(
+            1,
+            len(
+                authoritative["validation_receipt"][
+                    "root_snapshot_sha256s"
+                ]
+            ),
+        )
+        self.assertNotIn("snapshot", json.dumps(completed, ensure_ascii=False))
+
+    def test_app_and_sandbox_use_separate_root_snapshots(self):
+        executor = FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)
+        coordinator = self.coordinator(executor)
+        first = coordinator.run_task(
+            task_id="task-two-root-scopes",
+            dqc_payload=payload_for(ROUTES[0], ROUTES[9]),
+        )
+        second = coordinator.finalize(
+            task_id="task-two-root-scopes",
+            investigation_id=first["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        self.assertEqual("write_conclusion", second["action"])
+        self.assertEqual(16, len(executor.calls))
+        self.assertEqual({"app", "sandbox"}, {item[1] for item in executor.calls})
+
+    def test_completed_root_snapshot_is_reused_after_coordinator_restart(self):
+        payload = payload_for(ROUTES[0], ROUTES[3])
+        first_executor = FixtureRootExecutor(
+            current_rate=0.74, historical_rate=0.75
+        )
+        first_coordinator = self.coordinator(first_executor)
+        first = first_coordinator.run_task(
+            task_id="task-root-restart",
+            dqc_payload=payload,
+        )
+        self.assertEqual(8, len(first_executor.calls))
+
+        resumed_executor = FixtureRootExecutor(
+            current_rate=0.10, historical_rate=0.20
+        )
+        resumed = self.coordinator(resumed_executor).finalize(
+            task_id="task-root-restart",
+            investigation_id=first["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        self.assertEqual("write_conclusion", resumed["action"])
+        self.assertEqual([], resumed_executor.calls)
 
     def test_blocked_investigation_does_not_prevent_the_next_writer_pack(self):
         payload = payload_for(ROUTES[0], ROUTES[3])

@@ -204,6 +204,19 @@ class TaskAssembler:
             "successful_investigation_count": success_count,
             "rule_indexes_sha256": canonical_sha256(actual_indexes),
             "analysis_sha256": canonical_sha256(analysis),
+            "root_snapshot_sha256s": list(
+                dict.fromkeys(
+                    investigation["root_preflight"]["root_snapshot_sha256"]
+                    for investigation in investigations
+                    if isinstance(investigation.get("root_preflight"), dict)
+                    and isinstance(
+                        investigation["root_preflight"].get(
+                            "root_snapshot_sha256"
+                        ),
+                        str,
+                    )
+                )
+            ),
             "investigation_receipts": receipt_summaries,
         }
         receipt["validation_receipt_sha256"] = canonical_sha256(receipt)

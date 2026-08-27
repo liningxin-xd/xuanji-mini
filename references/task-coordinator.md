@@ -48,6 +48,20 @@ writer pack without starting attribution. Otherwise it freezes
 `canonical_root_metric` and creates the internal full-queue run. Candidate
 families must rehook that frozen root.
 
+The first investigation for one task-level root scope executes all eight days
+and atomically stores a private snapshot at:
+
+```text
+/var/lib/xuanji/tasks/<task-id>/root-snapshots/<scope-hash>.json
+```
+
+The scope hash binds the locked root QuerySpec hash, object table, game type,
+and alert date. Later investigations in the same scope revalidate and reuse the
+complete snapshot. App and sandbox scopes remain separate. Partial snapshots
+are never stored. Snapshot integrity, per-day result hashes, and all eight
+result contracts are checked before reuse; corruption is an operational error,
+not a `query_failed` investigation.
+
 ## Three-Tool Protocol
 
 Only these tools cross the model boundary:
@@ -90,7 +104,9 @@ The complete task analysis and receipt are written atomically to:
 
 The model receives a recursively redacted preview and compact receipt hashes.
 SQL, raw rows, query IDs, raw-result hashes, and private receipts stay in Host
-state and machine-only sinks.
+state and machine-only sinks. The authoritative task receipt binds the compiled
+definition bundle hash and deduplicated root snapshot hashes; those fields are
+not added to the model-visible response.
 
 ## Resume
 

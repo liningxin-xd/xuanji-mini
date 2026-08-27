@@ -12,13 +12,17 @@ from pathlib import Path
 
 if __package__:
     from .container_mcp_probe import (
+        SNAPSHOT_TASK_ID,
         TASK_ID,
+        exercise_snapshot_task,
         exercise_task,
         unauthenticated_status,
     )
 else:
     from container_mcp_probe import (
+        SNAPSHOT_TASK_ID,
         TASK_ID,
+        exercise_snapshot_task,
         exercise_task,
         unauthenticated_status,
     )
@@ -36,8 +40,13 @@ def main() -> None:
     host_port = _free_port()
     dview_port = _free_port()
     dview_log = tempfile.TemporaryFile(mode="w+")
+    count_fd, count_name = tempfile.mkstemp(prefix="xuanji-root-query-count-")
+    os.close(count_fd)
+    count_path = Path(count_name)
+    count_path.write_text("0", encoding="utf-8")
     dview_env = dict(os.environ)
     dview_env["XUANJI_SMOKE_DVIEW_PORT"] = str(dview_port)
+    dview_env["XUANJI_SMOKE_DVIEW_COUNT_FILE"] = str(count_path)
     dview = subprocess.Popen(
         [sys.executable, str(ROOT / "tests" / "container_dview_stub.py")],
         cwd=ROOT,
@@ -55,6 +64,8 @@ def main() -> None:
         _wait_for_unauthorized(url, container)
         _assert_non_root_and_writable(container)
         asyncio.run(exercise_task(url, HOST_TOKEN, resumed=False))
+        asyncio.run(exercise_snapshot_task(url, HOST_TOKEN, resumed=False))
+        _assert_dview_query_count(count_path, 8)
         _assert_persisted_artifacts(container)
 
         _run(["docker", "stop", container])
@@ -63,6 +74,8 @@ def main() -> None:
         _wait_for_unauthorized(url, container)
         _assert_persisted_artifacts(container)
         asyncio.run(exercise_task(url, HOST_TOKEN, resumed=True))
+        asyncio.run(exercise_snapshot_task(url, HOST_TOKEN, resumed=True))
+        _assert_dview_query_count(count_path, 8)
     except Exception:
         _print_container_logs(container)
         dview_log.seek(0)
@@ -90,6 +103,7 @@ def main() -> None:
             dview.kill()
             dview.wait(timeout=5)
         dview_log.close()
+        count_path.unlink(missing_ok=True)
 
 
 def _start_container(
@@ -153,12 +167,23 @@ def _assert_persisted_artifacts(container: str) -> None:
         "paths=["
         "Path('/var/lib/xuanji/runs/container-smoke-marker/persisted'),"
         f"Path('/var/lib/xuanji/tasks/{TASK_ID}/state.json'),"
+        f"Path('/var/lib/xuanji/tasks/{SNAPSHOT_TASK_ID}/state.json'),"
         f"Path('/var/lib/xuanji/results/tasks/{TASK_ID}/validated-task-result.json')"
         "]; "
         "missing=[str(p) for p in paths if not p.is_file()]; "
-        "assert not missing, missing"
+        "assert not missing, missing; "
+        f"snapshots=list(Path('/var/lib/xuanji/tasks/{SNAPSHOT_TASK_ID}/root-snapshots').glob('*.json')); "
+        "assert len(snapshots) == 1, snapshots"
     )
     _run(["docker", "exec", container, "python", "-c", script])
+
+
+def _assert_dview_query_count(path: Path, expected: int) -> None:
+    actual = int(path.read_text(encoding="utf-8"))
+    if actual != expected:
+        raise RuntimeError(
+            f"expected {expected} root queries across restart, received {actual}"
+        )
 
 
 def _wait_for_unauthorized(url: str, container: str) -> None:

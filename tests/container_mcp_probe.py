@@ -16,6 +16,7 @@ EXPECTED_TOOLS = {
     "xuanji_finalize",
 }
 TASK_ID = "container-smoke-task"
+SNAPSHOT_TASK_ID = "container-root-cache-task"
 PAYLOAD = {
     "projectName": "tap_dw",
     "dqcEntityQuality": {
@@ -35,6 +36,37 @@ WRITER_PATCH = {
     "finding_texts": {},
     "evidence_limits": ["insufficient_definition"],
     "recommended_action": "Register the exact DQC rule before attribution.",
+}
+SNAPSHOT_PAYLOAD = {
+    "projectName": "tap_dw",
+    "dqcEntityQuality": {
+        "entityName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+        "actualExpression": "dt=2026-08-24",
+    },
+    "ruleChecks": [
+        {
+            "ruleName": "【apk下载完成率】最近1天_低于80%",
+            "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+            "actualExpression": "dt=2026-08-24",
+            "property": "game_download_complete_rate_1d",
+            "op": ">=",
+            "expectValue": 0.8,
+        },
+        {
+            "ruleName": "【apk下载失败率】最近1天_高于3%",
+            "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+            "actualExpression": "dt=2026-08-24",
+            "property": "game_download_failed_rate_1d",
+            "op": "<=",
+            "expectValue": 0.03,
+        },
+    ],
+}
+SNAPSHOT_WRITER_PATCH = {
+    "summary": "The registered root anomaly already existed without new adverse change.",
+    "finding_texts": {},
+    "evidence_limits": [],
+    "recommended_action": "Continue monitoring the registered Android download chain.",
 }
 
 
@@ -106,6 +138,51 @@ async def exercise_task(url: str, token: str, *, resumed: bool) -> None:
         result = await session.call_tool("xuanji_finalize", arguments=conflicting)
         if not result.isError:
             raise ContainerProbeError("conflicting finalize was accepted")
+
+
+async def exercise_snapshot_task(url: str, token: str, *, resumed: bool) -> None:
+    async with _session(url, token) as session:
+        run = await _call(
+            session,
+            "xuanji_run_task",
+            {"task_id": SNAPSHOT_TASK_ID, "dqc_payload": SNAPSHOT_PAYLOAD},
+        )
+        _require_action(run, "write_conclusion")
+        if "snapshot" in json.dumps(run, ensure_ascii=False):
+            raise ContainerProbeError("root snapshot leaked into the model response")
+        if not resumed:
+            return
+
+        first_id = run.get("investigation_id")
+        if not isinstance(first_id, str):
+            raise ContainerProbeError("first snapshot writer lacks investigation identity")
+        second = await _call(
+            session,
+            "xuanji_finalize",
+            {
+                "task_id": SNAPSHOT_TASK_ID,
+                "investigation_id": first_id,
+                "writer_patch": SNAPSHOT_WRITER_PATCH,
+            },
+        )
+        _require_action(second, "write_conclusion")
+        second_id = second.get("investigation_id")
+        if not isinstance(second_id, str) or second_id == first_id:
+            raise ContainerProbeError("second snapshot writer identity is invalid")
+        completed = await _call(
+            session,
+            "xuanji_finalize",
+            {
+                "task_id": SNAPSHOT_TASK_ID,
+                "investigation_id": second_id,
+                "writer_patch": SNAPSHOT_WRITER_PATCH,
+            },
+        )
+        _require_action(completed, "task_complete")
+        if completed.get("overall_status") != "completed":
+            raise ContainerProbeError("snapshot task did not complete successfully")
+        if "snapshot" in json.dumps([second, completed], ensure_ascii=False):
+            raise ContainerProbeError("root snapshot leaked after task resume")
 
 
 @asynccontextmanager

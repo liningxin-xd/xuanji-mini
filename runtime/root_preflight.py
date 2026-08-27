@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
+import uuid
+from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,10 @@ class RootPreflightError(ValueError):
         self.status = status
 
 
+class RootSnapshotError(RuntimeError):
+    pass
+
+
 class RootPreflight:
     """Reproduce one registered root metric before the frozen attribution queue."""
 
@@ -40,7 +48,12 @@ class RootPreflight:
         self.query_path = self.root / ROOT_QUERY_PATH
         self._query_spec = self._load_query_spec()
 
-    def run(self, investigation: Any) -> dict[str, Any]:
+    def run(
+        self,
+        investigation: Any,
+        *,
+        snapshot_root: Path | str | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(investigation, dict):
             raise RootPreflightError("insufficient_definition", "investigation is invalid")
         route = investigation.get("route")
@@ -60,36 +73,17 @@ class RootPreflight:
             raise RootPreflightError(
                 "insufficient_definition", "registered game type is invalid"
             )
-
-        rows: list[dict[str, Any]] = []
-        private_queries = []
-        for offset in range(8):
-            partition_date = alert_date - timedelta(days=offset)
-            response = self.executor.execute_read_only(
-                self._render_query(partition_date, game_type)
+        object_table = route.get("object_table")
+        if not isinstance(object_table, str) or not object_table:
+            raise RootPreflightError(
+                "insufficient_definition", "registered object table is invalid"
             )
-            private_queries.append(
-                {
-                    "partition_date": partition_date.isoformat(),
-                    "query_id": response.query_id,
-                    "receipt_id": response.receipt_id,
-                }
-            )
-            if response.raw_result is None:
-                status = self._query_failure_status(response.error_class)
-                raise RootPreflightError(
-                    status,
-                    f"registered root query failed for required day ({response.error_class})",
-                )
-            row = self._validate_one_row(
-                response.raw_result,
-                partition_date=partition_date,
-                game_type=game_type,
-            )
-            private_queries[-1]["raw_result_sha256"] = canonical_sha256(
-                response.raw_result
-            )
-            rows.append(row)
+        rows, private_queries, snapshot_sha256 = self._load_or_query_snapshot(
+            alert_date=alert_date,
+            game_type=game_type,
+            object_table=object_table,
+            snapshot_root=snapshot_root,
+        )
 
         root_profile = route.get("absolute_root")
         if not isinstance(root_profile, dict):
@@ -196,8 +190,176 @@ class RootPreflight:
                 "baseline_value": baseline_rate,
                 "delta": root_delta,
             },
+            "root_snapshot_sha256": snapshot_sha256,
             "private_queries": private_queries,
         }
+
+    def _load_or_query_snapshot(
+        self,
+        *,
+        alert_date: date,
+        game_type: str,
+        object_table: str,
+        snapshot_root: Path | str | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+        scope = {
+            "root_query_spec_sha256": self.contracts.asset_hashes[ROOT_QUERY_PATH],
+            "object_table": object_table,
+            "game_type": game_type,
+            "alert_date": alert_date.isoformat(),
+        }
+        scope_sha256 = canonical_sha256(scope)
+        snapshot_path = (
+            Path(snapshot_root).resolve() / f"{scope_sha256}.json"
+            if snapshot_root is not None
+            else None
+        )
+        if snapshot_path is not None and snapshot_path.exists():
+            return self._read_snapshot(
+                snapshot_path,
+                expected_scope=scope,
+                alert_date=alert_date,
+                game_type=game_type,
+            )
+
+        rows: list[dict[str, Any]] = []
+        raw_results: list[dict[str, Any]] = []
+        private_queries: list[dict[str, str]] = []
+        for offset in range(8):
+            partition_date = alert_date - timedelta(days=offset)
+            response = self.executor.execute_read_only(
+                self._render_query(partition_date, game_type)
+            )
+            query_evidence = {
+                "partition_date": partition_date.isoformat(),
+                "query_id": response.query_id,
+                "receipt_id": response.receipt_id,
+            }
+            if response.raw_result is None:
+                status = self._query_failure_status(response.error_class)
+                raise RootPreflightError(
+                    status,
+                    f"registered root query failed for required day ({response.error_class})",
+                )
+            raw_result = deepcopy(response.raw_result)
+            row = self._validate_one_row(
+                raw_result,
+                partition_date=partition_date,
+                game_type=game_type,
+            )
+            query_evidence["raw_result_sha256"] = canonical_sha256(raw_result)
+            private_queries.append(query_evidence)
+            raw_results.append(raw_result)
+            rows.append(row)
+
+        unsigned = {
+            "schema_version": 1,
+            "scope": scope,
+            "raw_results": raw_results,
+            "private_queries": private_queries,
+        }
+        snapshot_sha256 = canonical_sha256(unsigned)
+        if snapshot_path is not None:
+            self._write_snapshot(
+                snapshot_path,
+                {**unsigned, "snapshot_sha256": snapshot_sha256},
+            )
+        return rows, private_queries, snapshot_sha256
+
+    def _read_snapshot(
+        self,
+        path: Path,
+        *,
+        expected_scope: dict[str, str],
+        alert_date: date,
+        game_type: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+        try:
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RootSnapshotError("root snapshot cannot be loaded") from exc
+        if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1:
+            raise RootSnapshotError("root snapshot schema is invalid")
+        snapshot_sha256 = snapshot.get("snapshot_sha256")
+        unsigned = dict(snapshot)
+        unsigned.pop("snapshot_sha256", None)
+        if (
+            not isinstance(snapshot_sha256, str)
+            or snapshot_sha256 != canonical_sha256(unsigned)
+        ):
+            raise RootSnapshotError("root snapshot integrity check failed")
+        if snapshot.get("scope") != expected_scope:
+            raise RootSnapshotError("root snapshot scope changed")
+        raw_results = snapshot.get("raw_results")
+        private_queries = snapshot.get("private_queries")
+        if (
+            not isinstance(raw_results, list)
+            or len(raw_results) != 8
+            or not isinstance(private_queries, list)
+            or len(private_queries) != 8
+        ):
+            raise RootSnapshotError("root snapshot is incomplete")
+
+        rows = []
+        for offset, (raw_result, evidence) in enumerate(
+            zip(raw_results, private_queries, strict=True)
+        ):
+            partition_date = alert_date - timedelta(days=offset)
+            if (
+                not isinstance(evidence, dict)
+                or set(evidence)
+                != {
+                    "partition_date",
+                    "query_id",
+                    "receipt_id",
+                    "raw_result_sha256",
+                }
+                or evidence.get("partition_date") != partition_date.isoformat()
+                or not all(
+                    isinstance(evidence.get(field), str) and evidence[field]
+                    for field in ("query_id", "receipt_id")
+                )
+                or evidence.get("raw_result_sha256")
+                != canonical_sha256(raw_result)
+            ):
+                raise RootSnapshotError("root snapshot query evidence is invalid")
+            try:
+                rows.append(
+                    self._validate_one_row(
+                        raw_result,
+                        partition_date=partition_date,
+                        game_type=game_type,
+                    )
+                )
+            except RootPreflightError as exc:
+                raise RootSnapshotError("root snapshot result contract is invalid") from exc
+        return rows, deepcopy(private_queries), snapshot_sha256
+
+    @staticmethod
+    def _write_snapshot(path: Path, snapshot: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
+        temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        encoded = (
+            json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            with temporary.open("xb") as handle:
+                os.chmod(temporary, 0o600)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def _load_query_spec(self) -> dict[str, Any]:
         self.contracts.verify_assets()
