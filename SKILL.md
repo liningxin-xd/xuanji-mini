@@ -38,8 +38,9 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 - 只通过现有只读 DView MCP；禁止自建连接、shell、curl、DDL 或 DML。
 - 平台层按 [Primary Host Boundary Integration](references/host-boundary-integration.md)
-  注册 `xuanji_run_investigation`、`xuanji_submit_repair` 和 `xuanji_finalize`；
-  只把这三个窄接口暴露给模型。
+  只注册 `xuanji_run_task`、`xuanji_submit_repair` 和 `xuanji_finalize`。
+- `PrimaryInvestigationHost` 仅作为 Host 内部稳定库；模型不得直接选择调查级工具。
+- `xuanji_finalize` 只接收 task/investigation 身份和 writer patch；DQC context 由机器冻结。
 - 不能修改现有 DView MCP 时，独立部署 [Native Primary Host](references/native-host-deployment.md)；
   由该服务在 UI 以下通过 MCP client 调用现有只读 `/mcp/query`，不得让模型发起嵌套调用。
 - Host 在模型进程外持有至少 32 字节 receipt secret，并用同一 `TrustedReceiptVerifier` 创建 Runner 与 `HostDViewAdapter`。
@@ -70,16 +71,16 @@ python3 -m runtime.runner validate-final
 
 `self_reported` 不具有生产 SQL 不可篡改保证，不得用于生产调查。不得直接修改 `.runs/*/state.json`、SQL、ticket、event、export 或 receipt。
 
-## 6. 一次文案生成
+## 6. 逐调查文案生成
 
-- 队列完成后调用 `runner.build_writer_pack(run_id)`；pack 必须小于等于 12 KB。
+- Task Coordinator 串行处理调查，每次响应最多返回一个 writer pack；pack 必须小于等于 12 KB。
 - 每个一级家族最多暴露 3 个候选；pack 不含 SQL、raw rows、HMAC、diff 或完整 state。
 - 写作前只读取 [Runtime 文案指南](references/runtime-writing-guide.md)，不加载完整 Playbook。
 - LLM 只能返回 `summary/finding_texts/evidence_limits/recommended_action`。
 - `finding_texts` 只按 pack 中的 `candidate_id` 关联，不抄写 dimension、value、数值或 query ID。
 - 结构化事实冻结后只写文字，不执行独立二次润色，不改变 Runtime 已确定的状态或证据。
 
-Runner 使用可信 DQC context、writer patch 和冻结 state 自动组装最终 JSON；`metric/analysis_date/current_value/baseline_value/delta_bp/top_findings/attribution_execution` 均由机器填写。
+Coordinator 使用规范化 DQC context、writer patch 和冻结 state 自动组装任务 JSON；`metric/analysis_date/current_value/baseline_value/delta_bp/top_findings/attribution_execution` 均由机器填写。
 
 ## 7. 最终校验
 

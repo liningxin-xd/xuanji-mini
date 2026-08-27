@@ -63,7 +63,7 @@ class FinalEvidenceValidator:
             )
         if investigation_status in {"completed", "no_dominant_slice"}:
             try:
-                root_metric = EvidencePackBuilder().root_metric(state["steps"])
+                root_metric = EvidencePackBuilder().root_metric(state)
             except EvidencePackError as exc:
                 raise FinalValidationError(str(exc)) from exc
             if root_metric is None:

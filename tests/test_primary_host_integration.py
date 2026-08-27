@@ -71,6 +71,11 @@ class PrimaryHostIntegrationTest(unittest.TestCase):
             game_type=game_type,
             metric=metric,
             alert_date="2026-08-24",
+            canonical_root_metric={
+                "current_value": 0.79,
+                "baseline_value": 0.80,
+                "delta": -0.01,
+            },
         )
 
     def _analysis_context(self, metric):
@@ -166,6 +171,11 @@ class PrimaryHostIntegrationTest(unittest.TestCase):
             game_type="app",
             metric="下载完成率",
             alert_date="2026-08-24",
+            canonical_root_metric={
+                "current_value": 0.79,
+                "baseline_value": 0.80,
+                "delta": -0.01,
+            },
         )
         self.assertEqual("repair_required", result["action"])
         self.assertEqual(1, result["executed_query_count"])
@@ -238,6 +248,11 @@ class PrimaryHostIntegrationTest(unittest.TestCase):
                 game_type="app",
                 metric="下载完成率",
                 alert_date="2026-08-24",
+                canonical_root_metric={
+                    "current_value": 0.79,
+                    "baseline_value": 0.80,
+                    "delta": -0.01,
+                },
             )
         self.assertNotIn("private-query-id", str(dview_error.exception))
 

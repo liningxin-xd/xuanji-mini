@@ -274,6 +274,11 @@ class TrustedHostAdapterTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.signer = TrustedReceiptVerifier(key_id="host-test", secret=b"x" * 32)
+        self.root_metric = {
+            "current_value": 0.79,
+            "baseline_value": 0.80,
+            "delta": -0.01,
+        }
 
     def test_production_mode_requires_a_host_receipt_authority(self):
         runner = AttributionRunner(ROOT, runs_root=self.temp_dir.name)
@@ -284,6 +289,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
                 game_type="app",
                 metric="下载完成率",
                 alert_date="2026-08-22",
+                canonical_root_metric=self.root_metric,
             )
 
     def test_host_adapter_executes_the_issued_sql_and_signs_receipt(self):
@@ -298,6 +304,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
             game_type="app",
             metric="下载完成率",
             alert_date="2026-08-22",
+            canonical_root_metric=self.root_metric,
         )
         ticket = runner.next_action("host-run")
         raw_result = raw_result_for_ticket(runner, "host-run", ticket)
@@ -403,6 +410,19 @@ class TrustedHostAdapterTest(unittest.TestCase):
                     game_type=game_type,
                     metric=metric,
                     alert_date="2026-08-24",
+                    canonical_root_metric=(
+                        {
+                            "current_value": 0.81,
+                            "baseline_value": 0.80,
+                            "delta": 0.01,
+                        }
+                        if metric in {
+                            "下载失败率",
+                            "下载失败次数比率",
+                            "下载人为停止率",
+                        }
+                        else self.root_metric
+                    ),
                 )
                 client = _RunnerBackedMCPClient(runner, run_id, candidate_steps)
                 adapter = HostDViewAdapter(
@@ -434,6 +454,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
             game_type="app",
             metric="下载完成率",
             alert_date="2026-08-22",
+            canonical_root_metric=self.root_metric,
         )
 
         def query(**_):
@@ -465,6 +486,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
             game_type="app",
             metric="下载完成率",
             alert_date="2026-08-22",
+            canonical_root_metric=self.root_metric,
         )
         delegate = _RunnerBackedMCPClient(runner, "host-family-error", set())
 
@@ -505,6 +527,7 @@ class TrustedHostAdapterTest(unittest.TestCase):
             game_type="app",
             metric="下载完成率",
             alert_date="2026-08-22",
+            canonical_root_metric=self.root_metric,
         )
         delegate = _RunnerBackedMCPClient(runner, "host-row-limit", set())
 

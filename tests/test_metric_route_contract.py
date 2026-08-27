@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTING_PATH = ROOT / "references" / "dqc-alert-routing.md"
+ROUTE_CONTRACT_PATH = ROOT / "contracts" / "dqc-routes.yaml"
 REGISTERED_ROOT_PATH = ROOT / "references" / "queries" / "registered-monitor-root.yaml"
 DOWNLOAD_ATTRIBUTION_PATH = (
     ROOT / "references" / "queries" / "download-game-attribution.yaml"
@@ -61,18 +62,7 @@ QUERY_ASSETS = {
 
 
 def _route_rows():
-    lines = ROUTING_PATH.read_text(encoding="utf-8").splitlines()
-    header_index = next(
-        index for index, line in enumerate(lines) if line.startswith("| 范围 | stage |")
-    )
-    headers = [cell.strip() for cell in lines[header_index].strip("|").split("|")]
-    rows = []
-    for line in lines[header_index + 2 :]:
-        if not line.startswith("|"):
-            break
-        values = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
-        rows.append(dict(zip(headers, values, strict=True)))
-    return rows
+    return yaml.safe_load(ROUTE_CONTRACT_PATH.read_text(encoding="utf-8"))["routes"]
 
 
 class MetricRouteContractTest(unittest.TestCase):
@@ -104,22 +94,20 @@ class MetricRouteContractTest(unittest.TestCase):
         rows = _route_rows()
 
         self.assertEqual(16, len(rows))
-        self.assertFalse(
-            [row for row in rows if "缺失" in row["知识库指标"]],
-            "registered routes must not retain stale missing-definition sentinels",
+        self.assertEqual(
+            {
+                "下载完成率",
+                "下载失败率",
+                "下载失败次数比率",
+                "下载人为停止率",
+                "下载安装完成率",
+            },
+            {row["canonical_metric"] for row in rows},
         )
-
-        expected = {
-            "apk下载失败率": "下载失败率",
-            "apk下载失败次数比率": "下载失败次数比率",
-            "apk人为停止率": "下载人为停止率",
-            "沙盒下载失败率": "下载失败率",
-            "沙盒下载失败次数比率": "下载失败次数比率",
-            "沙盒人为停止率": "下载人为停止率",
-        }
-        actual = {row["metric_hint"]: row["知识库指标"] for row in rows}
-        for metric_hint, canonical_metric in expected.items():
-            self.assertEqual(canonical_metric, actual[metric_hint])
+        self.assertTrue(
+            all("normalized_rule_name" in row for row in rows),
+            "registered routes must use exact normalized full rule names",
+        )
 
     def test_registered_root_selects_every_routed_monitor_field(self):
         rows = _route_rows()
@@ -157,7 +145,7 @@ class MetricRouteContractTest(unittest.TestCase):
         metric_index_path = skill_root / "knowledge-base" / store_domain["metric_index"]
         metric_index = yaml.safe_load(metric_index_path.read_text(encoding="utf-8"))
 
-        canonical_metrics = {row["知识库指标"] for row in _route_rows()}
+        canonical_metrics = {row["canonical_metric"] for row in _route_rows()}
         for canonical_metric in canonical_metrics:
             matches = [
                 entry for entry in metric_index if canonical_metric in entry["aliases"]
@@ -170,6 +158,11 @@ class MetricRouteContractTest(unittest.TestCase):
             self.assertEqual(canonical_metric, metric_definition["metric"])
             for required_field in ("业务口径", "技术口径", "sql"):
                 self.assertTrue(metric_definition[required_field], canonical_metric)
+
+    def test_markdown_routes_humans_to_the_machine_contract(self):
+        routing = ROUTING_PATH.read_text(encoding="utf-8")
+        self.assertIn("contracts/dqc-routes.yaml", routing)
+        self.assertNotIn("| 范围 | stage | metric_hint |", routing)
 
     def test_completion_attribution_assets_match_reviewed_hashes(self):
         expected_hashes = {

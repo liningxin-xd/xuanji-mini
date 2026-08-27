@@ -13,12 +13,13 @@ from host_service.dview_client import (
     DViewQuerySession,
 )
 from host_service.runtime import XuanjiHostRuntime
-from host_service.sink import FileValidatedResultSink
+from host_service.sink import FileTaskResultSink, FileValidatedResultSink
 from host_service.tools import create_mcp
 from runtime.host_adapter import DViewExecutionError
 from runtime.receipts import TrustedReceiptVerifier
 from runtime.runner import AttributionRunner
 from tests.runtime_result_fixtures import raw_result_for_ticket
+from tests.test_registered_alert_coordinator import FixtureRootExecutor
 
 
 def _settings(root: Path) -> HostServiceSettings:
@@ -33,31 +34,34 @@ def _settings(root: Path) -> HostServiceSettings:
         receipt_key_id="native-host-test",
         receipt_secret=b"r" * 32,
         runs_root=root / "runs",
+        tasks_root=root / "tasks",
         results_root=root / "results",
     )
 
 
 class _FakeRuntime:
-    async def run_investigation(self, **kwargs):
+    async def run_task(self, **kwargs):
         return {
             "action": "write_conclusion",
-            "run_id": kwargs["run_id"],
-            "executed_query_count": 7,
+            "task_id": kwargs["task_id"],
+            "investigation_id": "inv-00-fixture",
             "writer_pack": {"status": "no_dominant_slice"},
         }
 
     async def submit_repair(self, **kwargs):
         return {
             "action": "write_conclusion",
+            "task_id": kwargs["task_id"],
+            "investigation_id": kwargs["investigation_id"],
             "run_id": kwargs["run_id"],
-            "executed_query_count": 6,
             "writer_pack": {"status": "completed"},
         }
 
     async def finalize(self, **kwargs):
         return {
-            "action": "finalized",
-            "run_id": kwargs["run_id"],
+            "action": "task_complete",
+            "task_id": kwargs["task_id"],
+            "overall_status": "completed",
             "analysis_preview": {"overall_status": "completed"},
             "validation_receipt": {"status": "valid"},
             "audit_detail": "retained_by_host",
@@ -69,6 +73,10 @@ class _FixtureDViewClient:
         self._settings = settings
         self._repository_root = repository_root
         self._query_counts: dict[str, int] = {}
+        self._root_executor = FixtureRootExecutor(
+            current_rate=0.79,
+            historical_rate=0.80,
+        )
 
     @asynccontextmanager
     async def session(self):
@@ -76,6 +84,13 @@ class _FixtureDViewClient:
 
     async def query(self, *, sql, database_type, limit):
         self.assert_query_contract(database_type, limit)
+        if "ads_dmg_quality_platform_download_chain_monitor_1d" in sql:
+            response = self._root_executor.execute_read_only(sql)
+            return {
+                "query_id": response.query_id,
+                "columns": response.raw_result["columns"],
+                "rows": response.raw_result["rows"],
+            }
         signer = TrustedReceiptVerifier(
             key_id=self._settings.receipt_key_id,
             secret=self._settings.receipt_secret,
@@ -121,6 +136,7 @@ class NativeHostConfigurationTest(unittest.IsolatedAsyncioTestCase):
             "XUANJI_RECEIPT_KEY_ID": "receipt-v1",
             "XUANJI_RECEIPT_SECRET": "receipt-secret-" + "r" * 32,
             "XUANJI_RUNS_ROOT": "/var/lib/xuanji/runs",
+            "XUANJI_TASKS_ROOT": "/var/lib/xuanji/tasks",
             "XUANJI_RESULTS_ROOT": "/var/lib/xuanji/results",
         }
         settings = HostServiceSettings.from_env(values)
@@ -230,7 +246,7 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         tools = self.mcp._tool_manager.list_tools()
         self.assertEqual(
             {
-                "xuanji_run_investigation",
+                "xuanji_run_task",
                 "xuanji_submit_repair",
                 "xuanji_finalize",
             },
@@ -240,19 +256,16 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not tool.annotations.destructiveHint for tool in tools))
 
     async def test_normal_tool_results_exclude_private_evidence(self):
-        run_tool = self.mcp._tool_manager._tools["xuanji_run_investigation"].fn
+        run_tool = self.mcp._tool_manager._tools["xuanji_run_task"].fn
         result = await run_tool(
-            run_id="download-shadow",
-            chain="download",
-            game_type="app",
-            metric="下载完成率",
-            alert_date="2026-08-24",
+            task_id="download-shadow",
+            dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
         )
         finalize_tool = self.mcp._tool_manager._tools["xuanji_finalize"].fn
         finalized = await finalize_tool(
-            run_id="download-shadow",
+            task_id="download-shadow",
+            investigation_id="inv-00-fixture",
             writer_patch={"summary": "summary"},
-            analysis_context={"source": "dataworks_dqc"},
         )
         encoded = json.dumps([result, finalized], ensure_ascii=False)
         for marker in (
@@ -269,7 +282,7 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_internal_exception_text_is_not_returned(self):
         runtime = _FakeRuntime()
-        runtime.run_investigation = AsyncMock(
+        runtime.run_task = AsyncMock(
             side_effect=RuntimeError(
                 "SELECT secret FROM table query_id=private raw_result=rows"
             )
@@ -278,49 +291,61 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
             _settings(Path(self.temp_dir.name)),
             runtime=runtime,
         )
-        tool = mcp._tool_manager._tools["xuanji_run_investigation"].fn
+        tool = mcp._tool_manager._tools["xuanji_run_task"].fn
         with self.assertRaisesRegex(Exception, "RuntimeError") as captured:
             await tool(
-                run_id="failed-shadow",
-                chain="download",
-                game_type="app",
-                metric="下载完成率",
-                alert_date="2026-08-24",
+                task_id="failed-shadow",
+                dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
             )
         self.assertNotIn("SELECT secret", str(captured.exception))
         self.assertNotIn("private", str(captured.exception))
 
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_download_and_apk_queues_complete_through_async_bridge(self):
+    async def test_registered_task_completes_through_async_bridge(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = _settings(Path(temp_dir))
             client = _FixtureDViewClient(settings, Path(__file__).parents[1])
             runtime = XuanjiHostRuntime(settings, dview_client=client)
-            scenarios = (
-                ("native-download", "download", "下载完成率", 7),
-                ("native-install", "install", "下载安装完成率", 6),
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+            result = await runtime.run_task(task_id="native-download", dqc_payload=payload)
+            self.assertEqual("write_conclusion", result["action"])
+            completed = await runtime.finalize(
+                task_id="native-download",
+                investigation_id=result["investigation_id"],
+                writer_patch={
+                    "summary": "固定队列已完成，未发现达到候选门槛的切片。",
+                    "finding_texts": {},
+                    "evidence_limits": [],
+                    "recommended_action": "继续跟踪下载链路及恢复情况。",
+                },
             )
-            for run_id, chain, metric, expected_count in scenarios:
-                result = await runtime.run_investigation(
-                    run_id=run_id,
-                    chain=chain,
-                    game_type="app",
-                    metric=metric,
-                    alert_date="2026-08-24",
-                )
-                self.assertEqual("write_conclusion", result["action"])
-                self.assertEqual(expected_count, result["executed_query_count"])
-                encoded = json.dumps(result, ensure_ascii=False)
-                for marker in (
-                    "private-native",
-                    "query_id",
-                    "raw_result",
-                    "rendered_sql",
-                    "SELECT ",
-                    "WITH ",
-                ):
-                    self.assertNotIn(marker, encoded)
+            self.assertEqual("task_complete", completed["action"])
+            encoded = json.dumps([result, completed], ensure_ascii=False)
+            for marker in (
+                "private-native",
+                "query_id",
+                "raw_result",
+                "rendered_sql",
+                "SELECT ",
+                "WITH ",
+            ):
+                self.assertNotIn(marker, encoded)
 
 
 class ValidatedResultSinkTest(unittest.TestCase):
@@ -340,6 +365,17 @@ class ValidatedResultSinkTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "conflicting content"):
                 sink("run-1", {"changed": True}, receipt)
+
+    def test_task_sink_is_idempotent_and_conflict_rejecting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sink = FileTaskResultSink(temp_dir)
+            analysis = {"overall_status": "completed", "investigations": []}
+            receipt = {"status": "valid"}
+            sink("task-1", analysis, receipt)
+            sink("task-1", analysis, receipt)
+            self.assertEqual(analysis, sink.load("task-1")["analysis"])
+            with self.assertRaisesRegex(RuntimeError, "conflicting content"):
+                sink("task-1", {"overall_status": "failed"}, receipt)
 
 
 if __name__ == "__main__":

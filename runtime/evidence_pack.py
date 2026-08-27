@@ -83,7 +83,7 @@ class EvidencePackBuilder:
             "candidates": exposed_candidates,
             "evidence_limits": evidence_limits,
         }
-        root_metric = self.root_metric(steps)
+        root_metric = self.root_metric(state)
         if root_metric is not None:
             pack["root_metric"] = root_metric
         encoded = json.dumps(
@@ -95,7 +95,10 @@ class EvidencePackBuilder:
             )
         return pack
 
-    def root_metric(self, steps: list[dict[str, Any]]) -> dict[str, float] | None:
+    def root_metric(self, state: dict[str, Any]) -> dict[str, float] | None:
+        steps = state.get("steps")
+        if not isinstance(steps, list):
+            raise EvidencePackError("writer state steps are invalid")
         roots = [
             (
                 step.get("root_current_value"),
@@ -106,8 +109,25 @@ class EvidencePackBuilder:
             if step.get("status") == StepStatus.SUCCEEDED.value
             and step.get("produces_candidates") is True
         ]
-        if not roots:
+        canonical = state.get("canonical_root_metric")
+        if canonical is None:
             return None
+        if (
+            not isinstance(canonical, dict)
+            or set(canonical) != {"current_value", "baseline_value", "delta"}
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in canonical.values()
+            )
+        ):
+            raise EvidencePackError("canonical root metric is invalid")
+        current = float(canonical["current_value"])
+        baseline = float(canonical["baseline_value"])
+        delta = float(canonical["delta"])
+        if not math.isclose(current - baseline, delta, rel_tol=0.0, abs_tol=1e-12):
+            raise EvidencePackError("canonical root metric does not close")
         if any(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
@@ -116,7 +136,6 @@ class EvidencePackBuilder:
             for value in root
         ):
             raise EvidencePackError("successful candidate family lacks root metric facts")
-        current, baseline, delta = (float(value) for value in roots[0])
         if any(
             not math.isclose(
                 float(actual),
@@ -124,7 +143,7 @@ class EvidencePackBuilder:
                 rel_tol=0.0,
                 abs_tol=0.000001,
             )
-            for root in roots[1:]
+            for root in roots
             for actual, expected in zip(root, (current, baseline, delta), strict=True)
         ):
             raise EvidencePackError(

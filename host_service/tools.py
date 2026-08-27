@@ -50,25 +50,25 @@ def create_mcp(
     host_runtime = runtime or XuanjiHostRuntime(settings)
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
-    async def xuanji_run_investigation(
-        run_id: Annotated[str, Field(description="Unique immutable run ID")],
-        chain: Annotated[str, Field(description="download or install")],
-        game_type: Annotated[str, Field(description="app or sandbox")],
-        metric: Annotated[str, Field(description="Registered canonical metric")],
-        alert_date: Annotated[str, Field(description="Alert partition date")],
+    async def xuanji_run_task(
+        task_id: Annotated[str, Field(description="Unique immutable task ID")],
+        dqc_payload: Annotated[
+            dict[str, Any], Field(description="Raw DataWorks DQC payload")
+        ],
     ) -> dict[str, Any]:
         return await _safe_call(
-            host_runtime.run_investigation(
-                run_id=run_id,
-                chain=chain,
-                game_type=game_type,
-                metric=metric,
-                alert_date=alert_date,
+            host_runtime.run_task(
+                task_id=task_id,
+                dqc_payload=dqc_payload,
             )
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
     async def xuanji_submit_repair(
+        task_id: Annotated[str, Field(description="Existing task ID")],
+        investigation_id: Annotated[
+            str, Field(description="Current investigation ID")
+        ],
         run_id: Annotated[str, Field(description="Existing run ID")],
         step_id: Annotated[str, Field(description="Blocked fixed-plan step ID")],
         repair_attempt: Annotated[int, Field(description="Issued repair attempt")],
@@ -82,6 +82,8 @@ def create_mcp(
     ) -> dict[str, Any]:
         return await _safe_call(
             host_runtime.submit_repair(
+                task_id=task_id,
+                investigation_id=investigation_id,
                 run_id=run_id,
                 step_id=step_id,
                 repair_attempt=repair_attempt,
@@ -93,21 +95,20 @@ def create_mcp(
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
     async def xuanji_finalize(
-        run_id: Annotated[str, Field(description="Queue-complete run ID")],
+        task_id: Annotated[str, Field(description="Existing task ID")],
+        investigation_id: Annotated[
+            str, Field(description="Investigation awaiting one writer patch")
+        ],
         writer_patch: Annotated[
             dict[str, Any],
             Field(description="Text-only patch derived from the writer pack"),
         ],
-        analysis_context: Annotated[
-            dict[str, Any],
-            Field(description="Trusted DQC investigation identity"),
-        ],
     ) -> dict[str, Any]:
         return await _safe_call(
             host_runtime.finalize(
-                run_id=run_id,
+                task_id=task_id,
+                investigation_id=investigation_id,
                 writer_patch=writer_patch,
-                analysis_context=analysis_context,
             )
         )
 
