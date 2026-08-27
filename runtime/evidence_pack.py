@@ -71,8 +71,9 @@ class EvidencePackBuilder:
                     }
                 )
 
+        analysis_profile = state.get("analysis_profile", "primary_v1")
         pack = {
-            "analysis_profile": "primary_v1",
+            "analysis_profile": analysis_profile,
             "run_id": state["run_id"],
             "metric": state["metric"],
             "analysis_date": state["analysis_date"],
@@ -83,6 +84,48 @@ class EvidencePackBuilder:
             "candidates": exposed_candidates,
             "evidence_limits": evidence_limits,
         }
+        if analysis_profile == "primary_v2":
+            post_primary = state.get("post_primary")
+            if not isinstance(post_primary, dict) or post_primary.get("status") != (
+                "completed"
+            ):
+                raise EvidencePackError("primary_v2 writer pack requires calibration")
+            pack["post_primary_steps"] = []
+            for step in post_primary.get("steps", []):
+                writer_step = {"step": step["id"], "status": step["status"]}
+                for field in ("reason", "failure_code", "limit_code"):
+                    if field in step:
+                        writer_step[field] = step[field]
+                pack["post_primary_steps"].append(writer_step)
+                limit_code = step.get("limit_code")
+                if isinstance(limit_code, str):
+                    evidence_limits.append(limit_code)
+                failure_code = step.get("failure_code")
+                if isinstance(failure_code, str):
+                    evidence_limits.append(f"{step['id']}:{failure_code}")
+                if step["id"] == "counterfactual" and step["status"] == "succeeded":
+                    result = step.get("result")
+                    if not isinstance(result, dict):
+                        raise EvidencePackError(
+                            "succeeded counterfactual lacks its machine result"
+                        )
+                    pack["counterfactual"] = {
+                        field: result[field]
+                        for field in (
+                            "dimension",
+                            "value",
+                            "label",
+                            "current_without",
+                            "baseline_without",
+                            "removal_delta_bp",
+                            "restoration_ratio",
+                            "family_adverse_share",
+                            "trigger_reasons",
+                            "dominant",
+                            "dominance_reasons",
+                            "finding",
+                        )
+                    }
         root_metric = self.root_metric(state)
         if root_metric is not None:
             pack["root_metric"] = root_metric

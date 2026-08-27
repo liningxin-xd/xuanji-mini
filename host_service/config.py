@@ -25,6 +25,7 @@ class HostServiceSettings:
     runs_root: Path
     tasks_root: Path
     results_root: Path
+    analysis_profile: str = "primary_v1"
 
     @classmethod
     def from_env(
@@ -65,6 +66,13 @@ class HostServiceSettings:
             values.get("XUANJI_RESULTS_ROOT", "/var/lib/xuanji/results"),
             "XUANJI_RESULTS_ROOT",
         )
+        analysis_profile = values.get(
+            "XUANJI_ANALYSIS_PROFILE", "primary_v1"
+        ).strip()
+        if analysis_profile not in {"primary_v1", "primary_v2"}:
+            raise HostConfigurationError(
+                "XUANJI_ANALYSIS_PROFILE must be primary_v1 or primary_v2"
+            )
         return cls(
             public_url=public_url,
             bind_host=bind_host,
@@ -78,6 +86,7 @@ class HostServiceSettings:
             runs_root=runs_root,
             tasks_root=tasks_root,
             results_root=results_root,
+            analysis_profile=analysis_profile,
         )
 
 

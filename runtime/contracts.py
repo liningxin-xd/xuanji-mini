@@ -42,6 +42,14 @@ EXPECTED_PLAN_STEPS = {
     ),
 }
 
+EXPECTED_ANALYSIS_PROFILES = {"primary_v1", "primary_v2"}
+EXPECTED_POST_PRIMARY_STEPS = (
+    "counterfactual",
+    "secondary",
+    "game_background",
+    "error_code",
+)
+
 EXPECTED_LOCKED_ASSETS = {
     "references/queries/registered-monitor-root.yaml",
     "references/queries/download-game-attribution.yaml",
@@ -163,13 +171,18 @@ class RepositoryContracts:
             self.contract_root / "metric-definitions.lock.json"
         )
         self.result_schemas_path = self.contract_root / "result-schemas.yaml"
+        self.analysis_profiles_path = self.contract_root / "analysis-profiles.yaml"
+        self.post_primary_plan_path = self.contract_root / "post-primary-plan.yaml"
 
         self._plans_raw = _load_yaml_mapping(self.execution_plans_path)
         self._registry = _load_yaml_mapping(self.query_registry_path)
         self._asset_lock = _load_json_mapping(self.asset_lock_path)
         self._metric_definitions = _load_json_mapping(self.metric_definitions_path)
         self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
+        self._analysis_profiles = _load_yaml_mapping(self.analysis_profiles_path)
+        self._post_primary_plans = _load_yaml_mapping(self.post_primary_plan_path)
         self._plans = self._validate_plans()
+        self._validate_analysis_profiles()
         self._asset_hashes = self._load_asset_hashes()
         self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
@@ -204,6 +217,10 @@ class RepositoryContracts:
         return sha256_bytes(self.result_schemas_path.read_bytes())
 
     @property
+    def default_analysis_profile(self) -> str:
+        return self._analysis_profiles["default_profile"]
+
+    @property
     def definition_bundle_sha256(self) -> str:
         return self._metric_definitions["bundle_sha256"]
 
@@ -223,6 +240,28 @@ class RepositoryContracts:
         if not isinstance(definition, dict):
             raise ContractError(f"compiled metric definition is missing: {metric}")
         return deepcopy(definition)
+
+    def analysis_profile(self, profile: str) -> dict[str, Any]:
+        value = self._analysis_profiles["profiles"].get(profile)
+        if not isinstance(value, dict):
+            raise ContractError(f"unknown analysis profile: {profile}")
+        return deepcopy(value)
+
+    def analysis_profile_sha256(self, profile: str) -> str:
+        return canonical_sha256(
+            {"profile": profile, "contract": self.analysis_profile(profile)}
+        )
+
+    def post_primary_plan(self, plan_id: str) -> dict[str, Any]:
+        value = self._post_primary_plans["plans"].get(plan_id)
+        if not isinstance(value, dict):
+            raise ContractError(f"unknown post-primary plan: {plan_id}")
+        return deepcopy(value)
+
+    def post_primary_plan_contract_sha256(self, plan_id: str) -> str:
+        return canonical_sha256(
+            {"plan_id": plan_id, "contract": self.post_primary_plan(plan_id)}
+        )
 
     def result_schema(self, schema_id: str) -> dict[str, Any]:
         schema = self._result_schemas["schemas"].get(schema_id)
@@ -461,6 +500,59 @@ class RepositoryContracts:
                 sha256=canonical_sha256(raw),
             )
         return plans
+
+    def _validate_analysis_profiles(self) -> None:
+        profiles = self._analysis_profiles
+        if profiles.get("version") != 1:
+            raise ContractError("analysis profile version must be 1")
+        raw_profiles = profiles.get("profiles")
+        if not isinstance(raw_profiles, dict) or set(raw_profiles) != (
+            EXPECTED_ANALYSIS_PROFILES
+        ):
+            raise ContractError("analysis profiles must define primary_v1 and primary_v2")
+        if profiles.get("default_profile") != "primary_v1":
+            raise ContractError("primary_v1 must remain the default analysis profile")
+
+        post_plans = self._post_primary_plans
+        if post_plans.get("version") != 1 or set(post_plans.get("plans", {})) != {
+            "post_primary_v1"
+        }:
+            raise ContractError("post-primary plans must define post_primary_v1")
+        plan = post_plans["plans"]["post_primary_v1"]
+        steps = plan.get("steps") if isinstance(plan, dict) else None
+        if not isinstance(steps, list) or tuple(
+            item.get("id") for item in steps if isinstance(item, dict)
+        ) != EXPECTED_POST_PRIMARY_STEPS:
+            raise ContractError("post-primary step order does not match the contract")
+        expected_queries = {
+            "counterfactual": ("deterministic", 0),
+            "secondary": ("query", 1),
+            "game_background": ("query", 3),
+            "error_code": ("query", 1),
+        }
+        for step in steps:
+            expected = expected_queries.get(step.get("id"))
+            if expected is None or (step.get("kind"), step.get("max_queries")) != expected:
+                raise ContractError(f"invalid post-primary step contract: {step}")
+        if plan.get("max_additional_queries") != sum(
+            item[1] for item in expected_queries.values()
+        ):
+            raise ContractError("post-primary query budget must total five")
+
+        primary_v1 = raw_profiles["primary_v1"]
+        primary_v2 = raw_profiles["primary_v2"]
+        if primary_v1 != {
+            "primary_plan": "fixed_queue_v1",
+            "post_primary_plan": None,
+            "enabled_post_primary_steps": [],
+        }:
+            raise ContractError("primary_v1 profile behavior must remain frozen")
+        if (
+            primary_v2.get("primary_plan") != "fixed_queue_v1"
+            or primary_v2.get("post_primary_plan") != "post_primary_v1"
+            or primary_v2.get("enabled_post_primary_steps") != ["counterfactual"]
+        ):
+            raise ContractError("primary_v2 must currently enable only counterfactual")
 
     def _load_asset_hashes(self) -> dict[str, str]:
         if self._asset_lock.get("version") != 1:

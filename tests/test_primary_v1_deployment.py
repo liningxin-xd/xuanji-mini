@@ -48,6 +48,7 @@ class PrimaryV1DeploymentTest(unittest.TestCase):
             "https://dview.example.test/mcp/query",
             config["XUANJI_DVIEW_MCP_URL"],
         )
+        self.assertEqual("primary_v1", config["XUANJI_ANALYSIS_PROFILE"])
 
     def test_tagged_or_placeholder_images_fail_the_release_gate(self):
         for image in ("registry.example.test/xuanji-mini:latest", TEMPLATE_IMAGE):
@@ -78,6 +79,13 @@ class PrimaryV1DeploymentTest(unittest.TestCase):
         self._document(network, "NetworkPolicy")["spec"]["ingress"] = [{}]
         with self.assertRaises(DeploymentContractError):
             validate_documents(network, allow_template_image=True)
+
+        profile = deepcopy(self.documents)
+        self._document(profile, "ConfigMap")["data"][
+            "XUANJI_ANALYSIS_PROFILE"
+        ] = "primary_v2"
+        with self.assertRaises(DeploymentContractError):
+            validate_documents(profile, allow_template_image=True)
 
     def test_rendered_yaml_round_trips_without_secret_documents(self):
         rendered = render_documents(

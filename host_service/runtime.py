@@ -133,6 +133,7 @@ class XuanjiHostRuntime:
             task_result_store=self._task_sink,
             tasks_root=self._settings.tasks_root,
             repository_root=self._repository_root,
+            analysis_profile=self._settings.analysis_profile,
         )
 
     def _build_host(self, dview_query: Callable[..., Any]) -> PrimaryInvestigationHost:
@@ -143,6 +144,7 @@ class XuanjiHostRuntime:
             runs_root=self._settings.runs_root,
             validated_result_sink=self._sink,
             repository_root=self._repository_root,
+            analysis_profile=self._settings.analysis_profile,
         )
 
     def _lock_for(self, run_id: str) -> asyncio.Lock:

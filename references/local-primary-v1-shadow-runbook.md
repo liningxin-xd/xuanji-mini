@@ -98,6 +98,7 @@ from the DView token and from each other:
 export XUANJI_HOST_PUBLIC_URL=http://127.0.0.1:8091
 export XUANJI_HOST=127.0.0.1
 export XUANJI_PORT=8091
+export XUANJI_ANALYSIS_PROFILE=primary_v1
 export XUANJI_HOST_BEARER_TOKEN="$(openssl rand -hex 32)"
 export XUANJI_DVIEW_MCP_URL=https://dview-mcp-public.tapsvc.com/mcp/query
 export XUANJI_RECEIPT_KEY_ID=primary-v1-local-shadow

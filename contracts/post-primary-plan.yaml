@@ -1,0 +1,18 @@
+version: 1
+
+plans:
+  post_primary_v1:
+    max_additional_queries: 5
+    steps:
+      - id: counterfactual
+        kind: deterministic
+        max_queries: 0
+      - id: secondary
+        kind: query
+        max_queries: 1
+      - id: game_background
+        kind: query
+        max_queries: 3
+      - id: error_code
+        kind: query
+        max_queries: 1

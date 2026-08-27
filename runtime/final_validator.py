@@ -220,6 +220,8 @@ class FinalEvidenceValidator:
                     f"findings exceed candidate_count for {dimension}"
                 )
 
+        self._validate_counterfactual(state, investigation)
+
         positive_candidate_count = sum(
             count for count in candidate_counts.values() if count > 0
         )
@@ -324,6 +326,66 @@ class FinalEvidenceValidator:
                 continue
             return candidate
         return None
+
+    def _validate_counterfactual(
+        self, state: dict[str, Any], investigation: dict[str, Any]
+    ) -> None:
+        expected = None
+        post_primary = state.get("post_primary")
+        if isinstance(post_primary, dict):
+            step = next(
+                (
+                    item
+                    for item in post_primary.get("steps", [])
+                    if isinstance(item, dict) and item.get("id") == "counterfactual"
+                ),
+                None,
+            )
+            if isinstance(step, dict) and step.get("status") == "succeeded":
+                expected = step.get("result")
+        actual = investigation.get("counterfactual")
+        if expected is None:
+            if "counterfactual" in investigation:
+                raise FinalValidationError(
+                    "counterfactual was not produced by post-primary calibration"
+                )
+            return
+        if investigation.get("status") != "completed" or not isinstance(actual, dict):
+            raise FinalValidationError(
+                "completed calibrated investigation requires counterfactual"
+            )
+        fields = {
+            "dimension",
+            "value",
+            "label",
+            "removal_delta_bp",
+            "restoration_ratio",
+            "finding",
+        }
+        if set(actual) != fields:
+            raise FinalValidationError("counterfactual fields do not match the contract")
+        for field in ("dimension", "value", "label", "finding"):
+            if actual[field] != expected.get(field):
+                raise FinalValidationError(
+                    f"counterfactual {field} does not match machine evidence"
+                )
+        for field in ("removal_delta_bp", "restoration_ratio"):
+            value = actual[field]
+            expected_value = expected.get(field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not math.isclose(
+                    float(value),
+                    float(expected_value),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise FinalValidationError(
+                    f"counterfactual {field} does not match machine evidence"
+                )
 
     def _query_ids_in(self, value: Any) -> list[str]:
         result: list[str] = []

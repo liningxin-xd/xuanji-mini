@@ -23,6 +23,10 @@ credentials are present:
 2. a read-only Host-to-DView service token or PAT;
 3. a Host-owned receipt secret of at least 32 bytes.
 
+`XUANJI_ANALYSIS_PROFILE` is deployment-owned and accepts only `primary_v1` or
+`primary_v2`. The committed production template remains explicitly pinned to
+`primary_v1`; local `primary_v2` development does not change that deployment.
+
 Grant the DView machine identity only the registered Android download/install
 monitor tables required by the locked query assets. Do not reuse an interactive
 user OAuth token. Register the model tool endpoint as `<public-url>/mcp`; do not

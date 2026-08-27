@@ -100,6 +100,26 @@ class FinalAssembler:
         if findings:
             investigation["top_findings"] = findings
 
+        counterfactual = writer_pack.get("counterfactual")
+        if counterfactual is not None:
+            if status != "completed" or not isinstance(counterfactual, dict):
+                raise FinalAssemblyError(
+                    "counterfactual requires a completed machine writer pack"
+                )
+            required = (
+                "dimension",
+                "value",
+                "label",
+                "removal_delta_bp",
+                "restoration_ratio",
+                "finding",
+            )
+            if any(field not in counterfactual for field in required):
+                raise FinalAssemblyError("machine counterfactual is incomplete")
+            investigation["counterfactual"] = {
+                field: deepcopy(counterfactual[field]) for field in required
+            }
+
         return {
             "source": context["source"],
             "project": context["project"],

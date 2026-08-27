@@ -1,0 +1,15 @@
+version: 1
+
+default_profile: primary_v1
+
+profiles:
+  primary_v1:
+    primary_plan: fixed_queue_v1
+    post_primary_plan: null
+    enabled_post_primary_steps: []
+
+  primary_v2:
+    primary_plan: fixed_queue_v1
+    post_primary_plan: post_primary_v1
+    enabled_post_primary_steps:
+      - counterfactual

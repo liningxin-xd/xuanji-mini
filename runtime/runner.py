@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .contracts import (
     sha256_bytes,
     sha256_text,
 )
+from .calibration_runner import CalibrationError, CalibrationRunner
 from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .final_assembler import FinalAssembler, FinalAssemblyError
 from .final_validator import FinalEvidenceValidator, FinalValidationError
@@ -41,11 +43,20 @@ class AttributionRunner:
         root: Path | str = ROOT,
         runs_root: Path | str | None = None,
         trusted_receipt_verifier: TrustedReceiptVerifier | None = None,
+        analysis_profile: str | None = None,
     ):
         self.root = Path(root).resolve()
         self.contracts = RepositoryContracts(self.root)
         self.query_builder = QueryBuilder(self.contracts)
         self.result_validator = ResultValidator(self.contracts)
+        configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
+        self.analysis_profile = (
+            analysis_profile
+            or configured_profile
+            or self.contracts.default_analysis_profile
+        )
+        self.contracts.analysis_profile(self.analysis_profile)
+        self.calibration_runner = CalibrationRunner(self.contracts)
         self.trusted_receipt_verifier = trusted_receipt_verifier
         configured_runs_root = os.environ.get("XUANJI_RUNS_ROOT")
         if runs_root is not None:
@@ -135,6 +146,12 @@ class AttributionRunner:
                     "expected": frozen_root,
                     "actual": state.get("canonical_root_metric"),
                 }
+            state_profile = state.get("analysis_profile", "primary_v1")
+            if state_profile != self.analysis_profile:
+                mismatches["analysis_profile"] = {
+                    "expected": self.analysis_profile,
+                    "actual": state_profile,
+                }
             if mismatches:
                 raise RunnerError(
                     f"resume arguments do not match immutable run state: {mismatches}"
@@ -170,6 +187,11 @@ class AttributionRunner:
                     "root_current_value": None,
                     "root_baseline_value": None,
                     "root_delta": None,
+                    "root_current_numerator": None,
+                    "root_current_denominator": None,
+                    "root_baseline_numerator": None,
+                    "root_baseline_denominator": None,
+                    "family_adverse_impact_bp": None,
                     "failure_code": None,
                     "reason": None,
                     "warning_codes": [],
@@ -198,6 +220,15 @@ class AttributionRunner:
             "query_registry_sha256": self.contracts.query_registry_sha256,
             "triage_sha256": self.contracts.triage_sha256,
             "result_schemas_sha256": self.contracts.result_schemas_sha256,
+            "analysis_profile": self.analysis_profile,
+            "analysis_profile_sha256": self.contracts.analysis_profile_sha256(
+                self.analysis_profile
+            ),
+            "post_primary_plan_sha256": (
+                self.contracts.post_primary_plan_contract_sha256("post_primary_v1")
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
             "chain": chain,
             "game_type": game_type,
             "metric": metric,
@@ -209,6 +240,7 @@ class AttributionRunner:
             "evidence_export_sha256": None,
             "final_analysis_sha256": None,
             "validation_receipt": None,
+            "post_primary": None,
             "steps": steps,
             "processed_events": {},
         }
@@ -387,6 +419,11 @@ class AttributionRunner:
                 step["root_current_value"] = outcome.root_current_value
                 step["root_baseline_value"] = outcome.root_baseline_value
                 step["root_delta"] = outcome.root_delta
+                step["root_current_numerator"] = outcome.root_current_numerator
+                step["root_current_denominator"] = outcome.root_current_denominator
+                step["root_baseline_numerator"] = outcome.root_baseline_numerator
+                step["root_baseline_denominator"] = outcome.root_baseline_denominator
+                step["family_adverse_impact_bp"] = outcome.family_adverse_impact_bp
                 step["warning_codes"] = list(outcome.warning_codes)
         else:
             raw_error = {
@@ -446,6 +483,7 @@ class AttributionRunner:
                 raise RunnerError(
                     f"cannot export non-terminal step {step['id']}: {step['status']}"
                 )
+        state = self._ensure_post_primary(state)
         evidence = self._export_evidence(state)
         evidence_sha256 = canonical_sha256(evidence)
         export_path = self._run_dir(run_id) / "exports/attribution-execution.json"
@@ -550,13 +588,52 @@ class AttributionRunner:
             if step["warning_codes"]:
                 exported["warning_codes"] = list(step["warning_codes"])
             exported_steps.append(exported)
-        return {
+        evidence = {
             "mode": "full_queue",
             "chain": state["chain"],
             "game_type": state["game_type"],
             "execution_mode": state["execution_mode"],
             "steps": exported_steps,
         }
+        if state.get("analysis_profile", "primary_v1") == "primary_v2":
+            post_primary = state.get("post_primary")
+            if not isinstance(post_primary, dict) or post_primary.get("status") != (
+                "completed"
+            ):
+                raise RunnerError("primary_v2 post-primary analysis is incomplete")
+            evidence.update(
+                {
+                    "analysis_profile": "primary_v2",
+                    "primary_evidence_sha256": post_primary[
+                        "primary_evidence_sha256"
+                    ],
+                    "post_primary": {
+                        "status": post_primary["status"],
+                        "steps": deepcopy(post_primary["steps"]),
+                    },
+                }
+            )
+        return evidence
+
+    def _ensure_post_primary(self, state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("analysis_profile", "primary_v1") == "primary_v1":
+            return state
+        if state.get("post_primary") is None:
+            plan = self.calibration_runner.create_plan(state)
+            if plan is None:
+                raise RunnerError("primary_v2 lacks its post-primary plan")
+            state["post_primary"] = plan
+            state["revision"] += 1
+            self._write_state(state)
+        try:
+            result = self.calibration_runner.execute(state)
+        except CalibrationError as exc:
+            raise RunnerError(str(exc)) from exc
+        if result != state.get("post_primary"):
+            state["post_primary"] = result
+            state["revision"] += 1
+            self._write_state(state)
+        return state
 
     def load_state(self, run_id: str) -> dict[str, Any]:
         return self._load_state(run_id)
@@ -831,6 +908,31 @@ class AttributionRunner:
         for field, expected_hash in expected_contract_hashes.items():
             if state.get(field) != expected_hash:
                 raise RunnerError(f"state {field} no longer matches the contract")
+        analysis_profile = state.get("analysis_profile", "primary_v1")
+        if analysis_profile != self.analysis_profile:
+            raise RunnerError("state analysis profile does not match the Host profile")
+        try:
+            self.contracts.analysis_profile(analysis_profile)
+        except ContractError as exc:
+            raise RunnerError(str(exc)) from exc
+        profile_hashes = {
+            "analysis_profile_sha256": self.contracts.analysis_profile_sha256(
+                analysis_profile
+            ),
+            "post_primary_plan_sha256": (
+                self.contracts.post_primary_plan_contract_sha256("post_primary_v1")
+                if analysis_profile == "primary_v2"
+                else None
+            ),
+        }
+        for field, expected_hash in profile_hashes.items():
+            actual = state.get(field)
+            if field == "analysis_profile_sha256" and actual is None and (
+                analysis_profile == "primary_v1"
+            ):
+                continue
+            if actual != expected_hash:
+                raise RunnerError(f"state {field} no longer matches the contract")
         expected_analysis_date = self._derive_analysis_date(
             state.get("chain"), state.get("alert_date")
         )
@@ -1002,8 +1104,23 @@ class AttributionRunner:
                             "delta": float(root_values[2]),
                         }
                     )
+                    self._validate_private_primary_counts(
+                        step,
+                        required=analysis_profile == "primary_v2",
+                    )
                 elif any(value is not None for value in root_values):
                     raise RunnerError("diagnostic step cannot contain root metric facts")
+                elif any(
+                    step.get(field) is not None
+                    for field in (
+                        "root_current_numerator",
+                        "root_current_denominator",
+                        "root_baseline_numerator",
+                        "root_baseline_denominator",
+                        "family_adverse_impact_bp",
+                    )
+                ):
+                    raise RunnerError("diagnostic step cannot contain private root counts")
             elif candidate_count is not None:
                 raise RunnerError("non-succeeded step cannot have candidate_count")
             elif step.get("candidates") != []:
@@ -1014,6 +1131,11 @@ class AttributionRunner:
                     "root_current_value",
                     "root_baseline_value",
                     "root_delta",
+                    "root_current_numerator",
+                    "root_current_denominator",
+                    "root_baseline_numerator",
+                    "root_baseline_denominator",
+                    "family_adverse_impact_bp",
                 )
             ):
                 raise RunnerError("non-succeeded step cannot contain root metric facts")
@@ -1105,6 +1227,8 @@ class AttributionRunner:
                 )
             ):
                 raise RunnerError("active run contains final evidence metadata")
+            if state.get("post_primary") is not None:
+                raise RunnerError("active run cannot contain post-primary state")
         else:
             if state.get("status") not in {
                 RunStatus.QUEUE_COMPLETE.value,
@@ -1140,6 +1264,90 @@ class AttributionRunner:
                 )
                 if receipt_hash != canonical_sha256(receipt_without_hash):
                     raise RunnerError("validation receipt integrity check failed")
+            post_primary = state.get("post_primary")
+            if analysis_profile == "primary_v1":
+                if post_primary is not None:
+                    raise RunnerError("primary_v1 cannot contain post-primary state")
+            elif post_primary is not None:
+                try:
+                    self.calibration_runner.planner.validate_identity(
+                        state, post_primary
+                    )
+                    if post_primary.get("status") == "completed":
+                        self.calibration_runner.execute(state)
+                except (CalibrationError, ValueError) as exc:
+                    raise RunnerError(str(exc)) from exc
+            if isinstance(state.get("evidence_export_sha256"), str) and (
+                analysis_profile == "primary_v2"
+                and (
+                    not isinstance(post_primary, dict)
+                    or post_primary.get("status") != "completed"
+                )
+            ):
+                raise RunnerError("exported primary_v2 run lacks completed calibration")
+
+    def _validate_private_primary_counts(
+        self, step: dict[str, Any], *, required: bool
+    ) -> None:
+        fields = (
+            "root_current_numerator",
+            "root_current_denominator",
+            "root_baseline_numerator",
+            "root_baseline_denominator",
+            "family_adverse_impact_bp",
+        )
+        values = [step.get(field) for field in fields]
+        if all(value is None for value in values):
+            if required:
+                raise RunnerError("primary_v2 step lacks private root counts")
+            return
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0
+            for value in values
+        ):
+            raise RunnerError("primary step private root counts are invalid")
+        normalized = list(map(float, values))
+        (
+            current_numerator,
+            current_denominator,
+            baseline_numerator,
+            baseline_denominator,
+            _,
+        ) = normalized
+        if current_denominator <= 0 or baseline_denominator <= 0:
+            raise RunnerError("primary step private root denominators must be positive")
+        if not math.isclose(
+            current_numerator / current_denominator,
+            float(step["root_current_value"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            baseline_numerator / baseline_denominator,
+            float(step["root_baseline_value"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise RunnerError("primary step private root counts do not match root rates")
+        for candidate in step["candidates"]:
+            counts = candidate.get("private_counts")
+            if not isinstance(counts, dict) or set(counts) != {
+                "current_numerator",
+                "current_denominator",
+                "baseline_numerator",
+                "baseline_denominator",
+            }:
+                raise RunnerError("primary candidate private counts are invalid")
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                for value in counts.values()
+            ):
+                raise RunnerError("primary candidate private counts are invalid")
 
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)

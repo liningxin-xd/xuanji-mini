@@ -13,6 +13,7 @@ data:
   XUANJI_HOST: 0.0.0.0
   XUANJI_PORT: "8091"
   XUANJI_LOG_LEVEL: INFO
+  XUANJI_ANALYSIS_PROFILE: primary_v1
   XUANJI_DVIEW_MCP_URL: https://dview-mcp-public.tapsvc.com/mcp/query
   XUANJI_DVIEW_READ_TIMEOUT_SECONDS: "660"
   XUANJI_RECEIPT_KEY_ID: xuanji-primary-host-v1
