@@ -13,7 +13,7 @@ from a Host process below the model/UI boundary:
   completed task preview.
 
 `PrimaryInvestigationHost` remains an internal stable library. The task
-coordinator owns DQC normalization, exact registered routing, root preflight,
+coordinator owns DQC normalization, deterministic registered binding, root preflight,
 newness gating, serial investigation order, and final task assembly. It creates
 trusted schema-v4 runs only after root preflight selects `full_queue` and passes
 the frozen canonical root metric into every family. Investigation-level methods

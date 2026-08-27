@@ -27,6 +27,7 @@ _RULE_FIELDS = {
     "criticalThreshold",
     "warningThreshold",
     "checkResult",
+    "property",
 }
 
 
@@ -83,6 +84,7 @@ class AlertNormalizer:
                     ),
                     "threshold": self._threshold(raw_rule),
                     "check_result": deepcopy(raw_rule.get("checkResult")),
+                    "monitor_field": self._text(raw_rule.get("property")),
                     "unknown_fields": {
                         key: deepcopy(value)
                         for key, value in raw_rule.items()

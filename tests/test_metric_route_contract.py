@@ -107,8 +107,25 @@ class MetricRouteContractTest(unittest.TestCase):
             {row["canonical_metric"] for row in rows},
         )
         self.assertTrue(
-            all("normalized_rule_name" in row for row in rows),
-            "registered routes must use exact normalized full rule names",
+            all(
+                {
+                    "route_id",
+                    "metric_hint",
+                    "observed_rule_names",
+                    "canonical_metric",
+                }.issubset(row)
+                for row in rows
+            ),
+            "registered routes must bind DQC identities to KB metrics",
+        )
+        self.assertEqual(
+            len(rows),
+            len(
+                {
+                    (row["object_table"], row["metric_hint"], row["rule_kind"])
+                    for row in rows
+                }
+            ),
         )
 
     def test_registered_root_selects_every_routed_monitor_field(self):

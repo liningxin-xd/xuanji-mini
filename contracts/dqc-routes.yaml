@@ -1,8 +1,11 @@
-version: 1
+version: 2
 object_tables:
   - tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
 routes:
-  - normalized_rule_name: "【apk下载完成率】最近1天_低于80%"
+  - route_id: android.app.download-completion.absolute-1d
+    metric_hint: apk下载完成率
+    observed_rule_names:
+      - "【apk下载完成率】最近1天_低于80%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -14,7 +17,11 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk下载完成率】对比过去7天均值_低于98%"
+  - route_id: android.app.download-completion.relative-7d
+    metric_hint: apk下载完成率
+    observed_rule_names:
+      - "【apk下载完成率】最近1天_对比过去7天均值_低于2%(相对值)"
+      - "【apk下载完成率】对比过去7天均值_低于98%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -26,7 +33,10 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk下载完成率】连续3周下降"
+  - route_id: android.app.download-completion.trend-3w
+    metric_hint: apk下载完成率
+    observed_rule_names:
+      - "【apk下载完成率】连续3周下降"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -38,7 +48,10 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk下载失败率】最近1天_高于3%"
+  - route_id: android.app.download-failure.absolute-1d
+    metric_hint: apk下载失败率
+    observed_rule_names:
+      - "【apk下载失败率】最近1天_高于3%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -50,7 +63,10 @@ routes:
     monitor_numerator_field: game_download_failed_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk下载失败次数比率】最近1天_高于10%"
+  - route_id: android.app.download-failure-count-ratio.absolute-1d
+    metric_hint: apk下载失败次数比率
+    observed_rule_names:
+      - "【apk下载失败次数比率】最近1天_高于10%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -62,7 +78,11 @@ routes:
     monitor_numerator_field: game_download_failed_cnt_1d
     monitor_denominator_field: game_download_cnt_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk人为停止率】最近1天_高于6%"
+  - route_id: android.app.download-human-stop.absolute-1d
+    metric_hint: apk人为停止率
+    observed_rule_names:
+      - "【apk人为停止率】最近1天_高于6.0%"
+      - "【apk人为停止率】最近1天_高于6%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: app
@@ -74,7 +94,10 @@ routes:
     monitor_numerator_field: game_download_stop_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【apk下载完成->安装完成率】最近1天_低于73%"
+  - route_id: android.app.download-install-completion.absolute-1d
+    metric_hint: apk下载完成->安装完成率
+    observed_rule_names:
+      - "【apk下载完成->安装完成率】最近1天_低于73%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: install
     game_type: app
@@ -86,7 +109,10 @@ routes:
     monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
     monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
     analysis_lag_days: 2
-  - normalized_rule_name: "【apk下载完成->安装完成率】对比过去7天均值_低于96%"
+  - route_id: android.app.download-install-completion.relative-7d
+    metric_hint: apk下载完成->安装完成率
+    observed_rule_names:
+      - "【apk下载完成->安装完成率】对比过去7天均值_低于96%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: install
     game_type: app
@@ -98,7 +124,10 @@ routes:
     monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
     monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
     analysis_lag_days: 2
-  - normalized_rule_name: "【apk下载完成->安装完成率】连续3周下降"
+  - route_id: android.app.download-install-completion.trend-3w
+    metric_hint: apk下载完成->安装完成率
+    observed_rule_names:
+      - "【apk下载完成->安装完成率】连续3周下降"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: install
     game_type: app
@@ -110,7 +139,10 @@ routes:
     monitor_numerator_field: game_download_complete_and_install_complete_prev_2d_device_num_p3d
     monitor_denominator_field: game_download_complete_prev_2d_device_num_1d
     analysis_lag_days: 2
-  - normalized_rule_name: "【沙盒下载完成率】最近1天_低于75%"
+  - route_id: android.sandbox.download-completion.absolute-1d
+    metric_hint: 沙盒下载完成率
+    observed_rule_names:
+      - "【沙盒下载完成率】最近1天_低于75%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -122,7 +154,10 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒下载完成率】对比过去7天均值_低于94%"
+  - route_id: android.sandbox.download-completion.relative-7d
+    metric_hint: 沙盒下载完成率
+    observed_rule_names:
+      - "【沙盒下载完成率】对比过去7天均值_低于94%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -134,7 +169,10 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒下载完成率】连续3周下降"
+  - route_id: android.sandbox.download-completion.trend-3w
+    metric_hint: 沙盒下载完成率
+    observed_rule_names:
+      - "【沙盒下载完成率】连续3周下降"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -146,7 +184,10 @@ routes:
     monitor_numerator_field: game_download_complete_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒下载失败率】最近1天_高于1%"
+  - route_id: android.sandbox.download-failure.absolute-1d
+    metric_hint: 沙盒下载失败率
+    observed_rule_names:
+      - "【沙盒下载失败率】最近1天_高于1%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -158,7 +199,10 @@ routes:
     monitor_numerator_field: game_download_failed_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒下载失败次数比率】最近1天_高于3%"
+  - route_id: android.sandbox.download-failure-count-ratio.absolute-1d
+    metric_hint: 沙盒下载失败次数比率
+    observed_rule_names:
+      - "【沙盒下载失败次数比率】最近1天_高于3%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -170,7 +214,10 @@ routes:
     monitor_numerator_field: game_download_failed_cnt_1d
     monitor_denominator_field: game_download_cnt_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒人为停止率】最近1天_高于1.8%"
+  - route_id: android.sandbox.download-human-stop.absolute-1d
+    metric_hint: 沙盒人为停止率
+    observed_rule_names:
+      - "【沙盒人为停止率】最近1天_高于1.8%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: download
     game_type: sandbox
@@ -182,7 +229,10 @@ routes:
     monitor_numerator_field: game_download_stop_device_num_1d
     monitor_denominator_field: game_download_device_num_1d
     analysis_lag_days: 0
-  - normalized_rule_name: "【沙盒下载完成->安装完成率】最近1天_低于99%"
+  - route_id: android.sandbox.download-install-completion.absolute-1d
+    metric_hint: 沙盒下载完成->安装完成率
+    observed_rule_names:
+      - "【沙盒下载完成->安装完成率】最近1天_低于99%"
     object_table: tap_dw.ads_dmg_quality_platform_download_chain_monitor_1d
     chain: install
     game_type: sandbox

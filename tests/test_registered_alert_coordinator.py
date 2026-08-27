@@ -32,7 +32,7 @@ ROOT_SPEC = yaml.safe_load(
 
 def rule_for(route: dict, *, partition: str = "dt=2026-08-24") -> dict:
     return {
-        "ruleName": route["normalized_rule_name"],
+        "ruleName": route["observed_rule_names"][0],
         "tableName": "ads_dmg_quality_platform_download_chain_monitor_1d",
         "actualExpression": partition,
         "property": route["monitor_field"],
@@ -260,23 +260,100 @@ def writer_patch(summary: str = "机器证据已完成当前调查。") -> dict:
 
 
 class AlertRouteAndPreflightTest(unittest.TestCase):
-    def test_all_sixteen_rules_resolve_exactly_and_metrics_do_not_swap(self):
+    def test_all_sixteen_bindings_resolve_observed_names_without_metric_swap(self):
         registry = DqcRouteRegistry(ROOT)
         self.assertEqual(16, len(registry.routes))
         for route in ROUTES:
-            with self.subTest(rule=route["normalized_rule_name"]):
-                resolved = registry.resolve(
-                    route["object_table"], route["normalized_rule_name"]
-                )
-                self.assertIsNotNone(resolved)
-                self.assertEqual(route["canonical_metric"], resolved.canonical_metric)
-                self.assertEqual(route["game_type"], resolved.game_type)
+            for rule_name in route["observed_rule_names"]:
+                with self.subTest(rule=rule_name):
+                    resolved = registry.resolve(route["object_table"], rule_name)
+                    self.assertIsNotNone(resolved)
+                    self.assertEqual(
+                        route["canonical_metric"], resolved.canonical_metric
+                    )
+                    self.assertEqual(route["game_type"], resolved.game_type)
         self.assertIsNone(
             registry.resolve(
                 ROUTES[0]["object_table"],
-                ROUTES[0]["normalized_rule_name"].replace("80%", "81%"),
+                "【apk未知指标】最近1天_低于80%",
             )
         )
+
+    def test_real_20260820_rule_names_resolve_and_group_by_kb_binding(self):
+        payload = payload_for(ROUTES[1], ROUTES[5], ROUTES[6], ROUTES[8], ROUTES[9])
+        payload["dqcEntityQuality"]["actualExpression"] = "dt=2026-08-20"
+        for rule in payload["ruleChecks"]:
+            rule["actualExpression"] = "dt=2026-08-20"
+            rule["taskId"] = "same-dqc-task-instance"
+        investigations = RouteResolver().resolve(AlertNormalizer().normalize(payload))
+
+        self.assertEqual(
+            [[0], [1], [2, 3], [4]],
+            [item["rule_indexes"] for item in investigations],
+        )
+        self.assertEqual(
+            ["下载完成率", "下载人为停止率", "下载安装完成率", "下载完成率"],
+            [item["route"]["canonical_metric"] for item in investigations],
+        )
+        self.assertTrue(all(item["status"] == "pending" for item in investigations))
+        self.assertTrue(
+            all(not item["profile_warnings"] for item in investigations)
+        )
+
+    def test_binding_fallback_accepts_title_drift_and_audits_profile(self):
+        payload = payload_for(ROUTES[1])
+        payload["ruleChecks"][0].update(
+            {
+                "ruleName": (
+                    "【ＡＰＫ下载完成率】最近1天_对比过去7天均值_低于3%(相对值)"
+                ),
+                "expectValue": 0.97,
+            }
+        )
+        investigation = RouteResolver().resolve(
+            AlertNormalizer().normalize(payload)
+        )[0]
+
+        self.assertEqual("pending", investigation["status"])
+        self.assertEqual("下载完成率", investigation["route"]["canonical_metric"])
+        self.assertEqual("relative_7d", investigation["route"]["rules"][0]["rule_kind"])
+        self.assertEqual(
+            [
+                "route_rule_name_profile_mismatch",
+                "route_threshold_profile_mismatch",
+            ],
+            investigation["profile_warnings"],
+        )
+
+    def test_similar_metric_names_never_cross_bind(self):
+        payload = payload_for(ROUTES[3])
+        payload["ruleChecks"][0].update(
+            {
+                "ruleName": "【apk下载失败率】最近1天_高于10%",
+                "expectValue": 0.10,
+            }
+        )
+        investigation = RouteResolver().resolve(
+            AlertNormalizer().normalize(payload)
+        )[0]
+
+        self.assertEqual("下载失败率", investigation["route"]["canonical_metric"])
+        self.assertNotEqual(
+            "下载失败次数比率", investigation["route"]["canonical_metric"]
+        )
+        payload["ruleChecks"][0]["ruleName"] = "【apk下载失败次数】最近1天_高于10%"
+        unresolved = RouteResolver().resolve(AlertNormalizer().normalize(payload))[0]
+        self.assertEqual("insufficient_definition", unresolved["status"])
+
+    def test_known_metric_with_unknown_rule_kind_remains_unresolved(self):
+        payload = payload_for(ROUTES[0])
+        payload["ruleChecks"][0]["ruleName"] = "【apk下载完成率】自定义波动规则"
+        investigation = RouteResolver().resolve(
+            AlertNormalizer().normalize(payload)
+        )[0]
+
+        self.assertEqual("insufficient_definition", investigation["status"])
+        self.assertIsNone(investigation["route"])
 
     def test_normalizer_preserves_unknown_fields_and_groups_each_index_once(self):
         payload = payload_for(*ROUTES[:3], ROUTES[9])

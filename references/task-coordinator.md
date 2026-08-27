@@ -25,9 +25,12 @@ the Host. Resume fails closed if the current definition bundle differs.
 ## Investigation Formation
 
 The normalizer preserves zero-based rule indexes and unknown input fields. The
-route resolver performs exact normalized matching against
-`contracts/dqc-routes.yaml`; it never performs fuzzy metric or game-type
-inference.
+route resolver first checks observed names, then deterministically resolves the
+registered `object_table + metric_hint + rule_kind` binding in
+`contracts/dqc-routes.yaml`. `canonical_metric` must resolve through the
+compiled metric-definition lock and the selected execution plan. Title,
+operator, field, and threshold drift is audit metadata; the resolver never
+uses an LLM, fuzzy similarity, or inferred game type.
 
 Registered rules are grouped by project, table, partition, canonical metric,
 chain, and game type. Each rule index belongs to exactly one ordered
