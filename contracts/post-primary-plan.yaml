@@ -13,6 +13,10 @@ plans:
       - id: game_background
         kind: query
         max_queries: 3
+        selection:
+          dominant_counterfactual_max_games: 1
+          cumulative_root_adverse_ratio: 0.50
+          max_games: 3
       - id: error_code
         kind: query
         max_queries: 1

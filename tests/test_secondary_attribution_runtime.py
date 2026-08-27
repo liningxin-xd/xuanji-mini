@@ -81,7 +81,10 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
                     current_outside=(500, 380),
                     baseline_outside=(500, 400),
                 )
-            elif non_dominant and ticket["step_id"] != "secondary" and (
+            elif non_dominant and ticket["step_id"] not in {
+                "secondary",
+                "game_background",
+            } and (
                 ticket["step_id"] != "install_stage"
             ):
                 self._set_root_counts(
@@ -185,7 +188,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
 
     def test_dominant_game_runs_one_download_secondary_query(self):
         runner, query_count = self._complete("secondary-download")
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         state = runner.load_state("secondary-download")
         secondary = state["post_primary"]["steps"][1]
         self.assertEqual("succeeded", secondary["status"])
@@ -204,13 +207,13 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode("utf-8")), 12 * 1024)
         for forbidden in ("rendered_sql", "raw_result", "query_id", "receipt"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(2, len(pack["post_primary_steps"]))
+        self.assertEqual(3, len(pack["post_primary_steps"]))
 
     def test_non_dominant_head_game_still_selects_secondary_parent(self):
         runner, query_count = self._complete(
             "secondary-non-dominant", non_dominant=True
         )
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         state = runner.load_state("secondary-non-dominant")
         counterfactual = state["post_primary"]["steps"][0]["result"]
         secondary = state["post_primary"]["steps"][1]
@@ -326,9 +329,20 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
                 error_class="semantic_analysis",
             ),
         )
+        background_ticket = runner.next_action("secondary-repair")
+        self.assertEqual("game_background", background_ticket["step_id"])
+        runner.record(
+            "secondary-repair",
+            self_reported_result_event(
+                background_ticket,
+                raw_result_for_ticket(
+                    runner, "secondary-repair", background_ticket
+                ),
+                "background-after-secondary-repair",
+            ),
+        )
         self.assertEqual(
-            "queue_complete",
-            runner.next_action("secondary-repair")["action"],
+            "queue_complete", runner.next_action("secondary-repair")["action"]
         )
         secondary = runner.load_state("secondary-repair")["post_primary"][
             "steps"
@@ -337,6 +351,70 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         self.assertEqual(3, len(secondary["attempts"]))
         self.assertIn("two evidence-based repairs", secondary["reason"])
 
+    def test_secondary_query_failure_reason_stays_out_of_writer_pack(self):
+        runner = self._new_runner("secondary-redaction")
+        while True:
+            ticket = runner.next_action("secondary-redaction")
+            if ticket.get("step_id") == "secondary":
+                break
+            raw = raw_result_for_ticket(
+                runner,
+                "secondary-redaction",
+                ticket,
+                candidate=ticket["step_id"] == "game_id",
+            )
+            runner.record(
+                "secondary-redaction",
+                self_reported_result_event(
+                    ticket, raw, f"primary-{ticket['step_id']}"
+                ),
+            )
+
+        private_message = (
+            "SELECT secret FROM tap_dw.private_table "
+            "query_id=private-secondary-query"
+        )
+        runner.record(
+            "secondary-redaction",
+            {
+                "event": "query_error",
+                "step_id": "secondary",
+                "attempt_no": ticket["attempt_no"],
+                "receipt_type": "self_reported_receipt",
+                "submitted_sql_sha256": ticket["rendered_sql_sha256"],
+                "query_id": "private-secondary-query",
+                "error_class": "execution",
+                "error_code": "ODPS-PRIVATE",
+                "error_message": private_message,
+            },
+        )
+        background_ticket = runner.next_action("secondary-redaction")
+        runner.record(
+            "secondary-redaction",
+            self_reported_result_event(
+                background_ticket,
+                raw_result_for_ticket(
+                    runner, "secondary-redaction", background_ticket
+                ),
+                "background-after-secondary-failure",
+            ),
+        )
+        pack = runner.build_writer_pack("secondary-redaction")
+        encoded = json.dumps(pack, ensure_ascii=False)
+        self.assertNotIn(private_message, encoded)
+        self.assertNotIn("tap_dw.private_table", encoded)
+        self.assertNotIn("private-secondary-query", encoded)
+        self.assertEqual(
+            "query_failed",
+            pack["post_primary_steps"][1]["failure_code"],
+        )
+        self.assertIn(
+            private_message,
+            runner.load_state("secondary-redaction")["post_primary"]["steps"][1][
+                "reason"
+            ],
+        )
+
     def test_apk_install_runs_six_primary_plus_one_secondary_query(self):
         runner, query_count = self._complete(
             "secondary-install",
@@ -344,7 +422,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             game_type="app",
             metric="下载安装完成率",
         )
-        self.assertEqual(7, query_count)
+        self.assertEqual(8, query_count)
         state = runner.load_state("secondary-install")
         self.assertEqual("2026-08-20", state["analysis_date"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])
@@ -370,7 +448,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             metric="下载安装完成率",
             secondary_mutator=change_bucket_window,
         )
-        self.assertEqual(7, query_count)
+        self.assertEqual(8, query_count)
         secondary = runner.load_state("secondary-install-immature")[
             "post_primary"
         ]["steps"][1]
@@ -382,7 +460,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         runner, query_count = self._complete(
             "secondary-lower-is-better", metric="下载失败率"
         )
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         state = runner.load_state("secondary-lower-is-better")
         self.assertTrue(state["post_primary"]["steps"][0]["result"]["dominant"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])

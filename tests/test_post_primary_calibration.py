@@ -58,7 +58,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 )
                 if game_mode != "none":
                     self._set_game_scenario(raw_result, game_mode)
-            elif ticket["step_id"] != "secondary":
+            elif ticket["step_id"] not in {"secondary", "game_background"}:
                 raw_result = raw_result_for_ticket(runner, run_id, ticket)
                 if game_mode != "none":
                     current_num, baseline_num, current_den, baseline_den = {
@@ -187,7 +187,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         )
         profile = contracts.analysis_profile("primary_v2")
         self.assertEqual(
-            ["counterfactual", "secondary"],
+            ["counterfactual", "secondary", "game_background"],
             profile["enabled_post_primary_steps"],
         )
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
@@ -242,14 +242,14 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         runner, query_count = self._complete("v2-dominant")
         pack = runner.build_writer_pack("v2-dominant")
         state = runner.load_state("v2-dominant")
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         self.assertEqual("primary_v2", pack["analysis_profile"])
         self.assertEqual(0.0, pack["counterfactual"]["removal_delta_bp"])
         self.assertEqual(1.0, pack["counterfactual"]["restoration_ratio"])
         self.assertTrue(pack["counterfactual"]["dominant"])
         self.assertEqual("completed", state["post_primary"]["status"])
         self.assertEqual(
-            ["succeeded", "succeeded", "skipped_by_policy", "skipped_by_policy"],
+            ["succeeded", "succeeded", "succeeded", "skipped_by_policy"],
             [step["status"] for step in state["post_primary"]["steps"]],
         )
         encoded = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))
@@ -319,6 +319,11 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             for attempt in secondary.get("attempts", []):
                 attempt["query_id"] = "stable-query-id"
                 attempt["event_path"] = "stable-event-path"
+            background = post_primary["steps"][2]
+            for item in background.get("items", []):
+                for attempt in item.get("attempts", []):
+                    attempt["query_id"] = "stable-background-query-id"
+                    attempt["event_path"] = "stable-background-event-path"
         self.assertEqual(first_post, second_post)
 
     def test_executing_post_primary_plan_resumes_deterministically(self):
@@ -340,6 +345,18 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                     runner, "v2-calibration-resume", ticket
                 ),
                 "v2-calibration-resume-secondary-resumed",
+            ),
+        )
+        background_ticket = runner.next_action("v2-calibration-resume")
+        self.assertEqual("game_background", background_ticket["step_id"])
+        runner.record(
+            "v2-calibration-resume",
+            self_reported_result_event(
+                background_ticket,
+                raw_result_for_ticket(
+                    runner, "v2-calibration-resume", background_ticket
+                ),
+                "v2-calibration-resume-background-resumed",
             ),
         )
         self.assertEqual(

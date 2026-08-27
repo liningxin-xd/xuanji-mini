@@ -76,10 +76,11 @@ class QueryBuilder:
         normalized = self._sql_without_comments(sql).strip()
         if not re.match(r"(?is)^(WITH\b|SELECT\b)", normalized):
             raise QueryBuildError("only read-only SELECT/WITH SQL is allowed")
+        statement_sql = self._sql_without_literals(normalized)
         forbidden_statements = re.search(
             r"(?i)\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|"
             r"GRANT|REVOKE|CALL)\b",
-            normalized,
+            statement_sql,
         )
         if forbidden_statements:
             raise QueryBuildError(
@@ -101,19 +102,6 @@ class QueryBuilder:
             r"__[A-Z][A-Z0-9_]*__", normalized
         ):
             raise QueryBuildError("rendered SQL contains unresolved placeholders")
-        if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
-            raise QueryBuildError("registered partition range filter is missing")
-        if not re.search(r"(?i)\bplatform\s*=\s*'ANDROID'", normalized):
-            raise QueryBuildError("Android platform filter is missing")
-
-        game_type = parameters.get("game_type")
-        if game_type not in {"app", "sandbox"}:
-            raise QueryBuildError("game_type must be app or sandbox")
-        if not re.search(
-            rf"(?i)\bgame_type\s*=\s*'{re.escape(game_type)}'", normalized
-        ):
-            raise QueryBuildError("current game_type filter is missing")
-
         business_date = parameters.get("business_date")
         if not isinstance(business_date, str) or f"'{business_date}'" not in normalized:
             raise QueryBuildError("current business_date literal is missing")
@@ -134,8 +122,49 @@ class QueryBuilder:
             if not re.search(rf"(?i)\b{predicate_pattern}\b", normalized):
                 raise QueryBuildError(f"required predicate is missing: {predicate}")
 
+        config = binding.dimension_config or {}
+        if config.get("post_primary") == "game_background":
+            game_id = parameters.get("game_id")
+            if (
+                isinstance(game_id, bool)
+                or not isinstance(game_id, int)
+                or game_id <= 0
+            ):
+                raise QueryBuildError(
+                    "game background game_id must be a positive integer"
+                )
+            if not re.search(
+                rf"(?i)\bapp_id\s*=\s*{game_id}\b", normalized
+            ) or not re.search(
+                rf"(?i)\bgame_id\s*=\s*{game_id}\b", normalized
+            ):
+                raise QueryBuildError(
+                    "game background SQL changed its frozen game identity"
+                )
+            if "max_pt('tap_bi.dwd_app_operation_events_df')" not in normalized.lower():
+                raise QueryBuildError(
+                    "game background operation snapshot filter is missing"
+                )
+            if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
+                raise QueryBuildError(
+                    "game background lifecycle partition range is missing"
+                )
+            return
+
+        if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
+            raise QueryBuildError("registered partition range filter is missing")
+        if not re.search(r"(?i)\bplatform\s*=\s*'ANDROID'", normalized):
+            raise QueryBuildError("Android platform filter is missing")
+
+        game_type = parameters.get("game_type")
+        if game_type not in {"app", "sandbox"}:
+            raise QueryBuildError("game_type must be app or sandbox")
+        if not re.search(
+            rf"(?i)\bgame_type\s*=\s*'{re.escape(game_type)}'", normalized
+        ):
+            raise QueryBuildError("current game_type filter is missing")
+
         if binding.dimension is not None:
-            config = binding.dimension_config or {}
             source_field = config.get("source_field")
             required_dimension_fields = {source_field}
             if config.get("secondary") is True:
@@ -192,7 +221,9 @@ class QueryBuilder:
 
         protected = list(binding.protected_tokens)
         if binding.dimension_config:
-            protected.append(binding.dimension_config["source_field"])
+            source_field = binding.dimension_config.get("source_field")
+            if isinstance(source_field, str):
+                protected.append(source_field)
             parent_source = binding.dimension_config.get("parent_source_field")
             if isinstance(parent_source, str):
                 protected.append(parent_source)
@@ -243,7 +274,9 @@ class QueryBuilder:
 
         protected_expressions = set(binding.protected_tokens)
         if binding.dimension_config:
-            protected_expressions.add(binding.dimension_config["source_field"])
+            source_field = binding.dimension_config.get("source_field")
+            if isinstance(source_field, str):
+                protected_expressions.add(source_field)
         if self._protected_select_expressions(
             original_semantic, protected_expressions
         ) != self._protected_select_expressions(
@@ -429,6 +462,9 @@ class QueryBuilder:
     def _sql_without_comments(self, sql: str) -> str:
         without_blocks = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
         return re.sub(r"--[^\n]*", " ", without_blocks)
+
+    def _sql_without_literals(self, sql: str) -> str:
+        return re.sub(r"'(?:''|[^'])*'", "''", sql)
 
     def _physical_data_sources(self, sql: str) -> set[str]:
         sources = set()

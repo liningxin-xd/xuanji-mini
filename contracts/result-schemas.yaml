@@ -165,3 +165,6 @@ schemas:
         overall_baseline_observation_days_max: integer_or_null
         overall_duplicate_row_count: integer
         overall_invalid_metric_row_count: integer
+  game_background_events:
+    validator: game_background_events
+    columns_from_query_spec: true

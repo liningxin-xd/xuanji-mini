@@ -23,6 +23,10 @@ from .calibration_runner import CalibrationError, CalibrationRunner
 from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .final_assembler import FinalAssembler, FinalAssemblyError
 from .final_validator import FinalEvidenceValidator, FinalValidationError
+from .game_background_validator import (
+    GameBackgroundValidationError,
+    GameBackgroundValidator,
+)
 from .models import QueryBinding, RunStatus, StepStatus, TERMINAL_STEP_STATUSES
 from .query_builder import QueryBuildError, QueryBuilder
 from .receipts import ReceiptVerificationError, TrustedReceiptVerifier
@@ -53,6 +57,7 @@ class AttributionRunner:
         self.result_validator = ResultValidator(self.contracts)
         self.secondary_query_builder = SecondaryQueryBuilder(self.contracts)
         self.secondary_result_validator = SecondaryResultValidator(self.contracts)
+        self.game_background_validator = GameBackgroundValidator(self.contracts)
         configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
         self.analysis_profile = (
             analysis_profile
@@ -347,13 +352,15 @@ class AttributionRunner:
                 **self._status_payload(state),
             }
         is_post_primary = state["cursor"] >= len(state["steps"])
+        post_primary_step = None
         if is_post_primary:
-            step = self._active_secondary_step(state)
-            if step is None:
+            active = self._active_post_primary_query(state)
+            if active is None:
                 raise RunnerError(
                     "queue and post-primary analysis are complete; "
                     "no further events are accepted"
                 )
+            post_primary_step, step = active
         else:
             step = state["steps"][state["cursor"]]
         if event.get("step_id") != step["id"]:
@@ -404,7 +411,7 @@ class AttributionRunner:
             if binding is None:  # pragma: no cover - automatic steps issue no ticket
                 raise RunnerError("query result has no immutable binding")
             try:
-                if is_post_primary:
+                if is_post_primary and post_primary_step["id"] == "secondary":
                     outcome = self.secondary_result_validator.validate(
                         raw_result=raw_result,
                         binding=binding,
@@ -415,6 +422,15 @@ class AttributionRunner:
                         parent_value=step["parent_value"],
                         parent_counts=self._secondary_parent_counts(state, step),
                         root_counts=self._secondary_root_counts(state),
+                    )
+                elif is_post_primary and post_primary_step["id"] == (
+                    "game_background"
+                ):
+                    outcome = self.game_background_validator.validate(
+                        raw_result=raw_result,
+                        binding=binding,
+                        analysis_date=state["analysis_date"],
+                        game_id=int(step["game_id"]),
                     )
                 else:
                     outcome = self.result_validator.validate(
@@ -427,7 +443,7 @@ class AttributionRunner:
                         produces_candidates=step["produces_candidates"],
                     )
                     self._validate_canonical_root_metric(state, step, outcome)
-            except ResultValidationError as exc:
+            except (ResultValidationError, GameBackgroundValidationError) as exc:
                 attempt["status"] = "failed"
                 attempt["validation"] = {
                     "status": "failed",
@@ -439,26 +455,40 @@ class AttributionRunner:
                 step["reason"] = f"{exc.code}: {exc}"
             else:
                 attempt["status"] = "succeeded"
-                attempt["validation"] = {
-                    "status": "succeeded",
-                    "candidate_count": outcome.candidate_count,
-                    "warning_codes": list(outcome.warning_codes),
-                    "root_current_value": outcome.root_current_value,
-                    "root_baseline_value": outcome.root_baseline_value,
-                    "root_delta": outcome.root_delta,
-                }
-                step["status"] = StepStatus.SUCCEEDED.value
-                step["candidate_count"] = outcome.candidate_count
-                step["candidates"] = list(outcome.candidates)
-                step["root_current_value"] = outcome.root_current_value
-                step["root_baseline_value"] = outcome.root_baseline_value
-                step["root_delta"] = outcome.root_delta
-                step["root_current_numerator"] = outcome.root_current_numerator
-                step["root_current_denominator"] = outcome.root_current_denominator
-                step["root_baseline_numerator"] = outcome.root_baseline_numerator
-                step["root_baseline_denominator"] = outcome.root_baseline_denominator
-                step["family_adverse_impact_bp"] = outcome.family_adverse_impact_bp
-                step["warning_codes"] = list(outcome.warning_codes)
+                if is_post_primary and post_primary_step["id"] == (
+                    "game_background"
+                ):
+                    attempt["validation"] = {
+                        "status": "succeeded",
+                        "fact_count": len(outcome.facts),
+                        "limit_codes": list(outcome.limit_codes),
+                    }
+                    step["status"] = StepStatus.SUCCEEDED.value
+                    step["facts"] = list(outcome.facts)
+                    step["limit_codes"] = list(outcome.limit_codes)
+                    step["failure_code"] = None
+                    step["reason"] = None
+                else:
+                    attempt["validation"] = {
+                        "status": "succeeded",
+                        "candidate_count": outcome.candidate_count,
+                        "warning_codes": list(outcome.warning_codes),
+                        "root_current_value": outcome.root_current_value,
+                        "root_baseline_value": outcome.root_baseline_value,
+                        "root_delta": outcome.root_delta,
+                    }
+                    step["status"] = StepStatus.SUCCEEDED.value
+                    step["candidate_count"] = outcome.candidate_count
+                    step["candidates"] = list(outcome.candidates)
+                    step["root_current_value"] = outcome.root_current_value
+                    step["root_baseline_value"] = outcome.root_baseline_value
+                    step["root_delta"] = outcome.root_delta
+                    step["root_current_numerator"] = outcome.root_current_numerator
+                    step["root_current_denominator"] = outcome.root_current_denominator
+                    step["root_baseline_numerator"] = outcome.root_baseline_numerator
+                    step["root_baseline_denominator"] = outcome.root_baseline_denominator
+                    step["family_adverse_impact_bp"] = outcome.family_adverse_impact_bp
+                    step["warning_codes"] = list(outcome.warning_codes)
         else:
             raw_error = {
                 "class": self._required_non_empty_string(event, "error_class"),
@@ -498,6 +528,8 @@ class AttributionRunner:
             if state["cursor"] >= len(state["steps"]):
                 self._mark_queue_complete(state)
         elif advance_cursor:
+            if post_primary_step["id"] == "game_background":
+                self._advance_post_primary_cursor(post_primary_step, step)
             try:
                 post_primary = self.calibration_runner.execute(state)
             except CalibrationError as exc:
@@ -736,30 +768,55 @@ class AttributionRunner:
             raise RunnerError("primary_v2 lacks post-primary state")
         if post_primary.get("status") == "completed":
             return self._queue_complete_ticket(state)
-        secondary = next(
-            (
-                step
-                for step in post_primary.get("steps", [])
-                if step.get("id") == "secondary"
-            ),
-            None,
-        )
-        if not isinstance(secondary, dict):
-            raise RunnerError("post-primary plan lacks its secondary step")
-        if secondary["status"] == "repair_required":
-            return self._repair_ticket(state, secondary)
-        if secondary["status"] == "planned":
+        current = self._current_post_primary_query(state)
+        if current is None:
+            raise RunnerError("post-primary plan lacks an executable current query")
+        post_step, query_item = current
+        if query_item["status"] == "repair_required":
+            return self._repair_ticket(state, query_item)
+        if query_item["status"] == "planned":
+            self._build_current_post_primary_query(state, post_step, query_item)
+        if query_item["status"] != "in_progress":
+            raise RunnerError(
+                f"post-primary query cannot execute: {query_item['status']}"
+            )
+        return self._execution_ticket(state, query_item)
+
+    def _build_current_post_primary_query(
+        self,
+        state: dict[str, Any],
+        post_step: dict[str, Any],
+        query_item: dict[str, Any],
+    ) -> None:
+        if post_step["id"] == "secondary":
             built = self.secondary_query_builder.build(
                 chain=state["chain"],
                 metric=state["metric"],
                 business_date=state["analysis_date"],
                 game_type=state["game_type"],
-                parent_dimension=secondary["parent_dimension"],
-                parent_value=secondary["parent_value"],
-                child_dimension=secondary["child_dimension"],
+                parent_dimension=query_item["parent_dimension"],
+                parent_value=query_item["parent_value"],
+                child_dimension=query_item["child_dimension"],
             )
+        elif post_step["id"] == "game_background":
+            binding = self.contracts.game_background_binding(
+                game_id=int(query_item["game_id"])
+            )
+            built = self.query_builder.build(
+                binding,
+                {
+                    "business_date": state["analysis_date"],
+                    "game_id": int(query_item["game_id"]),
+                },
+            )
+        else:  # pragma: no cover - guarded by the plan contract
+            raise RunnerError(
+                f"unsupported post-primary query step: {post_step['id']}"
+            )
+
+        if post_step["id"] == "secondary":
             binding_snapshot = self._binding_snapshot(built.binding)
-            secondary.update(
+            query_item.update(
                 {
                     "binding": binding_snapshot,
                     "binding_sha256": canonical_sha256(binding_snapshot),
@@ -779,52 +836,104 @@ class AttributionRunner:
                     "warning_codes": [],
                 }
             )
-            sql_path = self._sql_relative_path(
-                len(state["steps"]), "secondary", 0
-            )
-            self._atomic_write_text(self._run_dir(state["run_id"]) / sql_path, built.sql)
-            secondary["attempts"].append(
-                {
-                    "attempt_no": 0,
-                    "status": "issued",
-                    "sql_sha256": built.sha256,
-                    "sql_path": sql_path,
-                    "query_id": None,
-                    "error": None,
-                    "event_path": None,
-                    "raw_result_sha256": None,
-                    "validation": None,
-                }
-            )
-            secondary["status"] = "in_progress"
-            state["revision"] += 1
-            self._write_state(state)
-        if secondary["status"] != "in_progress":
-            raise RunnerError(
-                f"secondary step cannot issue a query: {secondary['status']}"
-            )
-        return self._execution_ticket(state, secondary)
+        else:
+            binding_snapshot = self._binding_snapshot(built.binding)
+            query_item["binding"] = binding_snapshot
+            query_item["binding_sha256"] = canonical_sha256(binding_snapshot)
 
-    def _active_secondary_step(
+        path_id = self._post_primary_path_id(query_item)
+        sql_path = self._sql_relative_path(len(state["steps"]), path_id, 0)
+        self._atomic_write_text(
+            self._run_dir(state["run_id"]) / sql_path, built.sql
+        )
+        query_item["attempts"].append(
+            {
+                "attempt_no": 0,
+                "status": "issued",
+                "sql_sha256": built.sha256,
+                "sql_path": sql_path,
+                "query_id": None,
+                "error": None,
+                "event_path": None,
+                "raw_result_sha256": None,
+                "validation": None,
+            }
+        )
+        query_item["status"] = "in_progress"
+        post_step["status"] = "in_progress"
+        state["revision"] += 1
+        self._write_state(state)
+
+    def _current_post_primary_query(
         self, state: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         post_primary = state.get("post_primary")
         if not isinstance(post_primary, dict) or post_primary.get("status") != "executing":
             return None
-        secondary = next(
-            (
-                step
-                for step in post_primary.get("steps", [])
-                if step.get("id") == "secondary"
-            ),
-            None,
-        )
-        if isinstance(secondary, dict) and secondary.get("status") in {
+        for step in post_primary.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            if step.get("id") == "secondary" and step.get("status") in {
+                "planned",
+                "in_progress",
+                "repair_required",
+            }:
+                return step, step
+            if step.get("id") != "game_background" or step.get("status") not in {
+                "planned",
+                "in_progress",
+            }:
+                continue
+            items = step.get("items")
+            cursor = step.get("cursor")
+            if (
+                isinstance(items, list)
+                and isinstance(cursor, int)
+                and 0 <= cursor < len(items)
+                and isinstance(items[cursor], dict)
+                and items[cursor].get("status")
+                in {"planned", "in_progress", "repair_required"}
+            ):
+                return step, items[cursor]
+        return None
+
+    def _active_post_primary_query(
+        self, state: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        current = self._current_post_primary_query(state)
+        if current is None or current[1].get("status") not in {
             "in_progress",
             "repair_required",
         }:
-            return secondary
-        return None
+            return None
+        return current
+
+    def _advance_post_primary_cursor(
+        self, post_step: dict[str, Any], query_item: dict[str, Any]
+    ) -> None:
+        items = post_step.get("items")
+        cursor = post_step.get("cursor")
+        if (
+            post_step.get("id") != "game_background"
+            or not isinstance(items, list)
+            or not isinstance(cursor, int)
+            or cursor >= len(items)
+            or items[cursor] is not query_item
+            or query_item.get("status") not in {"succeeded", "failed"}
+        ):
+            raise RunnerError("game background cursor cannot advance")
+        post_step["cursor"] += 1
+        if post_step["cursor"] < len(items):
+            post_step["status"] = "in_progress"
+            return
+        if any(item.get("status") == "succeeded" for item in items):
+            post_step["status"] = "succeeded"
+            post_step.pop("failure_code", None)
+            post_step.pop("reason", None)
+        else:
+            post_step["status"] = "failed"
+            post_step["failure_code"] = "game_background_unavailable"
+            post_step["reason"] = "all selected game background queries failed"
 
     def _secondary_parent_counts(
         self, state: dict[str, Any], secondary: dict[str, Any]
@@ -869,19 +978,7 @@ class AttributionRunner:
         binding = self._binding_from_step(step)
         if binding is None:  # pragma: no cover - automatic steps issue no ticket
             raise RunnerError("query ticket has no immutable binding")
-        parameters = {
-            "business_date": state["analysis_date"],
-            "game_type": state["game_type"],
-        }
-        config = binding.dimension_config or {}
-        if config.get("secondary") is True:
-            parameters.update(
-                {
-                    "parent_dimension": config["parent_dimension"],
-                    "parent_value": config["parent_value"],
-                    "child_dimension": config["child_dimension"],
-                }
-            )
+        parameters = self._query_parameters(state, step)
         ticket = {
             "action": "execute_query",
             "run_id": state["run_id"],
@@ -901,7 +998,10 @@ class AttributionRunner:
         self._atomic_write_json(
             self._run_dir(state["run_id"])
             / "tickets"
-            / f"{state['cursor']:02d}-{step['id']}-attempt-{attempt['attempt_no']}.json",
+            / (
+                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"attempt-{attempt['attempt_no']}.json"
+            ),
             ticket,
         )
         return ticket
@@ -945,7 +1045,10 @@ class AttributionRunner:
         self._atomic_write_json(
             self._run_dir(state["run_id"])
             / "tickets"
-            / f"{state['cursor']:02d}-{step['id']}-repair-{repair_attempt}.json",
+            / (
+                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"repair-{repair_attempt}.json"
+            ),
             ticket,
         )
         return ticket
@@ -1003,19 +1106,19 @@ class AttributionRunner:
         binding = self._binding_from_step(step)
         if binding is None:
             raise RunnerError("automatic step cannot accept a SQL repair")
-        parameters = {
-            "business_date": state["analysis_date"],
-            "game_type": state["game_type"],
-        }
+        parameters = self._query_parameters(state, step)
         diff = self.query_builder.validate_repair(
             baseline_sql, failed_sql, repaired_sql, binding, parameters
         )
         sql_path = self._sql_relative_path(
-            state["cursor"], step["id"], repair_attempt
+            state["cursor"], self._post_primary_path_id(step), repair_attempt
         )
         diff_path = str(
             Path("sql")
-            / f"{state['cursor']:02d}-{step['id']}-repair-{repair_attempt}.diff"
+            / (
+                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"repair-{repair_attempt}.diff"
+            )
         )
         event_path = Path("events") / f"{event_hash}.json"
         run_dir = self._run_dir(state["run_id"])
@@ -1067,18 +1170,26 @@ class AttributionRunner:
     def _status_payload(self, state: dict[str, Any]) -> dict[str, Any]:
         cursor = state["cursor"]
         current = state["steps"][cursor] if cursor < len(state["steps"]) else None
+        post_query_items = []
+        post_primary = state.get("post_primary")
+        if isinstance(post_primary, dict):
+            for post_step in post_primary.get("steps", []):
+                if not isinstance(post_step, dict):
+                    continue
+                if post_step.get("id") == "secondary" and isinstance(
+                    post_step.get("attempts"), list
+                ):
+                    post_query_items.append(post_step)
+                elif post_step.get("id") == "game_background" and isinstance(
+                    post_step.get("items"), list
+                ):
+                    post_query_items.extend(post_step["items"])
         if current is None:
-            current = self._active_secondary_step(state)
+            post_current = self._current_post_primary_query(state)
+            current = post_current[1] if post_current is not None else None
         repair_count = sum(
             1
-            for step in [
-                *state["steps"],
-                *(
-                    [self._active_secondary_step(state)]
-                    if self._active_secondary_step(state) is not None
-                    else []
-                ),
-            ]
+            for step in [*state["steps"], *post_query_items]
             for attempt in step["attempts"]
             if attempt.get("repair") is not None
         )
@@ -1446,6 +1557,9 @@ class AttributionRunner:
         post_primary = state.get("post_primary")
         if analysis_profile == "primary_v2" and isinstance(post_primary, dict):
             self._validate_secondary_runtime_state(
+                state, post_primary, known_query_ids
+            )
+            self._validate_game_background_runtime_state(
                 state, post_primary, known_query_ids
             )
 
@@ -1863,6 +1977,364 @@ class AttributionRunner:
         ):
             raise RunnerError("secondary query failure classification changed")
 
+    def _validate_game_background_runtime_state(
+        self,
+        state: dict[str, Any],
+        post_primary: dict[str, Any],
+        known_query_ids: set[str],
+    ) -> None:
+        background = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "game_background"
+            ),
+            None,
+        )
+        secondary = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "secondary"
+            ),
+            None,
+        )
+        if not isinstance(background, dict) or not isinstance(secondary, dict):
+            raise RunnerError("post-primary state lacks game background")
+        if secondary.get("status") in {
+            "planned",
+            "in_progress",
+            "repair_required",
+        }:
+            if background != {"id": "game_background", "status": "planned"}:
+                raise RunnerError(
+                    "game background cannot advance before secondary is terminal"
+                )
+            return
+        try:
+            selection = self.calibration_runner.game_background_selector.select(
+                state, post_primary
+            )
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
+        if selection["status"] == "skipped_by_policy":
+            if background != {"id": "game_background", **selection}:
+                raise RunnerError(
+                    "game background skip no longer matches primary evidence"
+                )
+            return
+        if background.get("selected_games") != selection["selected_games"]:
+            raise RunnerError(
+                "game background selection no longer matches primary evidence"
+            )
+        items = background.get("items")
+        cursor = background.get("cursor")
+        if (
+            not isinstance(items, list)
+            or len(items) != len(selection["items"])
+            or isinstance(cursor, bool)
+            or not isinstance(cursor, int)
+            or not 0 <= cursor <= len(items)
+        ):
+            raise RunnerError("game background cursor or items changed")
+
+        for index, (item, expected_item) in enumerate(
+            zip(items, selection["items"], strict=True)
+        ):
+            if not isinstance(item, dict):
+                raise RunnerError("game background item must be an object")
+            for field in (
+                "id",
+                "item_index",
+                "candidate_id",
+                "game_id",
+                "label",
+                "selection_reason",
+            ):
+                if item.get(field) != expected_item[field]:
+                    raise RunnerError(
+                        f"game background item {field} changed"
+                    )
+            status = item.get("status")
+            if status not in {
+                "planned",
+                "in_progress",
+                "repair_required",
+                "succeeded",
+                "failed",
+            }:
+                raise RunnerError("game background item status is invalid")
+            if index < cursor and status not in {"succeeded", "failed"}:
+                raise RunnerError("completed game background item is not terminal")
+            if index > cursor and status != "planned":
+                raise RunnerError("future game background item advanced early")
+            if index == cursor and cursor < len(items) and status not in {
+                "planned",
+                "in_progress",
+                "repair_required",
+            }:
+                raise RunnerError("current game background item is terminal")
+            self._validate_game_background_item(
+                state, item, known_query_ids
+            )
+
+        if cursor < len(items):
+            expected_status = "planned" if cursor == 0 and items[0][
+                "status"
+            ] == "planned" else "in_progress"
+            if background.get("status") != expected_status:
+                raise RunnerError("game background execution status is inconsistent")
+            if any(field in background for field in ("failure_code", "reason")):
+                raise RunnerError(
+                    "executing game background contains aggregate failure fields"
+                )
+            return
+
+        has_success = any(item["status"] == "succeeded" for item in items)
+        expected_status = "succeeded" if has_success else "failed"
+        if background.get("status") != expected_status:
+            raise RunnerError("game background aggregate status is inconsistent")
+        if has_success:
+            if any(field in background for field in ("failure_code", "reason")):
+                raise RunnerError(
+                    "succeeded game background contains aggregate failure fields"
+                )
+        elif (
+            background.get("failure_code") != "game_background_unavailable"
+            or background.get("reason")
+            != "all selected game background queries failed"
+        ):
+            raise RunnerError("game background aggregate failure changed")
+
+    def _validate_game_background_item(
+        self,
+        state: dict[str, Any],
+        item: dict[str, Any],
+        known_query_ids: set[str],
+    ) -> None:
+        status = item["status"]
+        attempts = item.get("attempts")
+        if status == "planned":
+            if item.get("binding") is not None or item.get(
+                "binding_sha256"
+            ) is not None or attempts != []:
+                raise RunnerError("planned game background item has query evidence")
+            if (
+                item.get("facts") != []
+                or item.get("limit_codes") != []
+                or item.get("failure_code") is not None
+                or item.get("reason") is not None
+            ):
+                raise RunnerError("planned game background item has result evidence")
+            return
+
+        expected_binding = self.contracts.game_background_binding(
+            game_id=int(item["game_id"])
+        )
+        expected_snapshot = self._binding_snapshot(expected_binding)
+        if item.get("binding") != expected_snapshot or item.get(
+            "binding_sha256"
+        ) != canonical_sha256(expected_snapshot):
+            raise RunnerError("game background binding changed")
+        if not isinstance(attempts, list) or not attempts or len(attempts) > 3:
+            raise RunnerError(
+                "game background item must contain one query with at most two repairs"
+            )
+        run_dir = self._run_dir(state["run_id"]).resolve()
+        for attempt_index, attempt in enumerate(attempts):
+            if (
+                not isinstance(attempt, dict)
+                or attempt.get("attempt_no") != attempt_index
+            ):
+                raise RunnerError("game background attempt sequence changed")
+            sql_path_value = attempt.get("sql_path")
+            digest = attempt.get("sql_sha256")
+            if (
+                not isinstance(sql_path_value, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise RunnerError("game background SQL identity is invalid")
+            sql_path = (run_dir / sql_path_value).resolve()
+            try:
+                sql_path.relative_to(run_dir)
+                sql = sql_path.read_text(encoding="utf-8")
+            except (ValueError, OSError) as exc:
+                raise RunnerError("game background SQL is missing") from exc
+            if sha256_text(sql) != digest:
+                raise RunnerError("game background SQL hash changed")
+            self.query_builder.validate_sql(
+                sql,
+                expected_binding,
+                {
+                    "business_date": state["analysis_date"],
+                    "game_id": int(item["game_id"]),
+                },
+            )
+            query_id = attempt.get("query_id")
+            if query_id is not None:
+                if not isinstance(query_id, str) or not query_id.strip():
+                    raise RunnerError("game background query_id is invalid")
+                if query_id in known_query_ids:
+                    raise RunnerError("query_id is reused by game background")
+                known_query_ids.add(query_id)
+            event_path_value = attempt.get("event_path")
+            if query_id is None:
+                if event_path_value is not None:
+                    raise RunnerError(
+                        "unexecuted game background attempt has an event"
+                    )
+                continue
+            if not isinstance(event_path_value, str):
+                raise RunnerError(
+                    "executed game background attempt lacks its event"
+                )
+            event_path = (run_dir / event_path_value).resolve()
+            try:
+                event_path.relative_to(run_dir)
+                event = json.loads(event_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                raise RunnerError(
+                    "game background receipt event is unavailable"
+                ) from exc
+            event_hash = canonical_sha256(event)
+            if event_path.name != f"{event_hash}.json" or state[
+                "processed_events"
+            ].get(event_hash, {}).get("event_path") != event_path_value:
+                raise RunnerError("game background receipt identity changed")
+            if event.get("query_id") != query_id or event.get(
+                "submitted_sql_sha256"
+            ) != digest:
+                raise RunnerError(
+                    "game background receipt does not match its attempt"
+                )
+            self._verify_receipt(state, event)
+            if event.get("event") == "query_returned":
+                raw_result = event.get("raw_result")
+                raw_hash = event.get("raw_result_sha256")
+                if (
+                    not isinstance(raw_result, dict)
+                    or raw_hash != canonical_sha256(raw_result)
+                    or attempt.get("raw_result_sha256") != raw_hash
+                ):
+                    raise RunnerError(
+                        "game background raw result evidence changed"
+                    )
+            elif event.get("event") == "query_error":
+                event_error = {
+                    "class": event.get("error_class"),
+                    "code": event.get("error_code"),
+                    "message": event.get("error_message"),
+                }
+                if attempt.get("error") != event_error:
+                    raise RunnerError(
+                        "game background query error evidence changed"
+                    )
+            else:
+                raise RunnerError("game background receipt event type is invalid")
+
+        latest = attempts[-1]
+        if status == "in_progress":
+            if latest.get("status") != "issued" or latest.get("query_id") is not None:
+                raise RunnerError(
+                    "in_progress game background item is not awaiting a query"
+                )
+            return
+        if status == "repair_required":
+            error = latest.get("error") or {}
+            if (
+                latest.get("status") != "error"
+                or error.get("class") != "semantic_analysis"
+                or latest["attempt_no"] >= 2
+            ):
+                raise RunnerError("game background repair state is invalid")
+            return
+        if status not in {"succeeded", "failed"}:
+            raise RunnerError("game background terminal status is invalid")
+
+        if latest.get("status") in {"succeeded", "failed"}:
+            event = json.loads(
+                (run_dir / latest["event_path"]).read_text(encoding="utf-8")
+            )
+            try:
+                outcome = self.game_background_validator.validate(
+                    raw_result=event["raw_result"],
+                    binding=expected_binding,
+                    analysis_date=state["analysis_date"],
+                    game_id=int(item["game_id"]),
+                )
+            except GameBackgroundValidationError as exc:
+                expected_reason = f"{exc.code}: {exc}"
+                if (
+                    status != "failed"
+                    or item.get("facts") != []
+                    or item.get("limit_codes") != []
+                    or item.get("failure_code") != exc.code
+                    or item.get("reason") != expected_reason
+                    or latest.get("validation")
+                    != {
+                        "status": "failed",
+                        "failure_code": exc.code,
+                        "reason": str(exc),
+                    }
+                ):
+                    raise RunnerError(
+                        "game background validation failure changed"
+                    ) from exc
+                return
+            expected_validation = {
+                "status": "succeeded",
+                "fact_count": len(outcome.facts),
+                "limit_codes": list(outcome.limit_codes),
+            }
+            if (
+                status != "succeeded"
+                or latest.get("status") != "succeeded"
+                or latest.get("validation") != expected_validation
+                or item.get("facts") != list(outcome.facts)
+                or item.get("limit_codes") != list(outcome.limit_codes)
+                or item.get("failure_code") is not None
+                or item.get("reason") is not None
+            ):
+                raise RunnerError(
+                    "game background result no longer matches raw evidence"
+                )
+            return
+
+        if latest.get("status") != "error" or status != "failed":
+            raise RunnerError("game background query error state is invalid")
+        raw_error = latest.get("error")
+        repair_suffix = (
+            " after two evidence-based repairs"
+            if isinstance(raw_error, dict)
+            and raw_error.get("class") == "semantic_analysis"
+            and latest["attempt_no"] == 2
+            else ""
+        )
+        expected_reason = (
+            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
+            f"{raw_error['message']}"
+            if isinstance(raw_error, dict)
+            and all(key in raw_error for key in ("class", "code", "message"))
+            else None
+        )
+        if (
+            not isinstance(raw_error, dict)
+            or item.get("facts") != []
+            or item.get("limit_codes") != []
+            or item.get("failure_code") != self._query_failure_code(raw_error)
+            or item.get("reason") != expected_reason
+            or latest.get("validation")
+            != {
+                "status": "failed",
+                "failure_code": self._query_failure_code(raw_error),
+                "reason": expected_reason,
+            }
+        ):
+            raise RunnerError(
+                "game background query failure classification changed"
+            )
+
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)
         state["integrity_sha256"] = canonical_sha256(state)
@@ -1940,7 +2412,16 @@ class AttributionRunner:
         post_primary = state.get("post_primary")
         if isinstance(post_primary, dict):
             for post_step in post_primary.get("steps", []):
-                for attempt in post_step.get("attempts", []):
+                query_items = (
+                    post_step.get("items", [])
+                    if post_step.get("id") == "game_background"
+                    else [post_step]
+                )
+                for attempt in (
+                    attempt
+                    for item in query_items
+                    for attempt in item.get("attempts", [])
+                ):
                     if attempt.get("query_id") == query_id:
                         raise RunnerError(
                             f"query_id is already bound to post-primary step "
@@ -2073,6 +2554,47 @@ class AttributionRunner:
             )
         except (KeyError, TypeError) as exc:
             raise RunnerError("immutable step binding is malformed") from exc
+
+    def _query_parameters(
+        self, state: dict[str, Any], step: dict[str, Any]
+    ) -> dict[str, Any]:
+        binding = self._binding_from_step(step)
+        if binding is None:
+            raise RunnerError("query parameters require an immutable binding")
+        config = binding.dimension_config or {}
+        if config.get("post_primary") == "game_background":
+            game_id = config.get("game_id")
+            step_game_id = step.get("game_id")
+            if (
+                not isinstance(step_game_id, str)
+                or not step_game_id.isdigit()
+                or game_id != int(step_game_id)
+            ):
+                raise RunnerError("game background binding changed its game identity")
+            return {
+                "business_date": state["analysis_date"],
+                "game_id": game_id,
+            }
+        parameters = {
+            "business_date": state["analysis_date"],
+            "game_type": state["game_type"],
+        }
+        if config.get("secondary") is True:
+            parameters.update(
+                {
+                    "parent_dimension": config["parent_dimension"],
+                    "parent_value": config["parent_value"],
+                    "child_dimension": config["child_dimension"],
+                }
+            )
+        return parameters
+
+    @staticmethod
+    def _post_primary_path_id(step: dict[str, Any]) -> str:
+        item_index = step.get("item_index")
+        if isinstance(item_index, int):
+            return f"{step['id']}-{item_index:02d}"
+        return step["id"]
 
     def _sql_relative_path(self, cursor: int, step_id: str, attempt_no: int) -> str:
         return str(Path("sql") / f"{cursor:02d}-{step_id}-attempt-{attempt_no}.sql")

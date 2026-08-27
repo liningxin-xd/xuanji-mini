@@ -70,7 +70,7 @@ class WriterPackRuntimeTest(unittest.TestCase):
         pack = self.runner.build_writer_pack("writer-run")
         self.assertEqual("primary_v1", pack["analysis_profile"])
         self.assertEqual("completed", pack["result_status_hint"])
-        self.assertEqual("game_id:slice-a", pack["candidates"][0]["candidate_id"])
+        self.assertEqual("game_id:12345", pack["candidates"][0]["candidate_id"])
         state_candidate = self.runner.load_state("writer-run")["steps"][0][
             "candidates"
         ][0]

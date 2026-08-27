@@ -339,13 +339,19 @@ class FinalEvidenceValidator:
         }
         post_primary = state.get("post_primary")
         if isinstance(post_primary, dict):
-            query_ids.update(
-                attempt["query_id"]
-                for step in post_primary.get("steps", [])
-                for attempt in step.get("attempts", [])
-                if isinstance(attempt.get("query_id"), str)
-                and attempt["query_id"]
-            )
+            for step in post_primary.get("steps", []):
+                query_items = (
+                    step.get("items", [])
+                    if step.get("id") == "game_background"
+                    else [step]
+                )
+                query_ids.update(
+                    attempt["query_id"]
+                    for item in query_items
+                    for attempt in item.get("attempts", [])
+                    if isinstance(attempt.get("query_id"), str)
+                    and attempt["query_id"]
+                )
         return query_ids
 
     def _validate_secondary_execution(

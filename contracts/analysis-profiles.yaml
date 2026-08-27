@@ -14,3 +14,4 @@ profiles:
     enabled_post_primary_steps:
       - counterfactual
       - secondary
+      - game_background

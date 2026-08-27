@@ -95,8 +95,12 @@ class EvidencePackBuilder:
                 if step.get("reason") == "profile_step_disabled":
                     continue
                 writer_step = {"step": step["id"], "status": step["status"]}
-                for field in ("reason", "failure_code", "limit_code"):
-                    if field in step:
+                if step["status"] == "skipped_by_policy" and isinstance(
+                    step.get("reason"), str
+                ):
+                    writer_step["reason"] = step["reason"]
+                for field in ("failure_code", "limit_code"):
+                    if isinstance(step.get(field), str):
                         writer_step[field] = step[field]
                 if step["id"] == "secondary" and step["status"] in {
                     "succeeded",
@@ -117,7 +121,9 @@ class EvidencePackBuilder:
                 if isinstance(limit_code, str):
                     evidence_limits.append(limit_code)
                 failure_code = step.get("failure_code")
-                if isinstance(failure_code, str):
+                if isinstance(failure_code, str) and step["id"] != (
+                    "game_background"
+                ):
                     evidence_limits.append(f"{step['id']}:{failure_code}")
                 if step["id"] == "counterfactual" and step["status"] == "succeeded":
                     result = step.get("result")
@@ -175,6 +181,49 @@ class EvidencePackBuilder:
                                 "lifecycle": candidate["lifecycle"],
                             }
                         )
+                if step["id"] == "game_background" and step["status"] in {
+                    "succeeded",
+                    "failed",
+                }:
+                    items = step.get("items")
+                    if not isinstance(items, list):
+                        raise EvidencePackError(
+                            "terminal game background lacks its items"
+                        )
+                    pack["game_background"] = []
+                    for item in items:
+                        if not isinstance(item, dict):
+                            raise EvidencePackError(
+                                "game background item must be an object"
+                            )
+                        if item.get("status") == "succeeded":
+                            facts = item.get("facts")
+                            if not isinstance(facts, list):
+                                raise EvidencePackError(
+                                    "game background facts must be an array"
+                                )
+                            pack["game_background"].append(
+                                {
+                                    "candidate_id": item["candidate_id"],
+                                    "game_id": item["game_id"],
+                                    "label": item["label"],
+                                    "facts": facts[:4],
+                                }
+                            )
+                            for code in item.get("limit_codes", []):
+                                evidence_limits.append(
+                                    f"{item['candidate_id']}:{code}"
+                                )
+                        elif item.get("status") == "failed":
+                            failure_code = item.get("failure_code")
+                            if isinstance(failure_code, str):
+                                evidence_limits.append(
+                                    f"{item['candidate_id']}:{failure_code}"
+                                )
+                        else:
+                            raise EvidencePackError(
+                                "game background writer item is not terminal"
+                            )
         root_metric = self.root_metric(state)
         if root_metric is not None:
             pack["root_metric"] = root_metric

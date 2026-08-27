@@ -53,7 +53,7 @@ class ResultValidatorRuntimeTest(unittest.TestCase):
         step = state["steps"][0]
         self.assertEqual("succeeded", step["status"])
         self.assertEqual(1, step["candidate_count"])
-        self.assertEqual("slice-a", step["candidates"][0]["value"])
+        self.assertEqual("12345", step["candidates"][0]["value"])
         self.assertGreaterEqual(step["candidates"][0]["adverse_impact_bp"], 5)
 
     def test_caller_cannot_submit_terminal_classification_fields(self):

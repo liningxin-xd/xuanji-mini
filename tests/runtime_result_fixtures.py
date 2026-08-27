@@ -45,6 +45,19 @@ def raw_result_for_ticket(
     break_source_closure: bool = False,
 ) -> dict[str, Any]:
     state = runner.load_state(run_id)
+    if ticket["step_id"] == "game_background":
+        background = next(
+            step
+            for step in state["post_primary"]["steps"]
+            if step["id"] == "game_background"
+        )
+        item = background["items"][background["cursor"]]
+        binding = runner._binding_from_step(item)
+        columns, _ = runner.contracts.query_spec_result_contract(binding)
+        return {
+            "columns": list(columns),
+            "rows": [_game_background_row(columns, state, item)],
+        }
     if ticket["step_id"] == "secondary":
         secondary = next(
             step
@@ -77,7 +90,54 @@ def raw_result_for_ticket(
         )
         if break_source_closure:
             rows[0]["source_bucket_count"] += 1
+        if step["id"] == "game_id" and candidate:
+            game_row = next(
+                row
+                for row in rows
+                if row["bucket_kind"] == schema["business_bucket_kind"]
+            )
+            game_row["dimension_value"] = "12345"
+            game_row["dimension_label"] = "Game 12345"
     return {"columns": list(columns), "rows": rows}
+
+
+def _game_background_row(
+    columns: dict[str, str],
+    state: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    row = _empty_row(columns)
+    row.update(
+        {
+            "analysis_date": state["analysis_date"],
+            "app_id": int(item["game_id"]),
+            "app_title": item["label"],
+            "event_type": 1,
+            "event_priority": 1,
+            "event_kind": "download_open",
+            "event_title": "Android download opened",
+            "event_detail": "private event detail",
+            "event_date0": state["analysis_date"],
+            "event_date1": state["analysis_date"],
+            "days_before_analysis": 0,
+            "temporal_relation": "same_day",
+            "transition_evidence": "observed_state_transition",
+            "game_status": "ONLINE",
+            "is_android_download_enable": 1,
+            "is_android_reserve_enable": 0,
+            "reserve_auto_download_enabled": 0,
+            "is_game_package_preheat": 0,
+            "game_package_id": 1,
+            "game_package_app_version": "1.0.0",
+            "game_package_app_version_code": 1,
+            "game_package_size": 1024,
+            "apk_app_version_name": "1.0.0",
+            "source": "game_detail_lifecycle",
+            "source_snapshot_dt": state["analysis_date"],
+            "impact_score1": 0,
+        }
+    )
+    return row
 
 
 def _secondary_bucket_rows(

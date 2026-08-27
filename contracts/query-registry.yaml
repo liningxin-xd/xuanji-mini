@@ -101,6 +101,19 @@ secondary:
         quality_source_expression: "1"
         normalizer: standard
 
+game_background:
+  query:
+    path: references/queries/game-operation-events.yaml
+  data_sources:
+    - tap_bi.dwd_app_operation_events_df
+    - tap_dw.dwt_game_detail_info_view_df
+  protected_tokens:
+    - app_id
+    - game_id
+    - event_date0
+    - transition_evidence
+    - source_snapshot_dt
+
 dimensions:
   download:
     is_reserve_auto_download:

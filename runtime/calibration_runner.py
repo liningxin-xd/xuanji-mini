@@ -5,6 +5,10 @@ from typing import Any
 
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
+from .game_background_selector import (
+    GameBackgroundSelectionError,
+    GameBackgroundSelector,
+)
 from .post_primary_planner import PostPrimaryPlanError, PostPrimaryPlanner
 from .secondary_selector import SecondarySelectionError, SecondarySelector
 
@@ -19,6 +23,7 @@ class CalibrationRunner:
         self.planner = PostPrimaryPlanner(contracts)
         self.counterfactual = CounterfactualCalculator(contracts)
         self.secondary_selector = SecondarySelector(contracts)
+        self.game_background_selector = GameBackgroundSelector(contracts)
 
     def create_plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
         return self.planner.create(state)
@@ -40,6 +45,8 @@ class CalibrationRunner:
 
         result = deepcopy(post_primary)
         for step in result["steps"]:
+            if step["status"] in {"in_progress", "repair_required"}:
+                break
             if step["status"] != "planned":
                 continue
             if step["id"] == "counterfactual":
@@ -59,6 +66,15 @@ class CalibrationRunner:
                 try:
                     outcome = self.secondary_selector.select(state, result)
                 except SecondarySelectionError as exc:
+                    raise CalibrationError(str(exc)) from exc
+                step.update(outcome)
+                if step["status"] == "planned":
+                    break
+                continue
+            if step["id"] == "game_background":
+                try:
+                    outcome = self.game_background_selector.select(state, result)
+                except GameBackgroundSelectionError as exc:
                     raise CalibrationError(str(exc)) from exc
                 step.update(outcome)
                 if step["status"] == "planned":
@@ -158,8 +174,53 @@ class CalibrationRunner:
                         f"secondary {field} does not match primary evidence"
                     )
 
-        for actual, expected_step in zip(
-            post_primary["steps"][2:], planned["steps"][2:], strict=True
-        ):
-            if actual != expected_step:
-                raise CalibrationError("disabled post-primary step changed")
+        expected_for_background = deepcopy(post_primary)
+        expected_for_background["steps"][0] = expected_counterfactual
+        try:
+            background_selection = self.game_background_selector.select(
+                state, expected_for_background
+            )
+        except GameBackgroundSelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        actual_background = post_primary["steps"][2]
+        if background_selection["status"] == "skipped_by_policy":
+            if actual_background != {
+                "id": "game_background",
+                **background_selection,
+            }:
+                raise CalibrationError(
+                    "game background skip does not match primary evidence"
+                )
+        else:
+            if actual_background.get("status") not in {"succeeded", "failed"}:
+                raise CalibrationError(
+                    "completed game background step is not terminal"
+                )
+            for field in ("selected_games",):
+                if actual_background.get(field) != background_selection[field]:
+                    raise CalibrationError(
+                        f"game background {field} does not match primary evidence"
+                    )
+            items = actual_background.get("items")
+            if (
+                not isinstance(items, list)
+                or len(items) != len(background_selection["items"])
+                or actual_background.get("cursor") != len(items)
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("status") not in {"succeeded", "failed"}
+                    for item in items
+                )
+            ):
+                raise CalibrationError(
+                    "completed game background items are not terminal"
+                )
+            has_success = any(item["status"] == "succeeded" for item in items)
+            expected_status = "succeeded" if has_success else "failed"
+            if actual_background["status"] != expected_status:
+                raise CalibrationError(
+                    "game background aggregate status is inconsistent"
+                )
+
+        if post_primary["steps"][3] != planned["steps"][3]:
+            raise CalibrationError("disabled post-primary step changed")

@@ -274,6 +274,22 @@ class RepositoryContracts:
             {"plan_id": plan_id, "contract": self.post_primary_plan(plan_id)}
         )
 
+    def game_background_policy(self) -> dict[str, Any]:
+        plan = self.post_primary_plan("post_primary_v1")
+        step = next(
+            (
+                item
+                for item in plan["steps"]
+                if item.get("id") == "game_background"
+            ),
+            None,
+        )
+        if not isinstance(step, dict) or not isinstance(
+            step.get("selection"), dict
+        ):
+            raise ContractError("game background selection policy is missing")
+        return deepcopy(step["selection"])
+
     def result_schema(self, schema_id: str) -> dict[str, Any]:
         schema = self._result_schemas["schemas"].get(schema_id)
         if not isinstance(schema, dict):
@@ -350,6 +366,21 @@ class RepositoryContracts:
             result_schema_id="secondary_bucket",
             dimension=child_dimension,
             dimension_config=dimension_config,
+        )
+
+    def game_background_binding(self, *, game_id: int) -> QueryBinding:
+        if isinstance(game_id, bool) or not isinstance(game_id, int) or game_id <= 0:
+            raise ContractError("game background game_id must be a positive integer")
+        config = self._registry["game_background"]
+        return self._binding(
+            config["query"]["path"],
+            "query_spec",
+            config,
+            result_schema_id="game_background_events",
+            dimension_config={
+                "post_primary": "game_background",
+                "game_id": game_id,
+            },
         )
 
     def query_spec_result_contract(
@@ -620,6 +651,12 @@ class RepositoryContracts:
             expected = expected_queries.get(step.get("id"))
             if expected is None or (step.get("kind"), step.get("max_queries")) != expected:
                 raise ContractError(f"invalid post-primary step contract: {step}")
+            if step.get("id") == "game_background" and step.get("selection") != {
+                "dominant_counterfactual_max_games": 1,
+                "cumulative_root_adverse_ratio": 0.5,
+                "max_games": 3,
+            }:
+                raise ContractError("game background selection policy changed")
         if plan.get("max_additional_queries") != sum(
             item[1] for item in expected_queries.values()
         ):
@@ -637,10 +674,10 @@ class RepositoryContracts:
             primary_v2.get("primary_plan") != "fixed_queue_v1"
             or primary_v2.get("post_primary_plan") != "post_primary_v1"
             or primary_v2.get("enabled_post_primary_steps")
-            != ["counterfactual", "secondary"]
+            != ["counterfactual", "secondary", "game_background"]
         ):
             raise ContractError(
-                "primary_v2 must enable counterfactual and one secondary step"
+                "primary_v2 must enable counterfactual, secondary, and game background"
             )
 
     def _load_asset_hashes(self) -> dict[str, str]:
@@ -840,6 +877,28 @@ class RepositoryContracts:
             }:
                 raise ContractError(f"{chain} game_id parent contract changed")
 
+        game_background = registry.get("game_background")
+        self._validate_query_config(
+            "game_background", game_background, ("query",)
+        )
+        if game_background != {
+            "query": {
+                "path": "references/queries/game-operation-events.yaml"
+            },
+            "data_sources": [
+                "tap_bi.dwd_app_operation_events_df",
+                "tap_dw.dwt_game_detail_info_view_df",
+            ],
+            "protected_tokens": [
+                "app_id",
+                "game_id",
+                "event_date0",
+                "transition_evidence",
+                "source_snapshot_dt",
+            ],
+        }:
+            raise ContractError("game background query registry changed")
+
         for metric, config in download_metrics.items():
             projection = config.get("secondary_metric")
             if not isinstance(projection, dict) or set(projection) != {
@@ -941,6 +1000,7 @@ class RepositoryContracts:
             "install_primary_bucket",
             "install_stage",
             "secondary_bucket",
+            "game_background_events",
         }:
             raise ContractError("result schemas do not cover every query binding kind")
         for name, config in metrics.items():
@@ -953,6 +1013,7 @@ class RepositoryContracts:
                 "contribution_buckets",
                 "install_stage",
                 "secondary_contribution_buckets",
+                "game_background_events",
             }:
                 raise ContractError(f"invalid result validator: {schema_id}")
             columns = schema.get("columns")
