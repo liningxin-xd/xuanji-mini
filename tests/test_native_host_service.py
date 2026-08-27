@@ -292,13 +292,21 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
             runtime=runtime,
         )
         tool = mcp._tool_manager._tools["xuanji_run_task"].fn
-        with self.assertRaisesRegex(Exception, "RuntimeError") as captured:
-            await tool(
-                task_id="failed-shadow",
-                dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
-            )
+        with self.assertLogs("host_service.tools", level="ERROR") as logs:
+            with self.assertRaisesRegex(Exception, "xuanji Host request failed") as captured:
+                await tool(
+                    task_id="failed-shadow",
+                    dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
+                )
         self.assertNotIn("SELECT secret", str(captured.exception))
         self.assertNotIn("private", str(captured.exception))
+        self.assertNotIn("RuntimeError", str(captured.exception))
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn("task_id=failed-shadow", rendered_logs)
+        self.assertIn("phase=run_task", rendered_logs)
+        self.assertIn("exception_type=RuntimeError", rendered_logs)
+        self.assertNotIn("SELECT secret", rendered_logs)
+        self.assertNotIn("query_id=private", rendered_logs)
 
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):

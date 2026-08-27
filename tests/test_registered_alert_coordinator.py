@@ -14,7 +14,7 @@ import yaml
 from runtime.alert_normalizer import AlertNormalizer
 from runtime.contracts import RepositoryContracts
 from runtime.host_adapter import HostQueryResponse
-from runtime.root_preflight import RootPreflight, RootPreflightError
+from runtime.root_preflight import RootPreflight, RootPreflightError, RootSnapshotError
 from runtime.route_resolver import DqcRouteRegistry, RouteResolver
 from runtime.task_coordinator import RegisteredAlertCoordinator, TaskCoordinatorError
 
@@ -138,6 +138,11 @@ class FixtureRootExecutor:
                 "rows": [[row[name] for name in columns]],
             },
         )
+
+
+class UnexpectedRootExecutor:
+    def execute_read_only(self, sql: str) -> HostQueryResponse:
+        raise KeyError("private internal contract detail")
 
 
 class MemoryArtifactStore:
@@ -569,6 +574,97 @@ class TaskCoordinatorTest(unittest.TestCase):
         ).run_task(task_id=prefix + "-b", dqc_payload=payload)
         self.assertNotEqual(first["run_id"], second["run_id"])
         self.assertLessEqual(len(first["run_id"]), 128)
+
+    def test_unexpected_root_exception_keeps_task_retryable(self):
+        coordinator = self.coordinator(UnexpectedRootExecutor())
+        with self.assertRaises(KeyError):
+            coordinator.run_task(
+                task_id="task-root-operational",
+                dqc_payload=payload_for(ROUTES[0]),
+            )
+        state = json.loads(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-root-operational"
+                / "state.json"
+            ).read_text(encoding="utf-8")
+        )
+        investigation = state["investigations"][0]
+        self.assertEqual("pending", investigation["status"])
+        self.assertIsNone(investigation["result"])
+        self.assertNotEqual("query_failed", investigation.get("result_status"))
+
+    def test_corrupt_root_snapshot_is_operational_not_query_failed(self):
+        payload = payload_for(ROUTES[0], ROUTES[3])
+        coordinator = self.coordinator(
+            FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)
+        )
+        first = coordinator.run_task(
+            task_id="task-corrupt-root",
+            dqc_payload=payload,
+        )
+        snapshot = next(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-corrupt-root"
+                / "root-snapshots"
+            ).glob("*.json")
+        )
+        document = json.loads(snapshot.read_text(encoding="utf-8"))
+        document["raw_results"][0]["rows"][0][0] = "changed"
+        snapshot.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaises(RootSnapshotError):
+            coordinator.finalize(
+                task_id="task-corrupt-root",
+                investigation_id=first["investigation_id"],
+                writer_patch=writer_patch(),
+            )
+        state = json.loads(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-corrupt-root"
+                / "state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual("pending", state["investigations"][1]["status"])
+        self.assertIsNone(state["investigations"][1]["result"])
+
+    def test_unexpected_full_queue_exception_keeps_task_retryable(self):
+        executor = FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)
+        coordinator = self.coordinator(executor)
+        original = self.host.xuanji_run_investigation
+
+        def fail_operationally(**kwargs):
+            raise RuntimeError("private run state is unavailable")
+
+        self.host.xuanji_run_investigation = fail_operationally
+        with self.assertRaises(RuntimeError):
+            coordinator.run_task(
+                task_id="task-queue-operational",
+                dqc_payload=payload_for(ROUTES[0]),
+            )
+        self.assertEqual(8, len(executor.calls))
+        state = json.loads(
+            (
+                Path(self.temp_dir.name)
+                / ".tasks"
+                / "task-queue-operational"
+                / "state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual("pending", state["investigations"][0]["status"])
+        self.assertIsNone(state["investigations"][0]["result"])
+
+        self.host.xuanji_run_investigation = original
+        resumed = coordinator.run_task(
+            task_id="task-queue-operational",
+            dqc_payload=payload_for(ROUTES[0]),
+        )
+        self.assertEqual("write_conclusion", resumed["action"])
+        self.assertEqual(8, len(executor.calls))
 
 
 if __name__ == "__main__":

@@ -49,6 +49,12 @@ artifact a pipeline writer should persist. Both sinks are idempotent. An
 identical finalize retry is accepted, while a conflicting writer patch or sink
 payload is rejected.
 
+Unexpected Runtime exceptions cross only the outer MCP error boundary. That
+boundary writes a private compact operational record containing task ID, phase,
+and exception type, then returns a generic ToolError without exception text.
+Only `RootPreflightError` and already classified DView evidence may become an
+analytical blocked status.
+
 Repository tests prove exact three-tool exposure, serial task behavior, public
 redaction, fixed queues, and sink conflict rejection. Production acceptance
 still requires a fresh isolated task-level Host/session and inspection of the

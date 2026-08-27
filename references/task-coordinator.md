@@ -114,3 +114,9 @@ Calling `xuanji_run_task` again with the identical payload returns the pending
 repair/writer action or the completed preview. Identical finalize retries are
 idempotent. A changed payload, investigation identity, run identity, writer
 patch, state hash, or sink payload is rejected rather than overwritten.
+
+Classified DView failures continue through the typed analytical states. An
+unexpected Python exception, state corruption, or internal Host contract error
+does not create an analytical result. The outer MCP boundary records only the
+task ID, phase, and exception type, returns a generic ToolError, and leaves the
+task available for an identical retry.

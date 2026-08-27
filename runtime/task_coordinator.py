@@ -242,17 +242,6 @@ class RegisteredAlertCoordinator:
                     investigation["alert_date"], route["analysis_lag_days"]
                 )
                 return self._await_machine_writer(state, investigation)
-            except Exception as exc:  # noqa: BLE001
-                investigation["root_preflight"] = {
-                    "status": "query_failed",
-                    "reason": f"root preflight failed ({type(exc).__name__})",
-                }
-                investigation["result_status"] = "query_failed"
-                investigation["machine_reason"] = investigation["root_preflight"][
-                    "reason"
-                ]
-                investigation["machine_mode"] = "root_precheck_failed"
-                return self._await_machine_writer(state, investigation)
 
             investigation["root_preflight"] = preflight
             investigation["analysis_date"] = preflight["analysis_date"]
@@ -263,23 +252,14 @@ class RegisteredAlertCoordinator:
 
             investigation["machine_mode"] = "full_queue"
             investigation["run_id"] = self._run_id(state, investigation)
-            try:
-                result = self.investigation_host.xuanji_run_investigation(
-                    run_id=investigation["run_id"],
-                    chain=preflight["chain"],
-                    game_type=preflight["game_type"],
-                    metric=preflight["metric"],
-                    alert_date=preflight["alert_date"],
-                    canonical_root_metric=preflight["canonical_root_metric"],
-                )
-            except Exception as exc:  # noqa: BLE001
-                investigation["result_status"] = "query_failed"
-                investigation["machine_reason"] = (
-                    f"full queue execution failed ({type(exc).__name__})"
-                )
-                investigation["machine_mode"] = "full_queue_failed"
-                investigation["failure_mode"] = "root_scope_failed"
-                return self._await_machine_writer(state, investigation)
+            result = self.investigation_host.xuanji_run_investigation(
+                run_id=investigation["run_id"],
+                chain=preflight["chain"],
+                game_type=preflight["game_type"],
+                metric=preflight["metric"],
+                alert_date=preflight["alert_date"],
+                canonical_root_metric=preflight["canonical_root_metric"],
+            )
             return self._record_host_action(state, investigation, result)
 
         analysis, receipt = self.assembler.assemble_task(state)
