@@ -34,6 +34,13 @@ security find-generic-password -a "$USER" -s DVIEW_MCP_TOKEN -w \
 service/account entry is absent in that keychain. Do not assume a successful
 SSO login or an environment variable created a Keychain item.
 
+A Keychain lookup also runs in the caller's login, bootstrap, and sandbox
+context. A restricted shell reporting an absent item does not prove that a
+LaunchAgent in another bootstrap context cannot read it. Validate only the
+configured service/account identity and command exit status from the same
+supervisor context; never dump Keychain entries, process environments, or
+secret values to compare contexts.
+
 ## One-Time File Handoff
 
 When the operator terminal and Host supervisor cannot share environment state,
@@ -126,6 +133,43 @@ xuanji_finalize
 ```
 
 Do not expose the raw DView `query` tool to the model session.
+
+## Installed LaunchAgent Triage
+
+An installed local Host may keep running from an obsolete worktree even after
+the repository `main` branch has been updated. Verify both the supervisor
+configuration and the live process before calling an upgrade complete:
+
+```bash
+launchctl print "gui/$(id -u)/com.taptap.xuanji-primary" \
+  | rg 'state =|pid ='
+
+lsof -a -p <PID_FROM_LAUNCHCTL> -d cwd -Fn
+```
+
+Review the launch script's `source_root` assignment as plain text without
+sourcing the script. It must identify the intended clean `main` checkout, and
+the live process cwd must agree. Do not infer the source from the LaunchAgent
+label, an old worktree name, or the operator shell's cwd.
+
+Before restarting an existing Host, confirm that its supervisor can repopulate
+all three credential classes: model-to-Host authorization, DView authorization,
+and receipt signing. Check only configured variable or Keychain item names and
+their availability in the supervisor context. Killing an unsupervised process,
+or a process whose credentials exist only in a now-lost parent environment,
+can discard the only usable credential context.
+
+Once source, data roots, and credential persistence have been verified, use
+the supervisor's restart mechanism rather than an ad hoc foreground process:
+
+```bash
+launchctl kickstart -k \
+  "gui/$(id -u)/com.taptap.xuanji-primary"
+```
+
+Then recheck the PID, live cwd, localhost-only binding, unauthenticated `401`,
+and exact three-tool list. A documentation-only change does not require a Host
+restart.
 
 ## Restart And Resume
 

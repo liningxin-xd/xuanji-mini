@@ -51,3 +51,17 @@ or failed verification becomes `unverified_result`; it never falls back to an
 unsigned success. The complete task sink is not exposed as a model tool or an
 artifact download endpoint, and the signed projection contains no private
 query evidence.
+
+## Troubleshooting
+
+| Symptom | Cause | Minimum check | Correct fix | Never do |
+| --- | --- | --- | --- | --- |
+| Receipt validation succeeds but `task_complete` has no usable pipeline result | The running Host predates signed handoff support, or the caller retained only the preview | Confirm the one current response contains both `analysis_preview` and `pipeline_handoff` | Deploy the current clean release and repeat with a new task ID, retaining the pair unchanged | Read or export the private task sink, or treat the preview as authoritative |
+| The writer reports an unknown signer or invalid signature | Its pinned public anchor does not represent the exact receipt authority used by the running Host | Compare key IDs and deployment identities without printing secrets; derive the public key inside the credential-bearing Host context | Pin the derived key ID/public key pair in the writer workspace and rerun with a new task | Mint a replacement receipt secret just to make verification pass |
+| Signature verifies in isolation but the writer returns `unverified_result` | Task ID, payload hash, or preview hash no longer matches the immutable request | Compare the current request identity with the handoff fields and use the unmodified preview from the same response | Reinvoke the current batch task or submit a typed failure for that request | Rewrite `task_id`, edit the preview, recompute a model-side handoff, or reuse an old signature |
+| Identical alert content has the same `request_id` in another batch | Content identity is intentionally stable; replay protection is the batch-bound `task_id` | Confirm the upstream task ID includes the current batch ID | Preserve the exact upstream task ID through the Host and writer | Use `request_id` alone as invocation or replay identity |
+| An unsigned schema-v2 success is available | It is a legacy-read-only artifact | Check the immutable request schema version | Read it only for explicit legacy audit; use schema v3 plus signed handoff for new work | Convert or copy it into a new batch as a current success |
+
+Any missing or invalid authority field fails closed as `unverified_result`. This is a per-request enrichment failure;
+the downstream pipeline must record its degradation explicitly and must never silently reinterpret it as unsigned
+success.

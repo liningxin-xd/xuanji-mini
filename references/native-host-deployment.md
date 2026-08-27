@@ -107,3 +107,17 @@ sinks and returned receipt hashes. Failed or leaking shadows must not be
 resumed or used as evidence. The exact three-scenario procedure and artifact
 verifier are documented in
 [Primary V1 Production Shadow](primary-v1-production-shadow.md).
+
+## Deployment Troubleshooting And Status
+
+| Symptom | Cause | Minimum check | Correct fix | Never do |
+| --- | --- | --- | --- | --- |
+| A local LaunchAgent is healthy but no cluster workload exists | Local acceptance and Kubernetes production are different deployment targets | Check for the release image digest, rendered manifest, `kubectl` context, PVC, network policy, and three Secret resources | Report the state as local deployment only; complete every production prerequisite before applying | Call a localhost install "production deployed" |
+| The committed manifest cannot pass the production gate | Its image is intentionally a placeholder | Run the deployment renderer with an image digest built from the reviewed release commit | Build, scan, and pin `registry/...@sha256:<digest>` | Deploy a mutable tag or bypass the placeholder check |
+| A new pod starts but existing handoffs fail verification | The Host receipt authority changed while daily-push still pins the prior public anchor | Compare deployment key IDs and derive the public anchor inside the exact new Host secret context | Roll out the matching public anchor as a reviewed writer configuration change with the Host release | Generate an unrelated secret or copy a private signing value into daily-push |
+| Restart/resume identity changes across pods | Runtime state is on ephemeral storage or more than one replica is active | Verify one replica and the mounted `/var/lib/xuanji` PVC | Restore the single-replica, persistent-volume contract before accepting tasks | Resume from another replica or reconstruct state from model-visible output |
+| Container smoke passes but production readiness is still unknown | The smoke proves packaging and boundary behavior, not DView authorization or operational policy | Check build tooling, cluster access, Secret provisioning, ingress/egress policy, PVC, and shadow evidence separately | Record each prerequisite and its evidence before declaring production ready | Treat a local or synthetic smoke as real DView or production evidence |
+
+Do not restart or redeploy a healthy Host for documentation-only changes. A
+release status must name its actual boundary: local LaunchAgent, isolated
+container shadow, staged Kubernetes workload, or production workload.
