@@ -59,10 +59,9 @@ class GameBackgroundValidator:
             )
         target_date = self._date(analysis_date, "analysis_date")
         if not rows:
-            return GameBackgroundOutcome((), ("insufficient_data",))
+            return GameBackgroundOutcome((), ("no_registered_event",))
 
         normalized: list[dict[str, Any]] = []
-        seen_keys: set[tuple[Any, ...]] = set()
         limit_codes: list[str] = []
         for index, row in enumerate(rows):
             if row.get("analysis_date") != analysis_date:
@@ -144,27 +143,11 @@ class GameBackgroundValidator:
                     f"row {index} event_priority is outside 1..4",
                 )
 
-            unique_key = (
-                analysis_date,
-                app_id,
-                event_kind,
-                event_title,
-                event_date0.isoformat(),
-                source,
-            )
-            if unique_key in seen_keys:
-                raise GameBackgroundValidationError(
-                    "duplicate_event", f"row {index} duplicates a registered event"
-                )
-            seen_keys.add(unique_key)
-
             snapshot = row.get("source_snapshot_dt")
             if snapshot is None:
                 limit_codes.append("snapshot_missing")
                 continue
             self._date(snapshot, "source_snapshot_dt")
-            if transition == "registered_lifecycle_date_only":
-                limit_codes.append("state_transition_not_directly_observed")
             normalized.append(
                 {
                     **row,
@@ -173,8 +156,14 @@ class GameBackgroundValidator:
                 }
             )
 
-        self._reject_duplicate_lifecycle_evidence(normalized)
-        self._reject_derived_playable_duplicate(normalized)
+        normalized = self._deduplicate_registered_events(normalized)
+        normalized = self._prefer_observed_lifecycle(normalized)
+        normalized = self._suppress_derived_playable_duplicate(normalized)
+        if any(
+            row["transition_evidence"] == "registered_lifecycle_date_only"
+            for row in normalized
+        ):
+            limit_codes.append("state_transition_not_directly_observed")
         normalized.sort(
             key=lambda row: (
                 row["event_priority"],
@@ -288,39 +277,55 @@ class GameBackgroundValidator:
         return "within_baseline"
 
     @staticmethod
-    def _reject_duplicate_lifecycle_evidence(rows: list[dict[str, Any]]) -> None:
-        evidence_by_event: dict[tuple[Any, ...], set[str]] = {}
+    def _deduplicate_registered_events(
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduplicated: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in rows:
-            if row["event_kind"] not in GameBackgroundValidator.LIFECYCLE_KINDS:
-                continue
-            key = (row["app_id"], row["event_kind"], row["event_date0"])
-            evidence_by_event.setdefault(key, set()).add(
-                row["transition_evidence"]
+            key = (
+                row["analysis_date"],
+                row["app_id"],
+                row["event_kind"],
+                row["event_title"],
+                row["event_date0"],
             )
-        if any(
-            {"observed_state_transition", "registered_lifecycle_date_only"}
-            <= evidence
-            for evidence in evidence_by_event.values()
-        ):
-            raise GameBackgroundValidationError(
-                "duplicate_event",
-                "observed and registered lifecycle evidence duplicate one event",
-            )
+            if row["transition_evidence"] != "operation_event":
+                key += (row["transition_evidence"],)
+            deduplicated.setdefault(key, row)
+        return list(deduplicated.values())
 
     @staticmethod
-    def _reject_derived_playable_duplicate(rows: list[dict[str, Any]]) -> None:
+    def _prefer_observed_lifecycle(
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        observed = {
+            (row["app_id"], row["event_kind"], row["event_date0"])
+            for row in rows
+            if row["transition_evidence"] == "observed_state_transition"
+        }
+        return [
+            row
+            for row in rows
+            if row["transition_evidence"] != "registered_lifecycle_date_only"
+            or (row["app_id"], row["event_kind"], row["event_date0"])
+            not in observed
+        ]
+
+    @staticmethod
+    def _suppress_derived_playable_duplicate(
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         download_days = {
             (row["app_id"], row["event_date0"])
             for row in rows
             if row["event_kind"] == "download_open"
         }
-        for row in rows:
-            if (
+        return [
+            row
+            for row in rows
+            if not (
                 row["event_kind"] == "playable_open"
                 and (row["app_id"], row["event_date0"]) in download_days
                 and row.get("is_android_download_enable") == 1
-            ):
-                raise GameBackgroundValidationError(
-                    "duplicate_event",
-                    "playable_open duplicates the same-day download_open transition",
-                )
+            )
+        ]

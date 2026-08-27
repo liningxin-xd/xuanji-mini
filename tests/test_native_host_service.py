@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 import unittest
@@ -7,16 +8,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from host_service.auth import StaticBearerTokenVerifier
 from host_service.config import HostConfigurationError, HostServiceSettings
 from host_service.dview_client import (
     DViewMCPResponseError,
     DViewQuerySession,
 )
+from host_service.pipeline_handoff import PipelineHandoffSigner
 from host_service.runtime import XuanjiHostRuntime
 from host_service.sink import FileTaskResultSink, FileValidatedResultSink
 from host_service.tools import create_mcp
 from runtime.host_adapter import DViewExecutionError
+from runtime.contracts import canonical_sha256
 from runtime.receipts import TrustedReceiptVerifier
 from runtime.runner import AttributionRunner
 from tests.runtime_result_fixtures import raw_result_for_ticket
@@ -70,9 +75,18 @@ class _FakeRuntime:
 
 
 class _FixtureDViewClient:
-    def __init__(self, settings: HostServiceSettings, repository_root: Path):
+    def __init__(
+        self,
+        settings: HostServiceSettings,
+        repository_root: Path,
+        *,
+        game_candidate: bool = False,
+        background_failure: bool = False,
+    ):
         self._settings = settings
         self._repository_root = repository_root
+        self._game_candidate = game_candidate
+        self._background_failure = background_failure
         self._query_counts: dict[str, int] = {}
         self._root_executor = FixtureRootExecutor(
             current_rate=0.79,
@@ -108,7 +122,25 @@ class _FixtureDViewClient:
                 continue
             count = self._query_counts.get(run_root.name, 0) + 1
             self._query_counts[run_root.name] = count
-            raw_result = raw_result_for_ticket(runner, run_root.name, ticket)
+            if self._background_failure and ticket["step_id"] == "game_background":
+                raise DViewExecutionError(
+                    query_id="private-background-query",
+                    error_class="execution",
+                    error_code="ODPS-PRIVATE",
+                    error_message=(
+                        "SELECT secret FROM tap_dw.private_table "
+                        "query_id=private-background-query "
+                        "/private/tmp/private-background-result.json"
+                    ),
+                )
+            raw_result = raw_result_for_ticket(
+                runner,
+                run_root.name,
+                ticket,
+                candidate=(
+                    self._game_candidate and ticket["step_id"] == "game_id"
+                ),
+            )
             return {
                 "query_id": f"private-{run_root.name}-{count}",
                 "columns": raw_result["columns"],
@@ -432,6 +464,213 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"attribution_query_count":7', rendered_logs)
             self.assertNotIn("XUANJI_ANALYSIS_PROFILE", json.dumps(result))
 
+    async def test_primary_v2_game_background_is_bound_to_signed_handoff(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(
+                settings,
+                Path(__file__).parents[1],
+                game_candidate=True,
+            )
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            task_id = (
+                "daily-push-20260827T010000Z-0123456789ab-" + "a" * 64
+            )
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": (
+                        "ads_dmg_quality_platform_download_chain_monitor_1d"
+                    ),
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id=task_id, dqc_payload=payload
+                )
+                self.assertEqual("write_conclusion", result["action"])
+                self.assertEqual(
+                    1, len(result["writer_pack"]["game_background"])
+                )
+                self.assertLessEqual(
+                    len(
+                        json.dumps(
+                            result["writer_pack"],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ),
+                    12 * 1024,
+                )
+                marker = "游戏背景校准已纳入最终结论。"
+                completed = await runtime.finalize(
+                    task_id=task_id,
+                    investigation_id=result["investigation_id"],
+                    writer_patch={
+                        "summary": marker,
+                        "finding_texts": {
+                            candidate["candidate_id"]: (
+                                f"{candidate['label']} 达到冻结候选门槛。"
+                            )
+                            for candidate in result["writer_pack"]["candidates"]
+                        },
+                        "evidence_limits": [],
+                        "recommended_action": "复核候选游戏的下载开放时间。",
+                    },
+                )
+
+            self.assertEqual("task_complete", completed["action"])
+            preview = completed["analysis_preview"]
+            handoff = completed["pipeline_handoff"]
+            self.assertIn(marker, json.dumps(preview, ensure_ascii=False))
+            self.assertEqual(task_id, handoff["task_id"])
+            self.assertEqual(canonical_sha256(payload), handoff["payload_sha256"])
+            self.assertEqual(
+                canonical_sha256(preview), handoff["analysis_preview_sha256"]
+            )
+            self.assertEqual(
+                completed["validation_receipt"]["validation_receipt_sha256"],
+                handoff["validation_receipt_sha256"],
+            )
+
+            signer = PipelineHandoffSigner(
+                receipt_key_id=settings.receipt_key_id,
+                receipt_secret=settings.receipt_secret,
+            )
+            public_key = Ed25519PublicKey.from_public_bytes(
+                _decode_base64url(signer.public_key_base64url)
+            )
+            unsigned = dict(handoff)
+            signature = _decode_base64url(unsigned.pop("signature"))
+            public_key.verify(
+                signature,
+                json.dumps(
+                    unsigned,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8"),
+            )
+
+            encoded = json.dumps([preview, handoff], ensure_ascii=False)
+            for forbidden in (
+                "SELECT ",
+                "WITH ",
+                "query_id",
+                "raw_result",
+                "event_detail",
+                "source_snapshot_dt",
+                "/private/tmp/",
+            ):
+                self.assertNotIn(forbidden, encoded)
+            self.assertIn(
+                '"attribution_query_count":9', "\n".join(logs.output)
+            )
+            resumed = await runtime.run_task(task_id=task_id, dqc_payload=payload)
+            self.assertEqual(preview, resumed["analysis_preview"])
+            self.assertEqual(handoff, resumed["pipeline_handoff"])
+
+    async def test_background_failure_details_stay_private_across_host_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(
+                settings,
+                Path(__file__).parents[1],
+                game_candidate=True,
+                background_failure=True,
+            )
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": (
+                        "ads_dmg_quality_platform_download_chain_monitor_1d"
+                    ),
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id="native-v2-private-background-failure",
+                    dqc_payload=payload,
+                )
+                completed = await runtime.finalize(
+                    task_id="native-v2-private-background-failure",
+                    investigation_id=result["investigation_id"],
+                    writer_patch={
+                        "summary": "一级归因已完成，背景查询失败仅作为证据限制。",
+                        "finding_texts": {
+                            candidate["candidate_id"]: (
+                                f"{candidate['label']} 达到冻结候选门槛。"
+                            )
+                            for candidate in result["writer_pack"]["candidates"]
+                        },
+                        "evidence_limits": [],
+                        "recommended_action": "按既有一级证据继续复核下载链路。",
+                    },
+                )
+
+            self.assertEqual("task_complete", completed["action"])
+            self.assertEqual("completed", completed["overall_status"])
+            self.assertIn(
+                "game_id:12345:query_failed",
+                result["writer_pack"]["evidence_limits"],
+            )
+            private_runner = AttributionRunner(
+                Path(__file__).parents[1],
+                runs_root=settings.runs_root,
+                trusted_receipt_verifier=TrustedReceiptVerifier(
+                    key_id=settings.receipt_key_id,
+                    secret=settings.receipt_secret,
+                ),
+                analysis_profile="primary_v2",
+            )
+            private_state = private_runner.load_state(result["run_id"])
+            private_reason = private_state["post_primary"]["steps"][2]["items"][0][
+                "reason"
+            ]
+            self.assertIn("SELECT secret", private_reason)
+            self.assertIn("private-background-query", private_reason)
+
+            transcript = json.dumps([result, completed], ensure_ascii=False)
+            structured_logs = "\n".join(logs.output)
+            for forbidden in (
+                "SELECT secret",
+                "tap_dw.private_table",
+                "private-background-query",
+                "/private/tmp/private-background-result.json",
+            ):
+                self.assertNotIn(forbidden, transcript)
+                self.assertNotIn(forbidden, structured_logs)
+
 
 class ValidatedResultSinkTest(unittest.TestCase):
     def test_sink_is_private_idempotent_and_conflict_rejecting(self):
@@ -461,6 +700,10 @@ class ValidatedResultSinkTest(unittest.TestCase):
             self.assertEqual(analysis, sink.load("task-1")["analysis"])
             with self.assertRaisesRegex(RuntimeError, "conflicting content"):
                 sink("task-1", {"overall_status": "failed"}, receipt)
+
+
+def _decode_base64url(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 if __name__ == "__main__":

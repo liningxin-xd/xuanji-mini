@@ -2567,7 +2567,7 @@ class AttributionRunner:
             step_game_id = step.get("game_id")
             if (
                 not isinstance(step_game_id, str)
-                or not step_game_id.isdigit()
+                or re.fullmatch(r"[1-9][0-9]*", step_game_id) is None
                 or game_id != int(step_game_id)
             ):
                 raise RunnerError("game background binding changed its game identity")

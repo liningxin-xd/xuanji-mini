@@ -301,7 +301,7 @@ class GameBackgroundRuntimeTest(unittest.TestCase):
         pack = runner.build_writer_pack("background-empty")
         self.assertEqual([], pack["game_background"][0]["facts"])
         self.assertIn(
-            "game_id:12345:insufficient_data", pack["evidence_limits"]
+            "game_id:12345:no_registered_event", pack["evidence_limits"]
         )
         self.assertEqual("completed", pack["result_status_hint"])
 
@@ -505,13 +505,18 @@ class GameBackgroundSelectionTest(unittest.TestCase):
         self.selector = GameBackgroundSelector(RepositoryContracts(ROOT))
 
     @staticmethod
-    def _state(adverse_impacts: list[float]) -> dict:
+    def _state(
+        adverse_impacts: list[float],
+        *,
+        metric: str = "下载完成率",
+        delta: float = -0.10,
+    ) -> dict:
         return {
-            "metric": "下载完成率",
+            "metric": metric,
             "canonical_root_metric": {
                 "current_value": 0.70,
                 "baseline_value": 0.80,
-                "delta": -0.10,
+                "delta": delta,
             },
             "steps": [
                 {
@@ -575,6 +580,41 @@ class GameBackgroundSelectionTest(unittest.TestCase):
             selected["reason"],
         )
 
+    def test_metric_direction_is_normalized_before_game_selection(self):
+        higher = self.selector.select(
+            self._state([500], metric="下载完成率", delta=-0.10),
+            self._post_primary(),
+        )
+        lower = self.selector.select(
+            self._state([500], metric="下载失败率", delta=0.10),
+            self._post_primary(),
+        )
+        self.assertEqual("planned", higher["status"])
+        self.assertEqual("planned", lower["status"])
+        self.assertEqual(
+            higher["selected_games"], lower["selected_games"]
+        )
+
+    def test_root_decimal_delta_is_compared_with_candidate_bp(self):
+        selected = self.selector.select(
+            self._state([4, 1], delta=-0.001), self._post_primary()
+        )
+        self.assertEqual(2, len(selected["selected_games"]))
+
+    def test_only_ascii_positive_integer_game_ids_are_selectable(self):
+        state = self._state([500])
+        state["steps"][0]["candidates"] = [
+            {"value": "abc", "label": "Text", "adverse_impact_bp": 900},
+            {"value": "00123", "label": "Leading zero", "adverse_impact_bp": 800},
+            {"value": "１２３", "label": "Unicode digits", "adverse_impact_bp": 700},
+            {"value": "12345", "label": "Valid", "adverse_impact_bp": 500},
+        ]
+        selected = self.selector.select(state, self._post_primary())
+        self.assertEqual(
+            ["12345"],
+            [item["game_id"] for item in selected["selected_games"]],
+        )
+
 
 class GameBackgroundValidatorTest(unittest.TestCase):
     def setUp(self):
@@ -616,7 +656,7 @@ class GameBackgroundValidatorTest(unittest.TestCase):
             game_id=12345,
         )
 
-    def test_wrong_app_future_event_and_duplicate_event_are_rejected(self):
+    def test_wrong_app_and_future_event_are_rejected(self):
         cases = []
         wrong_app = copy.deepcopy(self.row)
         wrong_app["app_id"] = 99999
@@ -636,9 +676,23 @@ class GameBackgroundValidatorTest(unittest.TestCase):
             ) as raised:
                 self._validate([row])
             self.assertEqual(code, raised.exception.code)
-        with self.assertRaises(GameBackgroundValidationError) as raised:
-            self._validate([self.row, copy.deepcopy(self.row)])
-        self.assertEqual("duplicate_event", raised.exception.code)
+
+    def test_duplicate_event_revisions_are_folded_before_fact_capping(self):
+        incident = copy.deepcopy(self.row)
+        incident.update(
+            {
+                "event_type": 5,
+                "event_priority": 3,
+                "event_kind": "incident",
+                "event_title": "Service incident",
+                "transition_evidence": "operation_event",
+                "source": "operation_events",
+            }
+        )
+        revision = copy.deepcopy(incident)
+        revision["source"] = "operation_events_revision"
+        outcome = self._validate([incident, revision])
+        self.assertEqual(1, len(outcome.facts))
 
     def test_observed_and_registered_lifecycle_are_distinguished(self):
         observed = self._validate([self.row])
@@ -658,6 +712,31 @@ class GameBackgroundValidatorTest(unittest.TestCase):
         self.assertEqual(
             ("state_transition_not_directly_observed",),
             registered.limit_codes,
+        )
+
+        preferred = self._validate([registered_row, self.row])
+        self.assertEqual(1, len(preferred.facts))
+        self.assertEqual(
+            "observed_state_transition",
+            preferred.facts[0]["transition_evidence"],
+        )
+        self.assertEqual((), preferred.limit_codes)
+
+    def test_playable_transition_derived_from_download_is_not_duplicated(self):
+        playable = copy.deepcopy(self.row)
+        playable.update(
+            {
+                "event_type": 2,
+                "event_priority": 2,
+                "event_kind": "playable_open",
+                "event_title": "Android playable opened",
+                "is_android_download_enable": 1,
+            }
+        )
+        outcome = self._validate([self.row, playable])
+        self.assertEqual(
+            ["download_open"],
+            [fact["event_kind"] for fact in outcome.facts],
         )
 
     def test_writer_facts_are_capped_at_four(self):

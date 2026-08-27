@@ -415,7 +415,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             ],
         )
 
-    def test_apk_install_runs_six_primary_plus_one_secondary_query(self):
+    def test_apk_install_runs_background_after_primary_and_secondary(self):
         runner, query_count = self._complete(
             "secondary-install",
             chain="install",
@@ -426,7 +426,9 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         state = runner.load_state("secondary-install")
         self.assertEqual("2026-08-20", state["analysis_date"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])
+        self.assertEqual("succeeded", state["post_primary"]["steps"][2]["status"])
         pack = runner.build_writer_pack("secondary-install")
+        self.assertEqual(1, len(pack["game_background"]))
         analysis = runner.assemble_final(
             "secondary-install",
             self._patch(pack),
@@ -435,6 +437,21 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         self.assertEqual(
             "valid",
             FinalEvidenceValidator().validate(state, analysis, 0)["status"],
+        )
+
+    def test_sandbox_install_runs_one_game_background_fixture(self):
+        runner, query_count = self._complete(
+            "secondary-install-sandbox",
+            chain="install",
+            game_type="sandbox",
+            metric="下载安装完成率",
+        )
+        self.assertEqual(7, query_count)
+        state = runner.load_state("secondary-install-sandbox")
+        self.assertEqual("succeeded", state["post_primary"]["steps"][2]["status"])
+        self.assertEqual(
+            1,
+            len(runner.build_writer_pack("secondary-install-sandbox")["game_background"]),
         )
 
     def test_apk_install_rejects_an_immature_secondary_bucket(self):
