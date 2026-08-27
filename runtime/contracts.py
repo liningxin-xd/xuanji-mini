@@ -173,6 +173,12 @@ class RepositoryContracts:
         self.result_schemas_path = self.contract_root / "result-schemas.yaml"
         self.analysis_profiles_path = self.contract_root / "analysis-profiles.yaml"
         self.post_primary_plan_path = self.contract_root / "post-primary-plan.yaml"
+        self.error_code_capabilities_path = (
+            self.contract_root / "error-code-capabilities.yaml"
+        )
+        self.error_code_triggers_path = (
+            self.contract_root / "error-code-triggers.yaml"
+        )
         self.secondary_relations_path = (
             self.contract_root / "secondary-relations.yaml"
         )
@@ -184,11 +190,18 @@ class RepositoryContracts:
         self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
         self._analysis_profiles = _load_yaml_mapping(self.analysis_profiles_path)
         self._post_primary_plans = _load_yaml_mapping(self.post_primary_plan_path)
+        self._error_code_capabilities = _load_yaml_mapping(
+            self.error_code_capabilities_path
+        )
+        self._error_code_triggers = _load_yaml_mapping(
+            self.error_code_triggers_path
+        )
         self._secondary_relations = _load_yaml_mapping(
             self.secondary_relations_path
         )
         self._plans = self._validate_plans()
         self._validate_analysis_profiles()
+        self._validate_error_code_contracts()
         self._asset_hashes = self._load_asset_hashes()
         self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
@@ -226,6 +239,14 @@ class RepositoryContracts:
     @property
     def secondary_relations_sha256(self) -> str:
         return sha256_bytes(self.secondary_relations_path.read_bytes())
+
+    @property
+    def error_code_capabilities_sha256(self) -> str:
+        return sha256_bytes(self.error_code_capabilities_path.read_bytes())
+
+    @property
+    def error_code_triggers_sha256(self) -> str:
+        return sha256_bytes(self.error_code_triggers_path.read_bytes())
 
     @property
     def default_analysis_profile(self) -> str:
@@ -289,6 +310,32 @@ class RepositoryContracts:
         ):
             raise ContractError("game background selection policy is missing")
         return deepcopy(step["selection"])
+
+    def error_code_capability(
+        self, chain: str, game_type: str
+    ) -> dict[str, Any]:
+        capability_id = f"{chain}_{game_type}"
+        value = self._error_code_capabilities["capabilities"].get(capability_id)
+        if not isinstance(value, dict):
+            raise ContractError(
+                f"error-code capability is not registered: {chain}/{game_type}"
+            )
+        return deepcopy(value)
+
+    def error_code_trigger(
+        self, chain: str, game_type: str, metric: str
+    ) -> dict[str, Any]:
+        for route in self._error_code_triggers["routes"]:
+            if (
+                route["chain"] == chain
+                and route["game_type"] == game_type
+                and route["metric"] == metric
+            ):
+                return deepcopy(route)
+        raise ContractError(
+            f"error-code trigger is not registered: "
+            f"{chain}/{game_type}/{metric}"
+        )
 
     def result_schema(self, schema_id: str) -> dict[str, Any]:
         schema = self._result_schemas["schemas"].get(schema_id)
@@ -679,6 +726,197 @@ class RepositoryContracts:
             raise ContractError(
                 "primary_v2 must enable counterfactual, secondary, and game background"
             )
+
+    def _validate_error_code_contracts(self) -> None:
+        capabilities = self._error_code_capabilities
+        if set(capabilities) != {
+            "version",
+            "module",
+            "runtime_enabled",
+            "capabilities",
+        } or capabilities.get("version") != 1:
+            raise ContractError("error-code capability contract is invalid")
+        if capabilities.get("module") != "error_code":
+            raise ContractError("error-code capability module is invalid")
+        if capabilities.get("runtime_enabled") is not False:
+            raise ContractError("error-code runtime must remain disabled in 1.8-A")
+
+        scopes = capabilities.get("capabilities")
+        if not isinstance(scopes, dict):
+            raise ContractError("error-code capability scopes are invalid")
+        expected_scopes = {
+            "download_app": {
+                "chain": "download",
+                "game_type": "app",
+                "source_status": "registered_candidate",
+                "error_code_query": "allowed_after_trigger",
+                "recovery_query": "disabled_until_semantics_confirmed",
+                "query_asset": None,
+                "supported_metrics": ["下载失败率"],
+                "source": {
+                    "table": "tap_dw.dwd_str_game_core_behavior_di",
+                    "partition_field": "dt",
+                    "freshness": "T+1",
+                    "filters": {
+                        "behavior_type": "game_download_failed",
+                        "action": "appDownloadNewFailed",
+                        "platform": "ANDROID",
+                        "game_type": "app",
+                        "is_risk_device": 0,
+                    },
+                    "code_expression": "GET_JSON_OBJECT(action_args, '$.code')",
+                    "info_expression": "GET_JSON_OBJECT(action_args, '$.info')",
+                    "affected_entity_key": ["dt", "device_id", "game_id"],
+                    "unmatched_code_bucket": "unmatched_code",
+                    "public_info_policy": "redacted_category_only",
+                    "dictionary": {
+                        "path": (
+                            "references/"
+                            "download-install-error-code-dictionary.md"
+                        ),
+                        "load_policy": "after_query_success_and_codes_frozen",
+                    },
+                },
+            },
+            "download_sandbox": {
+                "chain": "download",
+                "game_type": "sandbox",
+                "source_status": "unregistered",
+                "error_code_query": "disabled",
+                "recovery_query": "disabled",
+                "query_asset": None,
+                "supported_metrics": [],
+                "source": None,
+                "reason": "download_sandbox_source_unregistered",
+            },
+            "install_app": {
+                "chain": "install",
+                "game_type": "app",
+                "source_status": "candidate_incomplete",
+                "error_code_query": "disabled",
+                "recovery_query": "disabled",
+                "query_asset": None,
+                "supported_metrics": [],
+                "source": None,
+                "reason": "install_event_semantics_candidate_incomplete",
+            },
+            "install_sandbox": {
+                "chain": "install",
+                "game_type": "sandbox",
+                "source_status": "unregistered",
+                "error_code_query": "disabled",
+                "recovery_query": "disabled",
+                "query_asset": None,
+                "supported_metrics": [],
+                "source": None,
+                "reason": "install_sandbox_source_unregistered",
+            },
+        }
+        if scopes != expected_scopes:
+            raise ContractError("error-code capability scopes changed")
+        dictionary_path = scopes["download_app"]["source"]["dictionary"]["path"]
+        if not _safe_path(self.root, dictionary_path).is_file():
+            raise ContractError("error-code dictionary does not exist")
+
+        triggers = self._error_code_triggers
+        if set(triggers) != {"version", "module", "evidence_policy", "routes"}:
+            raise ContractError("error-code trigger contract is invalid")
+        if triggers.get("version") != 1 or triggers.get("module") != "error_code":
+            raise ContractError("error-code trigger contract identity is invalid")
+        if triggers.get("evidence_policy") != {
+            "allowed_source": "frozen_root_and_attribution_evidence",
+            "module_source_scan_before_trigger": False,
+            "retry_signal_may_trigger": False,
+        }:
+            raise ContractError("error-code trigger evidence policy changed")
+
+        routes = triggers.get("routes")
+        if not isinstance(routes, list) or not all(
+            isinstance(route, dict) for route in routes
+        ):
+            raise ContractError("error-code trigger routes are invalid")
+        route_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for route in routes:
+            key = (route.get("chain"), route.get("game_type"), route.get("metric"))
+            if not all(isinstance(value, str) and value for value in key):
+                raise ContractError("error-code trigger route identity is invalid")
+            if key in route_map:
+                raise ContractError(f"duplicate error-code trigger route: {key}")
+            route_map[key] = route
+
+        expected_route_keys = {
+            (plan.chain, game_type, metric)
+            for plan in self._plans.values()
+            for game_type in plan.allowed_game_types
+            for metric in plan.allowed_metrics
+        }
+        if set(route_map) != expected_route_keys:
+            raise ContractError("error-code trigger routes do not cover all plans")
+
+        registered_key = ("download", "app", "下载失败率")
+        if route_map[registered_key] != {
+            "chain": "download",
+            "game_type": "app",
+            "metric": "下载失败率",
+            "capability": "download_app",
+            "status": "registered_not_enabled",
+            "trigger_id": "download_app_failed_entity_rate",
+            "requirements": {
+                "legal_primary_candidate": True,
+                "evidence_source": "frozen_root_metric",
+                "root_adverse_delta_bp": {
+                    "operator": "at_least",
+                    "value": 5,
+                },
+                "current_affected_entity_count": {
+                    "operator": "at_least",
+                    "value": 100,
+                },
+            },
+        }:
+            raise ContractError("registered error-code trigger changed")
+
+        disabled_reasons = {
+            ("download", "app", "下载完成率"): (
+                "explicit_failed_signal_not_frozen"
+            ),
+            ("download", "app", "下载失败次数比率"): (
+                "affected_entity_count_not_frozen"
+            ),
+            ("download", "app", "下载人为停止率"): (
+                "explicit_failed_signal_not_frozen"
+            ),
+            ("download", "sandbox", "下载完成率"): (
+                "download_sandbox_source_unregistered"
+            ),
+            ("download", "sandbox", "下载失败率"): (
+                "download_sandbox_source_unregistered"
+            ),
+            ("download", "sandbox", "下载失败次数比率"): (
+                "download_sandbox_source_unregistered"
+            ),
+            ("download", "sandbox", "下载人为停止率"): (
+                "download_sandbox_source_unregistered"
+            ),
+            ("install", "app", "下载安装完成率"): (
+                "install_event_semantics_candidate_incomplete"
+            ),
+            ("install", "sandbox", "下载安装完成率"): (
+                "install_sandbox_source_unregistered"
+            ),
+        }
+        for key, reason in disabled_reasons.items():
+            chain, game_type, metric = key
+            capability_id = f"{chain}_{game_type}"
+            if route_map[key] != {
+                "chain": chain,
+                "game_type": game_type,
+                "metric": metric,
+                "capability": capability_id,
+                "status": "disabled",
+                "reason": reason,
+            }:
+                raise ContractError(f"disabled error-code trigger changed: {key}")
 
     def _load_asset_hashes(self) -> dict[str, str]:
         if self._asset_lock.get("version") != 1:

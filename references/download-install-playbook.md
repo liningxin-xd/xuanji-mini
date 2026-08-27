@@ -561,6 +561,8 @@ tap_dmp.ods_server_sync_apks
 
 ### 错误码与恢复
 
+运行时先读取 `contracts/error-code-capabilities.yaml` 和 `contracts/error-code-triggers.yaml`。能力 Contract 中的 `allowed_after_trigger` 只表示来源具备后续开发资格；只有对应 trigger、锁定 QuerySpec、结果校验器和分析档案全部启用后才允许提交查询。当前 1.8-A 的全局运行开关为关闭，任何 `registered_not_enabled` 路由都必须继续 `skipped_by_policy`，不得把机器登记误当作查询授权。
+
 只有已形成合法一级候选，且满足以下任一信号时才执行一次：
 
 - 下载互斥终态中 `explicit_failed` 占比相对基线上升至少 5bp；

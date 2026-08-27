@@ -1,0 +1,68 @@
+version: 1
+module: error_code
+runtime_enabled: false
+
+capabilities:
+  download_app:
+    chain: download
+    game_type: app
+    source_status: registered_candidate
+    error_code_query: allowed_after_trigger
+    recovery_query: disabled_until_semantics_confirmed
+    query_asset: null
+    supported_metrics:
+      - 下载失败率
+    source:
+      table: tap_dw.dwd_str_game_core_behavior_di
+      partition_field: dt
+      freshness: T+1
+      filters:
+        behavior_type: game_download_failed
+        action: appDownloadNewFailed
+        platform: ANDROID
+        game_type: app
+        is_risk_device: 0
+      code_expression: "GET_JSON_OBJECT(action_args, '$.code')"
+      info_expression: "GET_JSON_OBJECT(action_args, '$.info')"
+      affected_entity_key:
+        - dt
+        - device_id
+        - game_id
+      unmatched_code_bucket: unmatched_code
+      public_info_policy: redacted_category_only
+      dictionary:
+        path: references/download-install-error-code-dictionary.md
+        load_policy: after_query_success_and_codes_frozen
+
+  download_sandbox:
+    chain: download
+    game_type: sandbox
+    source_status: unregistered
+    error_code_query: disabled
+    recovery_query: disabled
+    query_asset: null
+    supported_metrics: []
+    source: null
+    reason: download_sandbox_source_unregistered
+
+  install_app:
+    chain: install
+    game_type: app
+    source_status: candidate_incomplete
+    error_code_query: disabled
+    recovery_query: disabled
+    query_asset: null
+    supported_metrics: []
+    source: null
+    reason: install_event_semantics_candidate_incomplete
+
+  install_sandbox:
+    chain: install
+    game_type: sandbox
+    source_status: unregistered
+    error_code_query: disabled
+    recovery_query: disabled
+    query_asset: null
+    supported_metrics: []
+    source: null
+    reason: install_sandbox_source_unregistered

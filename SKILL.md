@@ -9,7 +9,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## 分析档案
 
-部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得把它变成模型工具参数。`primary_v1` 保持固定一级队列；`primary_v2` 在同一完整一级队列后执行已登记的确定性后置模块。当前 `primary_v2` 启用零查询剔除反事实、一次 `game_id` 单父二级归因和最多三款游戏的串行背景校准；错误码仍由策略跳过。
+部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得把它变成模型工具参数。`primary_v1` 保持固定一级队列；`primary_v2` 在同一完整一级队列后执行已登记的确定性后置模块。当前 `primary_v2` 启用零查询剔除反事实、一次 `game_id` 单父二级归因和最多三款游戏的串行背景校准；1.8-A 只登记错误码能力与触发 Contract，运行时、QuerySpec 和恢复能力仍关闭，因此错误码继续由策略跳过。
 
 ## 工具协议
 
