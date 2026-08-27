@@ -10,11 +10,18 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.container_mcp_probe import (
-    TASK_ID,
-    exercise_task,
-    unauthenticated_status,
-)
+if __package__:
+    from .container_mcp_probe import (
+        TASK_ID,
+        exercise_task,
+        unauthenticated_status,
+    )
+else:
+    from container_mcp_probe import (
+        TASK_ID,
+        exercise_task,
+        unauthenticated_status,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
