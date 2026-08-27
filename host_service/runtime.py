@@ -17,6 +17,7 @@ from runtime.task_coordinator import RegisteredAlertCoordinator
 
 from .config import HostServiceSettings
 from .dview_client import DViewMCPClient
+from .pipeline_handoff import PipelineHandoffError, PipelineHandoffSigner
 from .sink import FileTaskResultSink, FileValidatedResultSink
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,10 @@ class XuanjiHostRuntime:
         )
         self._task_sink = task_result_sink or FileTaskResultSink(
             settings.results_root / "tasks"
+        )
+        self._pipeline_handoff_signer = PipelineHandoffSigner(
+            receipt_key_id=settings.receipt_key_id,
+            receipt_secret=settings.receipt_secret,
         )
         self._repository_root = Path(repository_root)
         self._run_locks: dict[str, asyncio.Lock] = {}
@@ -105,6 +110,8 @@ class XuanjiHostRuntime:
                 attribution_query=query_for("attribution"),
             )
             result = await asyncio.to_thread(operation, coordinator)
+            if result.get("action") == "task_complete":
+                result = self._attach_pipeline_handoff(task_id, result)
         self._log_operation(
             task_id=task_id,
             phase=phase,
@@ -114,6 +121,29 @@ class XuanjiHostRuntime:
             duration_ms=round((time.monotonic() - started) * 1000),
         )
         return result
+
+    def _attach_pipeline_handoff(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact = self._task_sink.load(task_id)
+        preview, handoff = self._pipeline_handoff_signer.build(
+            task_id=task_id,
+            artifact=artifact,
+        )
+        receipt = result.get("validation_receipt")
+        if result.get("analysis_preview") != preview or not isinstance(receipt, dict):
+            raise PipelineHandoffError(
+                "task response no longer matches the authoritative task sink"
+            )
+        if receipt.get("validation_receipt_sha256") != handoff.get(
+            "validation_receipt_sha256"
+        ):
+            raise PipelineHandoffError(
+                "task response receipt no longer matches the task sink"
+            )
+        return {**result, "pipeline_handoff": handoff}
 
     def _build_coordinator(
         self,

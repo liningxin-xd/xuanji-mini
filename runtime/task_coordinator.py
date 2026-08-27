@@ -11,29 +11,13 @@ from typing import Any, Protocol
 
 from .alert_normalizer import AlertNormalizer
 from .contracts import RepositoryContracts, canonical_sha256, sha256_bytes
+from .public_projection import public_analysis_projection
 from .root_preflight import RootPreflight, RootPreflightError
 from .route_resolver import DqcRouteRegistry, RouteResolver
 from .task_assembler import TaskAssembler, writer_pack_size
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_PRIVATE_FIELDS = {
-    "query_id",
-    "receipt_id",
-    "raw_result",
-    "raw_result_sha256",
-    "receipt_signature",
-    "rendered_sql",
-    "rendered_sql_sha256",
-    "submitted_sql_sha256",
-    "private_queries",
-    "root_snapshot_sha256",
-    "root_snapshot_sha256s",
-    "root_snapshot_reused",
-    "root_query_count",
-}
-
-
 class TaskCoordinatorError(ValueError):
     pass
 
@@ -434,7 +418,7 @@ class RegisteredAlertCoordinator:
             "action": "task_complete",
             "task_id": state["task_id"],
             "overall_status": analysis["overall_status"],
-            "analysis_preview": self._model_visible_copy(analysis),
+            "analysis_preview": public_analysis_projection(analysis),
             "validation_receipt": {
                 key: receipt[key]
                 for key in (
@@ -571,15 +555,3 @@ class RegisteredAlertCoordinator:
             raise TaskCoordinatorError(
                 f"task writer pack exceeds the 12 KB context budget: {size} bytes"
             )
-
-    @classmethod
-    def _model_visible_copy(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: cls._model_visible_copy(child)
-                for key, child in value.items()
-                if key not in _PRIVATE_FIELDS
-            }
-        if isinstance(value, list):
-            return [cls._model_visible_copy(child) for child in value]
-        return deepcopy(value)

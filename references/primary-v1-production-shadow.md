@@ -79,9 +79,11 @@ idempotency identity:
 task_id + analysis_sha256 + validation_receipt_sha256
 ```
 
-The downstream writer must read
-`/var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json`; it must not
-persist `analysis_preview` from the model transcript.
+The trusted acceptance verifier must still inspect
+`/var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json`. A
+model-mediated daily-push writer must not persist a bare `analysis_preview`; it
+may persist the public projection only after verifying the paired
+`pipeline_handoff` against the pinned key, immutable task ID, and payload hash.
 
 ## Logs And Exit Gate
 

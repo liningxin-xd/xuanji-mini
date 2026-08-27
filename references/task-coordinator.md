@@ -105,7 +105,11 @@ The complete task analysis and receipt are written atomically to:
 /var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json
 ```
 
-The model receives a recursively redacted preview and compact receipt hashes.
+The model receives a recursively redacted preview, compact receipt hashes, and
+a signed public pipeline handoff derived from the reloaded task sink. The
+handoff binds the exact task ID, canonical payload hash, public projection hash,
+and private receipt self-hash. It is verified downstream with a pinned Ed25519
+public key; the preview alone remains unverified.
 SQL, raw rows, query IDs, raw-result hashes, and private receipts stay in Host
 state and machine-only sinks. The authoritative task receipt binds the compiled
 definition bundle hash and deduplicated root snapshot hashes; those fields are

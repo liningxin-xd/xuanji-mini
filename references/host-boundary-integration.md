@@ -49,8 +49,12 @@ required repair fields. Query IDs remain private even during repair.
 Each complete investigation is loaded from its validated run sink. The task
 assembler verifies exact rule-index coverage, computes `overall_status`, and
 writes the complete ordered result to the task sink. The model receives only a
-recursive redaction of that task result plus receipt hashes; it is not the
-artifact a pipeline writer should persist. Both sinks are idempotent. An
+recursive redaction of that task result plus receipt hashes. The Host also
+derives a signed `pipeline_handoff` from the reloaded and revalidated task sink;
+the redacted preview is acceptable to a pipeline writer only when paired with
+that handoff and verified against a pinned public key, immutable task ID, and
+payload hash. The private task artifact itself never crosses the model boundary.
+Both sinks are idempotent. An
 identical finalize retry is accepted, while a conflicting writer patch or sink
 payload is rejected.
 

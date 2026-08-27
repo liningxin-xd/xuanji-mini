@@ -48,6 +48,22 @@ levels:
 
 Only a trusted pipeline writer may read that directory. It must never be
 exposed as another model tool or returned by an artifact download endpoint.
+The model-facing fallback uses the signed public projection documented in
+[Signed Pipeline Handoff](pipeline-handoff.md); it does not expose this volume.
+
+The Host derives a separate Ed25519 signing key from the receipt secret through
+domain-separated HKDF. On a trusted operator host with the receipt environment
+already injected, derive the public trust anchor without printing the secret:
+
+```bash
+python scripts/derive_pipeline_public_key.py
+```
+
+Pin the returned key ID and public key in the daily-push workspace as
+`XUANJI_PIPELINE_SIGNING_KEY_ID` and
+`XUANJI_PIPELINE_SIGNING_PUBLIC_KEY_B64`. The public key is not a secret, but
+changing it changes the accepted Host authority and must be reviewed. Do not
+run this derivation by putting the receipt secret on a command line.
 
 The committed Kubernetes source is `deploy/primary-v1/manifests.yaml`. It is a
 fail-closed template: the placeholder image cannot pass the production gate.

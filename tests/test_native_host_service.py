@@ -358,6 +358,18 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual("task_complete", completed["action"])
+            self.assertEqual(
+                "xuanji-mini", completed["pipeline_handoff"]["provider"]
+            )
+            self.assertEqual(
+                "native-download", completed["pipeline_handoff"]["task_id"]
+            )
+            resumed = await runtime.run_task(
+                task_id="native-download", dqc_payload=payload
+            )
+            self.assertEqual(
+                completed["pipeline_handoff"], resumed["pipeline_handoff"]
+            )
             encoded = json.dumps([result, completed], ensure_ascii=False)
             for marker in (
                 "private-native",

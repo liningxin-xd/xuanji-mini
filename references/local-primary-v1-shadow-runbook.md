@@ -148,8 +148,9 @@ different finalize patch is rejected and does not change the task sink.
 
 Run `scripts/primary_v1_shadow_acceptance.py` for each supported scenario. Keep
 the full model-visible transcript, but report only bounded counts and the
-downstream idempotency identity. Never substitute `analysis_preview` for the
-authoritative result at:
+downstream idempotency identity. Verify that task completion also returns a
+stable `pipeline_handoff` with no private evidence. Never substitute a bare
+`analysis_preview` for the authoritative result at:
 
 ```text
 <data-root>/results/tasks/<task-id>/validated-task-result.json
