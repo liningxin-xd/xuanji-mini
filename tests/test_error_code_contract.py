@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from runtime.contracts import ContractError, RepositoryContracts
+from runtime.query_builder import QueryBuilder
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,21 +16,24 @@ class ErrorCodeContractTest(unittest.TestCase):
     def setUp(self):
         self.contracts = RepositoryContracts(ROOT)
 
-    def test_1_8a_registers_only_download_app_failure_rate(self):
+    def test_1_8b_enables_only_download_app_failure_rate(self):
         capability = self.contracts.error_code_capability("download", "app")
         self.assertEqual("registered_candidate", capability["source_status"])
         self.assertEqual(["下载失败率"], capability["supported_metrics"])
-        self.assertEqual("allowed_after_trigger", capability["error_code_query"])
+        self.assertEqual("enabled_after_trigger", capability["error_code_query"])
         self.assertEqual(
             "disabled_until_semantics_confirmed",
             capability["recovery_query"],
         )
-        self.assertIsNone(capability["query_asset"])
+        self.assertEqual(
+            "references/queries/download-error-code-calibration.yaml",
+            capability["query_asset"],
+        )
 
         trigger = self.contracts.error_code_trigger(
             "download", "app", "下载失败率"
         )
-        self.assertEqual("registered_not_enabled", trigger["status"])
+        self.assertEqual("enabled", trigger["status"])
         self.assertEqual(
             "frozen_root_metric",
             trigger["requirements"]["evidence_source"],
@@ -57,30 +61,63 @@ class ErrorCodeContractTest(unittest.TestCase):
         }
         self.assertEqual(expected, actual)
 
-        registered = {
+        enabled = {
             key
             for key in actual
-            if self.contracts.error_code_trigger(*key)["status"]
-            == "registered_not_enabled"
+            if self.contracts.error_code_trigger(*key)["status"] == "enabled"
         }
-        self.assertEqual({("download", "app", "下载失败率")}, registered)
+        self.assertEqual({("download", "app", "下载失败率")}, enabled)
 
-    def test_runtime_and_recovery_remain_disabled(self):
+    def test_runtime_is_bounded_and_recovery_remains_disabled(self):
         raw = yaml.safe_load(
             (ROOT / "contracts/error-code-capabilities.yaml").read_text(
                 encoding="utf-8"
             )
         )
-        self.assertFalse(raw["runtime_enabled"])
-        self.assertNotIn(
+        self.assertTrue(raw["runtime_enabled"])
+        self.assertIn(
             "error_code",
             self.contracts.analysis_profile("primary_v2")[
                 "enabled_post_primary_steps"
             ],
         )
-        for scope in raw["capabilities"].values():
-            self.assertIsNone(scope["query_asset"])
+        for capability_id, scope in raw["capabilities"].items():
+            if capability_id == "download_app":
+                self.assertEqual(
+                    "references/queries/download-error-code-calibration.yaml",
+                    scope["query_asset"],
+                )
+            else:
+                self.assertIsNone(scope["query_asset"])
             self.assertNotEqual("allowed", scope["recovery_query"])
+
+    def test_query_asset_is_bounded_and_has_no_recovery_inference(self):
+        binding = self.contracts.error_code_binding(
+            focus_game_id=12345,
+            overall_current_business_denominator=1000,
+            overall_baseline_business_denominator=7000,
+            focus_current_business_denominator=200,
+            focus_baseline_business_denominator=1400,
+        )
+        built = QueryBuilder(self.contracts).build(
+            binding,
+            {
+                "business_date": "2026-08-22",
+                "focus_game_id": 12345,
+                "overall_current_business_denominator": 1000,
+                "overall_baseline_business_denominator": 7000,
+                "focus_current_business_denominator": 200,
+                "focus_baseline_business_denominator": 1400,
+            },
+        )
+        columns, quality = self.contracts.query_spec_result_contract(binding)
+        self.assertEqual(206, quality["max_rows"])
+        self.assertEqual(250, quality["row_limit_exclusive"])
+        self.assertIn("current_affected_entities", columns)
+        self.assertNotIn("LIMIT", built.sql.upper())
+        self.assertNotIn("recovery", built.sql.lower())
+        self.assertNotIn("final_failure", built.sql.lower())
+        self.assertNotIn("action_args, '$.info'", built.sql)
 
     def test_source_contract_preserves_entity_and_redaction_boundaries(self):
         source = self.contracts.error_code_capability("download", "app")[
@@ -100,8 +137,8 @@ class ErrorCodeContractTest(unittest.TestCase):
         mutations = (
             (
                 "error-code-capabilities.yaml",
-                lambda value: value.__setitem__("runtime_enabled", True),
-                "runtime must remain disabled",
+                lambda value: value.__setitem__("runtime_enabled", False),
+                "runtime must be enabled",
             ),
             (
                 "error-code-capabilities.yaml",

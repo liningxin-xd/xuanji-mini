@@ -207,7 +207,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode("utf-8")), 12 * 1024)
         for forbidden in ("rendered_sql", "raw_result", "query_id", "receipt"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(3, len(pack["post_primary_steps"]))
+        self.assertEqual(4, len(pack["post_primary_steps"]))
 
     def test_non_dominant_head_game_still_selects_secondary_parent(self):
         runner, query_count = self._complete(
@@ -477,10 +477,11 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         runner, query_count = self._complete(
             "secondary-lower-is-better", metric="下载失败率"
         )
-        self.assertEqual(9, query_count)
+        self.assertEqual(10, query_count)
         state = runner.load_state("secondary-lower-is-better")
         self.assertTrue(state["post_primary"]["steps"][0]["result"]["dominant"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])
+        self.assertEqual("succeeded", state["post_primary"]["steps"][3]["status"])
 
     def test_final_validator_rejects_forged_parent_and_child_candidate(self):
         runner, _ = self._complete("secondary-final")

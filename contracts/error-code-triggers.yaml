@@ -18,7 +18,7 @@ routes:
     game_type: app
     metric: 下载失败率
     capability: download_app
-    status: registered_not_enabled
+    status: enabled
     trigger_id: download_app_failed_entity_rate
     requirements:
       legal_primary_candidate: true

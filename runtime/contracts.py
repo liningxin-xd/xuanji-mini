@@ -66,6 +66,7 @@ EXPECTED_LOCKED_ASSETS = {
     "references/queries/install-post-start-version-template.md",
     "references/queries/secondary-attribution-template.md",
     "references/queries/game-operation-events.yaml",
+    "references/queries/download-error-code-calibration.yaml",
     "references/queries/primary-attribution-dimensions.md",
 }
 
@@ -201,8 +202,8 @@ class RepositoryContracts:
         )
         self._plans = self._validate_plans()
         self._validate_analysis_profiles()
-        self._validate_error_code_contracts()
         self._asset_hashes = self._load_asset_hashes()
+        self._validate_error_code_contracts()
         self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
         self._validate_secondary_relations()
@@ -335,6 +336,83 @@ class RepositoryContracts:
         raise ContractError(
             f"error-code trigger is not registered: "
             f"{chain}/{game_type}/{metric}"
+        )
+
+    def error_code_binding(
+        self,
+        *,
+        focus_game_id: int,
+        overall_current_business_denominator: int,
+        overall_baseline_business_denominator: int,
+        focus_current_business_denominator: int,
+        focus_baseline_business_denominator: int,
+    ) -> QueryBinding:
+        numeric = {
+            "focus_game_id": focus_game_id,
+            "overall_current_business_denominator": (
+                overall_current_business_denominator
+            ),
+            "overall_baseline_business_denominator": (
+                overall_baseline_business_denominator
+            ),
+            "focus_current_business_denominator": (
+                focus_current_business_denominator
+            ),
+            "focus_baseline_business_denominator": (
+                focus_baseline_business_denominator
+            ),
+        }
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in numeric.values()
+        ):
+            raise ContractError("error-code query counts must be integers")
+        if (
+            focus_game_id < 0
+            or overall_current_business_denominator <= 0
+            or overall_baseline_business_denominator <= 0
+        ):
+            raise ContractError("error-code query scope counts are invalid")
+        focus_denominators = (
+            focus_current_business_denominator,
+            focus_baseline_business_denominator,
+        )
+        if (focus_game_id == 0 and focus_denominators != (0, 0)) or (
+            focus_game_id > 0 and any(value <= 0 for value in focus_denominators)
+        ):
+            raise ContractError("error-code focus scope counts are inconsistent")
+
+        capability = self.error_code_capability("download", "app")
+        if (
+            self._error_code_capabilities.get("runtime_enabled") is not True
+            or capability.get("error_code_query") != "enabled_after_trigger"
+        ):
+            raise ContractError("error-code runtime capability is not enabled")
+        source = capability["source"]
+        config = {
+            "data_sources": [source["table"]],
+            "protected_tokens": [
+                "behavior_type",
+                "action",
+                "action_args",
+                "device_id",
+                "game_id",
+                "collapsed_source_bucket_count",
+                "source_bucket_count",
+                "unmatched_code",
+                "__other_below_threshold__",
+            ],
+            "required_predicates": [],
+        }
+        return self._binding(
+            capability["query_asset"],
+            "query_spec",
+            config,
+            result_schema_id="error_code_calibration",
+            dimension_config={
+                "post_primary": "error_code",
+                "query_parameters": numeric,
+            },
         )
 
     def result_schema(self, schema_id: str) -> dict[str, Any]:
@@ -721,10 +799,15 @@ class RepositoryContracts:
             primary_v2.get("primary_plan") != "fixed_queue_v1"
             or primary_v2.get("post_primary_plan") != "post_primary_v1"
             or primary_v2.get("enabled_post_primary_steps")
-            != ["counterfactual", "secondary", "game_background"]
+            != [
+                "counterfactual",
+                "secondary",
+                "game_background",
+                "error_code",
+            ]
         ):
             raise ContractError(
-                "primary_v2 must enable counterfactual, secondary, and game background"
+                "primary_v2 must enable all registered post-primary steps"
             )
 
     def _validate_error_code_contracts(self) -> None:
@@ -738,8 +821,8 @@ class RepositoryContracts:
             raise ContractError("error-code capability contract is invalid")
         if capabilities.get("module") != "error_code":
             raise ContractError("error-code capability module is invalid")
-        if capabilities.get("runtime_enabled") is not False:
-            raise ContractError("error-code runtime must remain disabled in 1.8-A")
+        if capabilities.get("runtime_enabled") is not True:
+            raise ContractError("error-code runtime must be enabled in 1.8-B")
 
         scopes = capabilities.get("capabilities")
         if not isinstance(scopes, dict):
@@ -749,9 +832,11 @@ class RepositoryContracts:
                 "chain": "download",
                 "game_type": "app",
                 "source_status": "registered_candidate",
-                "error_code_query": "allowed_after_trigger",
+                "error_code_query": "enabled_after_trigger",
                 "recovery_query": "disabled_until_semantics_confirmed",
-                "query_asset": None,
+                "query_asset": (
+                    "references/queries/download-error-code-calibration.yaml"
+                ),
                 "supported_metrics": ["下载失败率"],
                 "source": {
                     "table": "tap_dw.dwd_str_game_core_behavior_di",
@@ -817,6 +902,11 @@ class RepositoryContracts:
         dictionary_path = scopes["download_app"]["source"]["dictionary"]["path"]
         if not _safe_path(self.root, dictionary_path).is_file():
             raise ContractError("error-code dictionary does not exist")
+        query_asset = scopes["download_app"]["query_asset"]
+        if query_asset not in self._asset_hashes or not _safe_path(
+            self.root, query_asset
+        ).is_file():
+            raise ContractError("error-code query asset is not locked")
 
         triggers = self._error_code_triggers
         if set(triggers) != {"version", "module", "evidence_policy", "routes"}:
@@ -859,7 +949,7 @@ class RepositoryContracts:
             "game_type": "app",
             "metric": "下载失败率",
             "capability": "download_app",
-            "status": "registered_not_enabled",
+            "status": "enabled",
             "trigger_id": "download_app_failed_entity_rate",
             "requirements": {
                 "legal_primary_candidate": True,

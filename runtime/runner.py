@@ -20,6 +20,10 @@ from .contracts import (
     sha256_text,
 )
 from .calibration_runner import CalibrationError, CalibrationRunner
+from .error_code_result_validator import (
+    ErrorCodeResultValidator,
+    ErrorCodeValidationError,
+)
 from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .final_assembler import FinalAssembler, FinalAssemblyError
 from .final_validator import FinalEvidenceValidator, FinalValidationError
@@ -58,6 +62,7 @@ class AttributionRunner:
         self.secondary_query_builder = SecondaryQueryBuilder(self.contracts)
         self.secondary_result_validator = SecondaryResultValidator(self.contracts)
         self.game_background_validator = GameBackgroundValidator(self.contracts)
+        self.error_code_result_validator = ErrorCodeResultValidator(self.contracts)
         configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
         self.analysis_profile = (
             analysis_profile
@@ -144,6 +149,16 @@ class AttributionRunner:
                 "result_schemas_sha256": self.contracts.result_schemas_sha256,
                 "secondary_relations_sha256": (
                     self.contracts.secondary_relations_sha256
+                    if self.analysis_profile == "primary_v2"
+                    else None
+                ),
+                "error_code_capabilities_sha256": (
+                    self.contracts.error_code_capabilities_sha256
+                    if self.analysis_profile == "primary_v2"
+                    else None
+                ),
+                "error_code_triggers_sha256": (
+                    self.contracts.error_code_triggers_sha256
                     if self.analysis_profile == "primary_v2"
                     else None
                 ),
@@ -236,6 +251,16 @@ class AttributionRunner:
             "result_schemas_sha256": self.contracts.result_schemas_sha256,
             "secondary_relations_sha256": (
                 self.contracts.secondary_relations_sha256
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
+            "error_code_capabilities_sha256": (
+                self.contracts.error_code_capabilities_sha256
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
+            "error_code_triggers_sha256": (
+                self.contracts.error_code_triggers_sha256
                 if self.analysis_profile == "primary_v2"
                 else None
             ),
@@ -432,6 +457,13 @@ class AttributionRunner:
                         analysis_date=state["analysis_date"],
                         game_id=int(step["game_id"]),
                     )
+                elif is_post_primary and post_primary_step["id"] == "error_code":
+                    outcome = self.error_code_result_validator.validate(
+                        raw_result=raw_result,
+                        binding=binding,
+                        analysis_date=state["analysis_date"],
+                        frozen_scopes=step["frozen_scopes"],
+                    )
                 else:
                     outcome = self.result_validator.validate(
                         raw_result=raw_result,
@@ -443,7 +475,11 @@ class AttributionRunner:
                         produces_candidates=step["produces_candidates"],
                     )
                     self._validate_canonical_root_metric(state, step, outcome)
-            except (ResultValidationError, GameBackgroundValidationError) as exc:
+            except (
+                ResultValidationError,
+                GameBackgroundValidationError,
+                ErrorCodeValidationError,
+            ) as exc:
                 attempt["status"] = "failed"
                 attempt["validation"] = {
                     "status": "failed",
@@ -455,9 +491,10 @@ class AttributionRunner:
                 step["reason"] = f"{exc.code}: {exc}"
             else:
                 attempt["status"] = "succeeded"
-                if is_post_primary and post_primary_step["id"] == (
-                    "game_background"
-                ):
+                if is_post_primary and post_primary_step["id"] in {
+                    "game_background",
+                    "error_code",
+                }:
                     attempt["validation"] = {
                         "status": "succeeded",
                         "fact_count": len(outcome.facts),
@@ -809,6 +846,15 @@ class AttributionRunner:
                     "game_id": int(query_item["game_id"]),
                 },
             )
+        elif post_step["id"] == "error_code":
+            binding = self._error_code_binding(query_item)
+            built = self.query_builder.build(
+                binding,
+                {
+                    "business_date": state["analysis_date"],
+                    **binding.dimension_config["query_parameters"],
+                },
+            )
         else:  # pragma: no cover - guarded by the plan contract
             raise RunnerError(
                 f"unsupported post-primary query step: {post_step['id']}"
@@ -874,6 +920,12 @@ class AttributionRunner:
             if not isinstance(step, dict):
                 continue
             if step.get("id") == "secondary" and step.get("status") in {
+                "planned",
+                "in_progress",
+                "repair_required",
+            }:
+                return step, step
+            if step.get("id") == "error_code" and step.get("status") in {
                 "planned",
                 "in_progress",
                 "repair_required",
@@ -962,6 +1014,40 @@ class AttributionRunner:
             "baseline_numerator": game_step["root_baseline_numerator"],
             "baseline_denominator": game_step["root_baseline_denominator"],
         }
+
+    def _error_code_binding(self, step: dict[str, Any]) -> QueryBinding:
+        try:
+            scopes = self.error_code_result_validator._expected_scopes(
+                step.get("frozen_scopes")
+            )
+        except ErrorCodeValidationError as exc:
+            raise RunnerError(str(exc)) from exc
+        overall = scopes[("overall", 0)]
+        focus_entry = next(
+            (
+                (key, value)
+                for key, value in scopes.items()
+                if key[0] == "focus_game"
+            ),
+            None,
+        )
+        focus_game_id = focus_entry[0][1] if focus_entry is not None else 0
+        focus = focus_entry[1] if focus_entry is not None else None
+        return self.contracts.error_code_binding(
+            focus_game_id=focus_game_id,
+            overall_current_business_denominator=overall[
+                "current_business_denominator"
+            ],
+            overall_baseline_business_denominator=overall[
+                "baseline_business_denominator"
+            ],
+            focus_current_business_denominator=(
+                focus["current_business_denominator"] if focus is not None else 0
+            ),
+            focus_baseline_business_denominator=(
+                focus["baseline_business_denominator"] if focus is not None else 0
+            ),
+        )
 
     def load_state(self, run_id: str) -> dict[str, Any]:
         return self._load_state(run_id)
@@ -1180,6 +1266,10 @@ class AttributionRunner:
                     post_step.get("attempts"), list
                 ):
                     post_query_items.append(post_step)
+                elif post_step.get("id") == "error_code" and isinstance(
+                    post_step.get("attempts"), list
+                ):
+                    post_query_items.append(post_step)
                 elif post_step.get("id") == "game_background" and isinstance(
                     post_step.get("items"), list
                 ):
@@ -1260,6 +1350,16 @@ class AttributionRunner:
             "result_schemas_sha256": self.contracts.result_schemas_sha256,
             "secondary_relations_sha256": (
                 self.contracts.secondary_relations_sha256
+                if analysis_profile == "primary_v2"
+                else None
+            ),
+            "error_code_capabilities_sha256": (
+                self.contracts.error_code_capabilities_sha256
+                if analysis_profile == "primary_v2"
+                else None
+            ),
+            "error_code_triggers_sha256": (
+                self.contracts.error_code_triggers_sha256
                 if analysis_profile == "primary_v2"
                 else None
             ),
@@ -1560,6 +1660,9 @@ class AttributionRunner:
                 state, post_primary, known_query_ids
             )
             self._validate_game_background_runtime_state(
+                state, post_primary, known_query_ids
+            )
+            self._validate_error_code_runtime_state(
                 state, post_primary, known_query_ids
             )
 
@@ -2335,6 +2438,345 @@ class AttributionRunner:
                 "game background query failure classification changed"
             )
 
+    def _validate_error_code_runtime_state(
+        self,
+        state: dict[str, Any],
+        post_primary: dict[str, Any],
+        known_query_ids: set[str],
+    ) -> None:
+        error_code = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "error_code"
+            ),
+            None,
+        )
+        background = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "game_background"
+            ),
+            None,
+        )
+        if not isinstance(error_code, dict) or not isinstance(background, dict):
+            raise RunnerError("post-primary state lacks error-code prerequisites")
+        if background.get("status") in {
+            "planned",
+            "in_progress",
+            "repair_required",
+        }:
+            if error_code != {"id": "error_code", "status": "planned"}:
+                raise RunnerError(
+                    "error-code step cannot advance before game background is terminal"
+                )
+            return
+
+        try:
+            expected_selection = self.calibration_runner.error_code_selector.select(
+                state, post_primary
+            )
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
+        if expected_selection["status"] == "skipped_by_policy":
+            if error_code != {"id": "error_code", **expected_selection}:
+                raise RunnerError("error-code skip no longer matches frozen evidence")
+            return
+
+        selection_fields = (
+            "trigger_id",
+            "root_adverse_delta_bp",
+            "current_affected_entity_count",
+            "focus_game",
+            "frozen_scopes",
+        )
+        if any(
+            error_code.get(field) != expected_selection[field]
+            for field in selection_fields
+        ):
+            raise RunnerError("error-code selection no longer matches frozen evidence")
+        if error_code.get("status") == "planned":
+            if error_code != {"id": "error_code", **expected_selection}:
+                raise RunnerError("planned error-code step contains runtime evidence")
+            return
+
+        expected_binding = self._error_code_binding(error_code)
+        expected_snapshot = self._binding_snapshot(expected_binding)
+        if error_code.get("binding") != expected_snapshot or error_code.get(
+            "binding_sha256"
+        ) != canonical_sha256(expected_snapshot):
+            raise RunnerError("error-code binding no longer matches frozen scopes")
+        attempts = error_code.get("attempts")
+        if not isinstance(attempts, list) or not attempts or len(attempts) > 3:
+            raise RunnerError(
+                "error-code step must contain one query with at most two repairs"
+            )
+
+        parameters = self._query_parameters(state, error_code)
+        run_dir = self._run_dir(state["run_id"]).resolve()
+        sql_by_attempt: list[str] = []
+        for index, attempt in enumerate(attempts):
+            if not isinstance(attempt, dict) or attempt.get("attempt_no") != index:
+                raise RunnerError("error-code attempt sequence changed")
+            attempt_status = attempt.get("status")
+            if attempt_status not in {"issued", "succeeded", "failed", "error"}:
+                raise RunnerError("error-code attempt status is invalid")
+            sql_path_value = attempt.get("sql_path")
+            digest = attempt.get("sql_sha256")
+            if (
+                not isinstance(sql_path_value, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise RunnerError("error-code attempt SQL identity is invalid")
+            sql_path = (run_dir / sql_path_value).resolve()
+            try:
+                sql_path.relative_to(run_dir)
+                sql = sql_path.read_text(encoding="utf-8")
+            except (ValueError, OSError) as exc:
+                raise RunnerError("error-code attempt SQL is unavailable") from exc
+            if sha256_text(sql) != digest:
+                raise RunnerError("error-code attempt SQL hash changed")
+            self.query_builder.validate_sql(sql, expected_binding, parameters)
+            if index > 0:
+                repair = attempt.get("repair")
+                if not isinstance(repair, dict) or set(repair) != {
+                    "source_attempt_no",
+                    "repair_reason",
+                    "error_evidence",
+                    "diff_path",
+                    "event_path",
+                } or repair.get("source_attempt_no") != index - 1:
+                    raise RunnerError("error-code repair lineage changed")
+                if any(
+                    not isinstance(repair.get(field), str)
+                    or not repair[field].strip()
+                    for field in (
+                        "repair_reason",
+                        "error_evidence",
+                        "diff_path",
+                        "event_path",
+                    )
+                ):
+                    raise RunnerError("error-code repair evidence is invalid")
+                expected_diff = self.query_builder.validate_repair(
+                    sql_by_attempt[0],
+                    sql_by_attempt[index - 1],
+                    sql,
+                    expected_binding,
+                    parameters,
+                )
+                repair_event_path = (run_dir / repair["event_path"]).resolve()
+                repair_diff_path = (run_dir / repair["diff_path"]).resolve()
+                try:
+                    repair_event_path.relative_to(run_dir)
+                    repair_diff_path.relative_to(run_dir)
+                    repair_event = json.loads(
+                        repair_event_path.read_text(encoding="utf-8")
+                    )
+                    repair_diff = repair_diff_path.read_text(encoding="utf-8")
+                except (ValueError, OSError, json.JSONDecodeError) as exc:
+                    raise RunnerError(
+                        "error-code repair evidence is unavailable"
+                    ) from exc
+                repair_event_hash = canonical_sha256(repair_event)
+                if (
+                    repair_event_path.name != f"{repair_event_hash}.json"
+                    or state["processed_events"].get(repair_event_hash)
+                    != {
+                        "event": "repair_submitted",
+                        "step_id": "error_code",
+                        "event_path": repair["event_path"],
+                    }
+                    or repair_event
+                    != {
+                        "event": "repair_submitted",
+                        "step_id": "error_code",
+                        "repair_attempt": index,
+                        "repair_reason": repair["repair_reason"],
+                        "error_evidence": repair["error_evidence"],
+                        "repaired_sql": sql,
+                    }
+                    or repair_diff != expected_diff
+                ):
+                    raise RunnerError("error-code repair evidence changed")
+            elif attempt.get("repair") is not None:
+                raise RunnerError("initial error-code attempt cannot be a repair")
+            sql_by_attempt.append(sql)
+
+            query_id = attempt.get("query_id")
+            if query_id is not None:
+                if not isinstance(query_id, str) or not query_id.strip():
+                    raise RunnerError("error-code query_id is invalid")
+                if query_id in known_query_ids:
+                    raise RunnerError("query_id is reused by error-code calibration")
+                known_query_ids.add(query_id)
+            event_path_value = attempt.get("event_path")
+            if query_id is None:
+                if (
+                    attempt_status != "issued"
+                    or event_path_value is not None
+                    or attempt.get("raw_result_sha256") is not None
+                    or attempt.get("error") is not None
+                ):
+                    raise RunnerError("unexecuted error-code attempt has an event")
+                continue
+            if not isinstance(event_path_value, str):
+                raise RunnerError("executed error-code attempt lacks its event")
+            event_path = (run_dir / event_path_value).resolve()
+            try:
+                event_path.relative_to(run_dir)
+                event = json.loads(event_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                raise RunnerError("error-code receipt event is unavailable") from exc
+            event_hash = canonical_sha256(event)
+            if event_path.name != f"{event_hash}.json" or state[
+                "processed_events"
+            ].get(event_hash) != {
+                "event": event.get("event"),
+                "step_id": "error_code",
+                "event_path": event_path_value,
+            }:
+                raise RunnerError("error-code receipt event identity changed")
+            if (
+                event.get("query_id") != query_id
+                or event.get("attempt_no") != index
+                or event.get("step_id") != "error_code"
+                or event.get("submitted_sql_sha256") != digest
+            ):
+                raise RunnerError("error-code receipt does not match its attempt")
+            if event.get("event") == "query_returned":
+                raw_result = event.get("raw_result")
+                raw_hash = event.get("raw_result_sha256")
+                if (
+                    not isinstance(raw_result, dict)
+                    or not isinstance(raw_hash, str)
+                    or canonical_sha256(raw_result) != raw_hash
+                    or attempt.get("raw_result_sha256") != raw_hash
+                ):
+                    raise RunnerError("error-code raw result evidence changed")
+                if (
+                    attempt_status not in {"succeeded", "failed"}
+                    or attempt.get("error") is not None
+                    or not isinstance(attempt.get("validation"), dict)
+                ):
+                    raise RunnerError("error-code returned attempt state changed")
+            elif event.get("event") == "query_error":
+                event_error = {
+                    "class": event.get("error_class"),
+                    "code": event.get("error_code"),
+                    "message": event.get("error_message"),
+                }
+                if attempt.get("error") != event_error:
+                    raise RunnerError("error-code query error evidence changed")
+                if (
+                    attempt_status != "error"
+                    or attempt.get("raw_result_sha256") is not None
+                ):
+                    raise RunnerError("error-code failed attempt state changed")
+            else:
+                raise RunnerError("error-code receipt event type is invalid")
+
+        status = error_code.get("status")
+        latest = attempts[-1]
+        if status == "in_progress":
+            if latest.get("status") != "issued" or latest.get("query_id") is not None:
+                raise RunnerError("in_progress error-code step is not awaiting a query")
+            return
+        if status == "repair_required":
+            raw_error = latest.get("error") or {}
+            if (
+                latest.get("status") != "error"
+                or raw_error.get("class") != "semantic_analysis"
+                or latest["attempt_no"] >= 2
+            ):
+                raise RunnerError("error-code repair state is invalid")
+            return
+        if status not in {"succeeded", "failed"}:
+            raise RunnerError(f"error-code runtime status is invalid: {status}")
+
+        if latest.get("status") in {"succeeded", "failed"}:
+            event = json.loads(
+                (run_dir / latest["event_path"]).read_text(encoding="utf-8")
+            )
+            try:
+                outcome = self.error_code_result_validator.validate(
+                    raw_result=event["raw_result"],
+                    binding=expected_binding,
+                    analysis_date=state["analysis_date"],
+                    frozen_scopes=error_code["frozen_scopes"],
+                )
+            except ErrorCodeValidationError as exc:
+                expected_reason = f"{exc.code}: {exc}"
+                if (
+                    status != "failed"
+                    or error_code.get("facts") != []
+                    or error_code.get("limit_codes") != []
+                    or error_code.get("failure_code") != exc.code
+                    or error_code.get("reason") != expected_reason
+                    or latest.get("validation")
+                    != {
+                        "status": "failed",
+                        "failure_code": exc.code,
+                        "reason": str(exc),
+                    }
+                ):
+                    raise RunnerError(
+                        "error-code validation failure changed"
+                    ) from exc
+                return
+            expected_validation = {
+                "status": "succeeded",
+                "fact_count": len(outcome.facts),
+                "limit_codes": list(outcome.limit_codes),
+            }
+            if (
+                status != "succeeded"
+                or latest.get("status") != "succeeded"
+                or latest.get("validation") != expected_validation
+                or error_code.get("facts") != list(outcome.facts)
+                or error_code.get("limit_codes") != list(outcome.limit_codes)
+                or error_code.get("failure_code") is not None
+                or error_code.get("reason") is not None
+            ):
+                raise RunnerError(
+                    "error-code result no longer matches its raw evidence"
+                )
+            return
+
+        if latest.get("status") != "error" or status != "failed":
+            raise RunnerError("error-code query error state is invalid")
+        raw_error = latest.get("error")
+        repair_suffix = (
+            " after two evidence-based repairs"
+            if isinstance(raw_error, dict)
+            and raw_error.get("class") == "semantic_analysis"
+            and latest["attempt_no"] == 2
+            else ""
+        )
+        expected_reason = (
+            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
+            f"{raw_error['message']}"
+            if isinstance(raw_error, dict)
+            and all(key in raw_error for key in ("class", "code", "message"))
+            else None
+        )
+        if (
+            not isinstance(raw_error, dict)
+            or error_code.get("facts") != []
+            or error_code.get("limit_codes") != []
+            or error_code.get("failure_code") != self._query_failure_code(raw_error)
+            or error_code.get("reason") != expected_reason
+            or latest.get("validation")
+            != {
+                "status": "failed",
+                "failure_code": self._query_failure_code(raw_error),
+                "reason": expected_reason,
+            }
+        ):
+            raise RunnerError("error-code query failure classification changed")
+
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)
         state["integrity_sha256"] = canonical_sha256(state)
@@ -2575,6 +3017,16 @@ class AttributionRunner:
                 "business_date": state["analysis_date"],
                 "game_id": game_id,
             }
+        if config.get("post_primary") == "error_code":
+            expected_binding = self._error_code_binding(step)
+            if self._binding_snapshot(binding) != self._binding_snapshot(
+                expected_binding
+            ):
+                raise RunnerError("error-code binding changed its frozen scopes")
+            frozen = config.get("query_parameters")
+            if not isinstance(frozen, dict):
+                raise RunnerError("error-code binding lacks frozen parameters")
+            return {"business_date": state["analysis_date"], **frozen}
         parameters = {
             "business_date": state["analysis_date"],
             "game_type": state["game_type"],

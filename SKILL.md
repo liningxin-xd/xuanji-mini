@@ -9,7 +9,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## 分析档案
 
-部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得把它变成模型工具参数。`primary_v1` 保持固定一级队列；`primary_v2` 在同一完整一级队列后执行已登记的确定性后置模块。当前 `primary_v2` 启用零查询剔除反事实、一次 `game_id` 单父二级归因和最多三款游戏的串行背景校准；1.8-A 只登记错误码能力与触发 Contract，运行时、QuerySpec 和恢复能力仍关闭，因此错误码继续由策略跳过。
+部署方通过 Host 私有的 `XUANJI_ANALYSIS_PROFILE` 选择档案，不得成为模型参数。`primary_v1` 保持固定一级队列；`primary_v2` 随后执行零查询剔除反事实、一次 `game_id` 单父二级归因、最多三款游戏背景查询和一次下载错误码校准。错误码只允许 `download / app / 下载失败率` 在已有一级候选、根不利变化至少 5bp 且当前受影响实体至少 100 时触发；其他指标、安装和沙盒按策略跳过，且不推导最终失败或恢复。
 
 ## 工具协议
 
@@ -58,4 +58,4 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 - Host ToolError 表示运行异常；保留相同 task 供重试，不伪造 `query_failed` 调查。
 - 不输出或索取 SQL、raw rows、query ID、完整 receipt、私有 result hash、state 路径、token 或 secret；不得拆改或伪造 `pipeline_handoff` 中的公开校验字段。
 - 不把相关性、贡献或算术剔除写成已确认机制根因。
-- `primary_v1` 不执行后置模块；当前 `primary_v2` 不执行错误码扩展、三级归因、多父节点、严格漏斗、四象限、准实验、负对照、查询并行或通用缓存。
+- `primary_v1` 不执行后置模块；当前 `primary_v2` 不执行安装或沙盒错误码、下载恢复、三级归因、多父节点、严格漏斗、四象限、准实验、负对照、查询并行或通用缓存。

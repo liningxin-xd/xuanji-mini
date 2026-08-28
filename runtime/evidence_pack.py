@@ -224,6 +224,19 @@ class EvidencePackBuilder:
                             raise EvidencePackError(
                                 "game background writer item is not terminal"
                             )
+                if step["id"] == "error_code" and step["status"] in {
+                    "succeeded",
+                    "failed",
+                }:
+                    if step["status"] == "succeeded":
+                        facts = step.get("facts")
+                        if not isinstance(facts, list) or len(facts) > 5:
+                            raise EvidencePackError(
+                                "error-code facts exceed the writer contract"
+                            )
+                        pack["error_code_calibration"] = facts
+                        for code in step.get("limit_codes", []):
+                            evidence_limits.append(f"error_code:{code}")
         root_metric = self.root_metric(state)
         if root_metric is not None:
             pack["root_metric"] = root_metric

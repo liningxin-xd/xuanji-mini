@@ -62,7 +62,7 @@ class RuntimeCliTest(unittest.TestCase):
     def test_verify_assets_cli(self):
         result = self._cli("verify-assets")
         self.assertEqual("ok", result["status"])
-        self.assertEqual(16, result["verified_count"])
+        self.assertEqual(17, result["verified_count"])
 
     def test_production_skill_excludes_the_development_runner_protocol(self):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")

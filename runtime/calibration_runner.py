@@ -5,6 +5,7 @@ from typing import Any
 
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
+from .error_code_selector import ErrorCodeSelectionError, ErrorCodeSelector
 from .game_background_selector import (
     GameBackgroundSelectionError,
     GameBackgroundSelector,
@@ -24,6 +25,7 @@ class CalibrationRunner:
         self.counterfactual = CounterfactualCalculator(contracts)
         self.secondary_selector = SecondarySelector(contracts)
         self.game_background_selector = GameBackgroundSelector(contracts)
+        self.error_code_selector = ErrorCodeSelector(contracts)
 
     def create_plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
         return self.planner.create(state)
@@ -75,6 +77,15 @@ class CalibrationRunner:
                 try:
                     outcome = self.game_background_selector.select(state, result)
                 except GameBackgroundSelectionError as exc:
+                    raise CalibrationError(str(exc)) from exc
+                step.update(outcome)
+                if step["status"] == "planned":
+                    break
+                continue
+            if step["id"] == "error_code":
+                try:
+                    outcome = self.error_code_selector.select(state, result)
+                except ErrorCodeSelectionError as exc:
                     raise CalibrationError(str(exc)) from exc
                 step.update(outcome)
                 if step["status"] == "planned":
@@ -222,5 +233,32 @@ class CalibrationRunner:
                     "game background aggregate status is inconsistent"
                 )
 
-        if post_primary["steps"][3] != planned["steps"][3]:
-            raise CalibrationError("disabled post-primary step changed")
+        try:
+            error_code_selection = self.error_code_selector.select(
+                state, post_primary
+            )
+        except ErrorCodeSelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        actual_error_code = post_primary["steps"][3]
+        if error_code_selection["status"] == "skipped_by_policy":
+            if actual_error_code != {
+                "id": "error_code",
+                **error_code_selection,
+            }:
+                raise CalibrationError(
+                    "error-code skip does not match frozen evidence"
+                )
+        else:
+            if actual_error_code.get("status") not in {"succeeded", "failed"}:
+                raise CalibrationError("completed error-code step is not terminal")
+            for field in (
+                "trigger_id",
+                "root_adverse_delta_bp",
+                "current_affected_entity_count",
+                "focus_game",
+                "frozen_scopes",
+            ):
+                if actual_error_code.get(field) != error_code_selection[field]:
+                    raise CalibrationError(
+                        f"error-code {field} does not match frozen evidence"
+                    )

@@ -62,6 +62,10 @@
       "sha256": "7edd25fa5a22455691ee6aad183d9b3853c8550efbce916328744ae662d1b408"
     },
     {
+      "path": "references/queries/download-error-code-calibration.yaml",
+      "sha256": "2168deb42a75b76dd588447fd8c4bf9ef9c6f171e5daab5eb0e873f59d3c0828"
+    },
+    {
       "path": "references/queries/primary-attribution-dimensions.md",
       "sha256": "4566fef7828fb248ea9946f3b6e27096eb6806edf84fdf92802e5a2f6ee8af48"
     }

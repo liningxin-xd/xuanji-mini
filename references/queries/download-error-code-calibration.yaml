@@ -1,0 +1,310 @@
+version: 2
+id: xuanji-download-error-code-calibration
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+data_lag_days: 1
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  focus_game_id: {type: integer}
+  overall_current_business_denominator: {type: integer}
+  overall_baseline_business_denominator: {type: integer}
+  focus_current_business_denominator: {type: integer}
+  focus_baseline_business_denominator: {type: integer}
+# One query covers the target date and seven-day baseline. Error-code rows are
+# selected by fixed sample and event-share gates before DView sees the result.
+# With two scopes and a 2% share floor, the static maximum is 206 rows:
+# 2 * (50 current + 50 baseline + 2 quality + 1 residual).
+sql: |
+  WITH normalized_events AS (
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      CASE
+        WHEN behavior_type <> 'game_download_failed'
+          OR action <> 'appDownloadNewFailed'
+          OR device_id IS NULL
+          OR game_id IS NULL
+          THEN '__source_contract_mismatch__'
+        WHEN GET_JSON_OBJECT(action_args, '$.code') IS NULL
+          OR TRIM(GET_JSON_OBJECT(action_args, '$.code')) = ''
+          OR NOT (
+            TRIM(GET_JSON_OBJECT(action_args, '$.code')) RLIKE '^[0-9]{4}$'
+          ) THEN 'unmatched_code'
+        ELSE TRIM(GET_JSON_OBJECT(action_args, '$.code'))
+      END AS error_code,
+      CASE
+        WHEN behavior_type <> 'game_download_failed'
+          OR action <> 'appDownloadNewFailed'
+          OR device_id IS NULL
+          OR game_id IS NULL
+          THEN '__source_contract_mismatch__'
+        ELSE COALESCE(
+          NULLIF(TRIM(GET_JSON_OBJECT(action_args, '$.code')), ''),
+          '__null_or_empty__'
+        )
+      END AS raw_code_identity
+    FROM tap_dw.dwd_str_game_core_behavior_di
+    WHERE dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+      AND platform = 'ANDROID'
+      AND game_type = 'app'
+      AND is_risk_device = 0
+      AND behavior_type = 'game_download_failed'
+      AND action = 'appDownloadNewFailed'
+  ), scoped_events AS (
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      error_code,
+      raw_code_identity,
+      'overall' AS scope,
+      0 AS focus_game_id
+    FROM normalized_events
+    UNION ALL
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      error_code,
+      raw_code_identity,
+      'focus_game' AS scope,
+      ${focus_game_id} AS focus_game_id
+    FROM normalized_events
+    WHERE ${focus_game_id} > 0
+      AND game_id = ${focus_game_id}
+  ), code_aggregates AS (
+    SELECT
+      scope,
+      focus_game_id,
+      error_code,
+      COUNT(DISTINCT raw_code_identity) AS collapsed_source_bucket_count,
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS current_error_events,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS baseline_error_events
+    FROM scoped_events
+    GROUP BY scope, focus_game_id, error_code
+  ), code_audit AS (
+    SELECT
+      code_aggregates.*,
+      SUM(collapsed_source_bucket_count) OVER (
+        PARTITION BY scope, focus_game_id
+      ) AS source_bucket_count,
+      SUM(current_error_events) OVER (
+        PARTITION BY scope, focus_game_id
+      ) AS overall_current_error_events,
+      SUM(baseline_error_events) OVER (
+        PARTITION BY scope, focus_game_id
+      ) AS overall_baseline_error_events
+    FROM code_aggregates
+  ), classified_codes AS (
+    SELECT
+      code_audit.*,
+      CASE
+        WHEN error_code = '__source_contract_mismatch__'
+          THEN 'source_contract_mismatch'
+        WHEN error_code = 'unmatched_code' THEN 'unmatched_code'
+        WHEN (
+          current_error_events >= 100
+          AND current_error_events * 1.0
+            / NULLIF(overall_current_error_events, 0) >= 0.02
+        ) OR (
+          baseline_error_events * 1.0 / 7 >= 100
+          AND baseline_error_events * 1.0
+            / NULLIF(overall_baseline_error_events, 0) >= 0.02
+        ) THEN 'error_code'
+        ELSE 'residual'
+      END AS bucket_kind,
+      CASE
+        WHEN error_code IN (
+          '__source_contract_mismatch__', 'unmatched_code'
+        ) THEN error_code
+        WHEN (
+          current_error_events >= 100
+          AND current_error_events * 1.0
+            / NULLIF(overall_current_error_events, 0) >= 0.02
+        ) OR (
+          baseline_error_events * 1.0 / 7 >= 100
+          AND baseline_error_events * 1.0
+            / NULLIF(overall_baseline_error_events, 0) >= 0.02
+        ) THEN error_code
+        ELSE '__other_below_threshold__'
+      END AS output_error_code
+    FROM code_audit
+  ), bucket_audit AS (
+    SELECT
+      scope,
+      focus_game_id,
+      bucket_kind,
+      output_error_code AS error_code,
+      SUM(collapsed_source_bucket_count) AS collapsed_source_bucket_count,
+      MAX(source_bucket_count) AS source_bucket_count,
+      MAX(overall_current_error_events) AS overall_current_error_events,
+      MAX(overall_baseline_error_events) AS overall_baseline_error_events
+    FROM classified_codes
+    GROUP BY scope, focus_game_id, bucket_kind, output_error_code
+  ), bucket_metrics AS (
+    SELECT
+      events.scope,
+      events.focus_game_id,
+      codes.bucket_kind,
+      codes.output_error_code AS error_code,
+      SUM(CASE WHEN events.dt = ${business_date} THEN 1 ELSE 0 END)
+        AS current_error_events,
+      SUM(CASE WHEN events.dt < ${business_date} THEN 1 ELSE 0 END)
+        AS baseline_error_events,
+      COUNT(DISTINCT
+        CASE WHEN events.dt = ${business_date} THEN events.device_id END,
+        CASE WHEN events.dt = ${business_date} THEN events.game_id END
+      ) AS current_affected_entities,
+      COUNT(DISTINCT
+        CASE WHEN events.dt < ${business_date} THEN events.dt END,
+        CASE WHEN events.dt < ${business_date} THEN events.device_id END,
+        CASE WHEN events.dt < ${business_date} THEN events.game_id END
+      ) AS baseline_affected_entities
+    FROM scoped_events events
+    JOIN classified_codes codes
+      ON events.scope = codes.scope
+      AND events.focus_game_id = codes.focus_game_id
+      AND events.error_code = codes.error_code
+    GROUP BY
+      events.scope,
+      events.focus_game_id,
+      codes.bucket_kind,
+      codes.output_error_code
+  ), scope_totals AS (
+    SELECT
+      scope,
+      focus_game_id,
+      COUNT(DISTINCT
+        CASE WHEN dt = ${business_date} THEN device_id END,
+        CASE WHEN dt = ${business_date} THEN game_id END
+      ) AS overall_current_affected_entities,
+      COUNT(DISTINCT
+        CASE WHEN dt < ${business_date} THEN dt END,
+        CASE WHEN dt < ${business_date} THEN device_id END,
+        CASE WHEN dt < ${business_date} THEN game_id END
+      ) AS overall_baseline_affected_entities
+    FROM scoped_events
+    GROUP BY scope, focus_game_id
+  ), collapsed_buckets AS (
+    SELECT
+      metrics.scope,
+      metrics.focus_game_id,
+      metrics.bucket_kind,
+      metrics.error_code,
+      audit.collapsed_source_bucket_count,
+      audit.source_bucket_count,
+      metrics.current_error_events,
+      metrics.baseline_error_events,
+      metrics.current_affected_entities,
+      metrics.baseline_affected_entities,
+      audit.overall_current_error_events,
+      audit.overall_baseline_error_events,
+      totals.overall_current_affected_entities,
+      totals.overall_baseline_affected_entities,
+      CASE
+        WHEN metrics.scope = 'overall'
+          THEN ${overall_current_business_denominator}
+        ELSE ${focus_current_business_denominator}
+      END AS current_business_denominator,
+      CASE
+        WHEN metrics.scope = 'overall'
+          THEN ${overall_baseline_business_denominator}
+        ELSE ${focus_baseline_business_denominator}
+      END AS baseline_business_denominator
+    FROM bucket_metrics metrics
+    JOIN bucket_audit audit
+      ON metrics.scope = audit.scope
+      AND metrics.focus_game_id = audit.focus_game_id
+      AND metrics.bucket_kind = audit.bucket_kind
+      AND metrics.error_code = audit.error_code
+    JOIN scope_totals totals
+      ON metrics.scope = totals.scope
+      AND metrics.focus_game_id = totals.focus_game_id
+  )
+  SELECT
+    ${business_date} AS analysis_date,
+    scope,
+    focus_game_id,
+    bucket_kind,
+    error_code,
+    collapsed_source_bucket_count,
+    source_bucket_count,
+    7 AS baseline_day_count,
+    current_error_events,
+    baseline_error_events,
+    current_affected_entities,
+    baseline_affected_entities,
+    current_business_denominator,
+    baseline_business_denominator,
+    current_affected_entities * 1.0
+      / NULLIF(current_business_denominator, 0) AS current_entity_rate,
+    baseline_affected_entities * 1.0
+      / NULLIF(baseline_business_denominator, 0) AS baseline_entity_rate,
+    current_error_events * 1.0
+      / NULLIF(current_affected_entities, 0) AS current_repeats_per_entity,
+    baseline_error_events * 1.0
+      / NULLIF(baseline_affected_entities, 0) AS baseline_repeats_per_entity,
+    overall_current_error_events,
+    overall_baseline_error_events,
+    overall_current_affected_entities,
+    overall_baseline_affected_entities
+  FROM collapsed_buckets
+  ORDER BY scope, bucket_kind, error_code
+output:
+  date_column: analysis_date
+  dimensions: [scope, focus_game_id, bucket_kind, error_code]
+  columns:
+    analysis_date: date
+    scope: string
+    focus_game_id: integer
+    bucket_kind: string
+    error_code: string
+    collapsed_source_bucket_count: integer
+    source_bucket_count: integer
+    baseline_day_count: integer
+    current_error_events: integer
+    baseline_error_events: integer
+    current_affected_entities: integer
+    baseline_affected_entities: integer
+    current_business_denominator: integer
+    baseline_business_denominator: integer
+    current_entity_rate: number
+    baseline_entity_rate: number
+    current_repeats_per_entity: number
+    baseline_repeats_per_entity: number
+    overall_current_error_events: integer
+    overall_baseline_error_events: integer
+    overall_current_affected_entities: integer
+    overall_baseline_affected_entities: integer
+quality:
+  require_non_empty: true
+  unique_by: [analysis_date, scope, focus_game_id, bucket_kind, error_code]
+  max_rows: 206
+  row_limit_exclusive: 250
+  baseline_day_count: 7
+  ranges:
+    focus_game_id: {min: 0, allow_null: false}
+    collapsed_source_bucket_count: {min: 1, allow_null: false}
+    source_bucket_count: {min: 1, allow_null: false}
+    current_error_events: {min: 0, allow_null: false}
+    baseline_error_events: {min: 0, allow_null: false}
+    current_affected_entities: {min: 0, allow_null: false}
+    baseline_affected_entities: {min: 0, allow_null: false}
+    current_business_denominator: {min: 1, allow_null: false}
+    baseline_business_denominator: {min: 1, allow_null: false}
+    current_entity_rate: {min: 0, allow_null: false}
+    baseline_entity_rate: {min: 0, allow_null: false}
+    current_repeats_per_entity: {min: 0, allow_null: true}
+    baseline_repeats_per_entity: {min: 0, allow_null: true}
+    overall_current_error_events: {min: 0, allow_null: false}
+    overall_baseline_error_events: {min: 0, allow_null: false}
+    overall_current_affected_entities: {min: 0, allow_null: false}
+    overall_baseline_affected_entities: {min: 0, allow_null: false}

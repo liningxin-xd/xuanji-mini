@@ -1,15 +1,15 @@
 version: 1
 module: error_code
-runtime_enabled: false
+runtime_enabled: true
 
 capabilities:
   download_app:
     chain: download
     game_type: app
     source_status: registered_candidate
-    error_code_query: allowed_after_trigger
+    error_code_query: enabled_after_trigger
     recovery_query: disabled_until_semantics_confirmed
-    query_asset: null
+    query_asset: references/queries/download-error-code-calibration.yaml
     supported_metrics:
       - 下载失败率
     source:
