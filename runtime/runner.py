@@ -32,6 +32,10 @@ from .game_background_validator import (
     GameBackgroundValidator,
 )
 from .models import QueryBinding, RunStatus, StepStatus, TERMINAL_STEP_STATUSES
+from .post_primary_executor import (
+    PostPrimaryExecutionError,
+    PostPrimaryExecutor,
+)
 from .query_builder import QueryBuildError, QueryBuilder
 from .receipts import ReceiptVerificationError, TrustedReceiptVerifier
 from .result_validator import ResultValidationError, ResultValidator
@@ -63,6 +67,14 @@ class AttributionRunner:
         self.secondary_result_validator = SecondaryResultValidator(self.contracts)
         self.game_background_validator = GameBackgroundValidator(self.contracts)
         self.error_code_result_validator = ErrorCodeResultValidator(self.contracts)
+        self.post_primary_executor = PostPrimaryExecutor(
+            self.contracts,
+            query_builder=self.query_builder,
+            secondary_query_builder=self.secondary_query_builder,
+            secondary_result_validator=self.secondary_result_validator,
+            game_background_validator=self.game_background_validator,
+            error_code_result_validator=self.error_code_result_validator,
+        )
         configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
         self.analysis_profile = (
             analysis_profile
@@ -379,7 +391,7 @@ class AttributionRunner:
         is_post_primary = state["cursor"] >= len(state["steps"])
         post_primary_step = None
         if is_post_primary:
-            active = self._active_post_primary_query(state)
+            active = self.post_primary_executor.active_query(state)
             if active is None:
                 raise RunnerError(
                     "queue and post-primary analysis are complete; "
@@ -435,36 +447,20 @@ class AttributionRunner:
             binding = self._binding_from_step(step)
             if binding is None:  # pragma: no cover - automatic steps issue no ticket
                 raise RunnerError("query result has no immutable binding")
-            try:
-                if is_post_primary and post_primary_step["id"] == "secondary":
-                    outcome = self.secondary_result_validator.validate(
-                        raw_result=raw_result,
+            if is_post_primary:
+                try:
+                    self.post_primary_executor.record_returned(
+                        state=state,
+                        post_step=post_primary_step,
+                        query_item=step,
+                        attempt=attempt,
                         binding=binding,
-                        chain=state["chain"],
-                        metric=state["metric"],
-                        analysis_date=state["analysis_date"],
-                        game_type=state["game_type"],
-                        parent_value=step["parent_value"],
-                        parent_counts=self._secondary_parent_counts(state, step),
-                        root_counts=self._secondary_root_counts(state),
-                    )
-                elif is_post_primary and post_primary_step["id"] == (
-                    "game_background"
-                ):
-                    outcome = self.game_background_validator.validate(
                         raw_result=raw_result,
-                        binding=binding,
-                        analysis_date=state["analysis_date"],
-                        game_id=int(step["game_id"]),
                     )
-                elif is_post_primary and post_primary_step["id"] == "error_code":
-                    outcome = self.error_code_result_validator.validate(
-                        raw_result=raw_result,
-                        binding=binding,
-                        analysis_date=state["analysis_date"],
-                        frozen_scopes=step["frozen_scopes"],
-                    )
-                else:
+                except PostPrimaryExecutionError as exc:
+                    raise RunnerError(str(exc)) from exc
+            else:
+                try:
                     outcome = self.result_validator.validate(
                         raw_result=raw_result,
                         binding=binding,
@@ -475,37 +471,18 @@ class AttributionRunner:
                         produces_candidates=step["produces_candidates"],
                     )
                     self._validate_canonical_root_metric(state, step, outcome)
-            except (
-                ResultValidationError,
-                GameBackgroundValidationError,
-                ErrorCodeValidationError,
-            ) as exc:
-                attempt["status"] = "failed"
-                attempt["validation"] = {
-                    "status": "failed",
-                    "failure_code": exc.code,
-                    "reason": str(exc),
-                }
-                step["status"] = StepStatus.FAILED.value
-                step["failure_code"] = exc.code
-                step["reason"] = f"{exc.code}: {exc}"
-            else:
-                attempt["status"] = "succeeded"
-                if is_post_primary and post_primary_step["id"] in {
-                    "game_background",
-                    "error_code",
-                }:
+                except ResultValidationError as exc:
+                    attempt["status"] = "failed"
                     attempt["validation"] = {
-                        "status": "succeeded",
-                        "fact_count": len(outcome.facts),
-                        "limit_codes": list(outcome.limit_codes),
+                        "status": "failed",
+                        "failure_code": exc.code,
+                        "reason": str(exc),
                     }
-                    step["status"] = StepStatus.SUCCEEDED.value
-                    step["facts"] = list(outcome.facts)
-                    step["limit_codes"] = list(outcome.limit_codes)
-                    step["failure_code"] = None
-                    step["reason"] = None
+                    step["status"] = StepStatus.FAILED.value
+                    step["failure_code"] = exc.code
+                    step["reason"] = f"{exc.code}: {exc}"
                 else:
+                    attempt["status"] = "succeeded"
                     attempt["validation"] = {
                         "status": "succeeded",
                         "candidate_count": outcome.candidate_count,
@@ -532,28 +509,37 @@ class AttributionRunner:
                 "code": self._required_non_empty_string(event, "error_code"),
                 "message": self._required_non_empty_string(event, "error_message"),
             }
-            attempt["status"] = "error"
-            attempt["error"] = raw_error
-            if raw_error["class"] == "semantic_analysis" and attempt_no < 2:
-                step["status"] = StepStatus.REPAIR_REQUIRED.value
-                advance_cursor = False
+            if is_post_primary:
+                advance_cursor = self.post_primary_executor.record_error(
+                    query_item=step,
+                    attempt=attempt,
+                    attempt_no=attempt_no,
+                    raw_error=raw_error,
+                )
             else:
-                step["status"] = StepStatus.FAILED.value
-                step["failure_code"] = self._query_failure_code(raw_error)
-                repair_suffix = (
-                    " after two evidence-based repairs"
-                    if raw_error["class"] == "semantic_analysis" and attempt_no == 2
-                    else ""
-                )
-                step["reason"] = (
-                    f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
-                    f"{raw_error['message']}"
-                )
-                attempt["validation"] = {
-                    "status": "failed",
-                    "failure_code": step["failure_code"],
-                    "reason": step["reason"],
-                }
+                attempt["status"] = "error"
+                attempt["error"] = raw_error
+                if raw_error["class"] == "semantic_analysis" and attempt_no < 2:
+                    step["status"] = StepStatus.REPAIR_REQUIRED.value
+                    advance_cursor = False
+                else:
+                    step["status"] = StepStatus.FAILED.value
+                    step["failure_code"] = self._query_failure_code(raw_error)
+                    repair_suffix = (
+                        " after two evidence-based repairs"
+                        if raw_error["class"] == "semantic_analysis"
+                        and attempt_no == 2
+                        else ""
+                    )
+                    step["reason"] = (
+                        f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
+                        f"{raw_error['message']}"
+                    )
+                    attempt["validation"] = {
+                        "status": "failed",
+                        "failure_code": step["failure_code"],
+                        "reason": step["reason"],
+                    }
 
         state["processed_events"][event_hash] = {
             "event": event_type,
@@ -566,7 +552,12 @@ class AttributionRunner:
                 self._mark_queue_complete(state)
         elif advance_cursor:
             if post_primary_step["id"] == "game_background":
-                self._advance_post_primary_cursor(post_primary_step, step)
+                try:
+                    self.post_primary_executor.advance_background(
+                        post_primary_step, step
+                    )
+                except PostPrimaryExecutionError as exc:
+                    raise RunnerError(str(exc)) from exc
             try:
                 post_primary = self.calibration_runner.execute(state)
             except CalibrationError as exc:
@@ -805,7 +796,7 @@ class AttributionRunner:
             raise RunnerError("primary_v2 lacks post-primary state")
         if post_primary.get("status") == "completed":
             return self._queue_complete_ticket(state)
-        current = self._current_post_primary_query(state)
+        current = self.post_primary_executor.current_query(state)
         if current is None:
             raise RunnerError("post-primary plan lacks an executable current query")
         post_step, query_item = current
@@ -825,229 +816,22 @@ class AttributionRunner:
         post_step: dict[str, Any],
         query_item: dict[str, Any],
     ) -> None:
-        if post_step["id"] == "secondary":
-            built = self.secondary_query_builder.build(
-                chain=state["chain"],
-                metric=state["metric"],
-                business_date=state["analysis_date"],
-                game_type=state["game_type"],
-                parent_dimension=query_item["parent_dimension"],
-                parent_value=query_item["parent_value"],
-                child_dimension=query_item["child_dimension"],
+        try:
+            built = self.post_primary_executor.prepare_query(
+                state, post_step, query_item
             )
-        elif post_step["id"] == "game_background":
-            binding = self.contracts.game_background_binding(
-                game_id=int(query_item["game_id"])
-            )
-            built = self.query_builder.build(
-                binding,
-                {
-                    "business_date": state["analysis_date"],
-                    "game_id": int(query_item["game_id"]),
-                },
-            )
-        elif post_step["id"] == "error_code":
-            binding = self._error_code_binding(query_item)
-            built = self.query_builder.build(
-                binding,
-                {
-                    "business_date": state["analysis_date"],
-                    **binding.dimension_config["query_parameters"],
-                },
-            )
-        else:  # pragma: no cover - guarded by the plan contract
-            raise RunnerError(
-                f"unsupported post-primary query step: {post_step['id']}"
-            )
-
-        if post_step["id"] == "secondary":
-            binding_snapshot = self._binding_snapshot(built.binding)
-            query_item.update(
-                {
-                    "binding": binding_snapshot,
-                    "binding_sha256": canonical_sha256(binding_snapshot),
-                    "attempts": [],
-                    "candidate_count": None,
-                    "candidates": [],
-                    "root_current_value": None,
-                    "root_baseline_value": None,
-                    "root_delta": None,
-                    "root_current_numerator": None,
-                    "root_current_denominator": None,
-                    "root_baseline_numerator": None,
-                    "root_baseline_denominator": None,
-                    "family_adverse_impact_bp": None,
-                    "failure_code": None,
-                    "reason": None,
-                    "warning_codes": [],
-                }
-            )
-        else:
-            binding_snapshot = self._binding_snapshot(built.binding)
-            query_item["binding"] = binding_snapshot
-            query_item["binding_sha256"] = canonical_sha256(binding_snapshot)
-
-        path_id = self._post_primary_path_id(query_item)
+        except PostPrimaryExecutionError as exc:
+            raise RunnerError(str(exc)) from exc
+        path_id = self.post_primary_executor.path_id(query_item)
         sql_path = self._sql_relative_path(len(state["steps"]), path_id, 0)
         self._atomic_write_text(
             self._run_dir(state["run_id"]) / sql_path, built.sql
         )
-        query_item["attempts"].append(
-            {
-                "attempt_no": 0,
-                "status": "issued",
-                "sql_sha256": built.sha256,
-                "sql_path": sql_path,
-                "query_id": None,
-                "error": None,
-                "event_path": None,
-                "raw_result_sha256": None,
-                "validation": None,
-            }
+        self.post_primary_executor.issue_query(
+            post_step, query_item, built, sql_path
         )
-        query_item["status"] = "in_progress"
-        post_step["status"] = "in_progress"
         state["revision"] += 1
         self._write_state(state)
-
-    def _current_post_primary_query(
-        self, state: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        post_primary = state.get("post_primary")
-        if not isinstance(post_primary, dict) or post_primary.get("status") != "executing":
-            return None
-        for step in post_primary.get("steps", []):
-            if not isinstance(step, dict):
-                continue
-            if step.get("id") == "secondary" and step.get("status") in {
-                "planned",
-                "in_progress",
-                "repair_required",
-            }:
-                return step, step
-            if step.get("id") == "error_code" and step.get("status") in {
-                "planned",
-                "in_progress",
-                "repair_required",
-            }:
-                return step, step
-            if step.get("id") != "game_background" or step.get("status") not in {
-                "planned",
-                "in_progress",
-            }:
-                continue
-            items = step.get("items")
-            cursor = step.get("cursor")
-            if (
-                isinstance(items, list)
-                and isinstance(cursor, int)
-                and 0 <= cursor < len(items)
-                and isinstance(items[cursor], dict)
-                and items[cursor].get("status")
-                in {"planned", "in_progress", "repair_required"}
-            ):
-                return step, items[cursor]
-        return None
-
-    def _active_post_primary_query(
-        self, state: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        current = self._current_post_primary_query(state)
-        if current is None or current[1].get("status") not in {
-            "in_progress",
-            "repair_required",
-        }:
-            return None
-        return current
-
-    def _advance_post_primary_cursor(
-        self, post_step: dict[str, Any], query_item: dict[str, Any]
-    ) -> None:
-        items = post_step.get("items")
-        cursor = post_step.get("cursor")
-        if (
-            post_step.get("id") != "game_background"
-            or not isinstance(items, list)
-            or not isinstance(cursor, int)
-            or cursor >= len(items)
-            or items[cursor] is not query_item
-            or query_item.get("status") not in {"succeeded", "failed"}
-        ):
-            raise RunnerError("game background cursor cannot advance")
-        post_step["cursor"] += 1
-        if post_step["cursor"] < len(items):
-            post_step["status"] = "in_progress"
-            return
-        if any(item.get("status") == "succeeded" for item in items):
-            post_step["status"] = "succeeded"
-            post_step.pop("failure_code", None)
-            post_step.pop("reason", None)
-        else:
-            post_step["status"] = "failed"
-            post_step["failure_code"] = "game_background_unavailable"
-            post_step["reason"] = "all selected game background queries failed"
-
-    def _secondary_parent_counts(
-        self, state: dict[str, Any], secondary: dict[str, Any]
-    ) -> dict[str, Any]:
-        game_step = next(step for step in state["steps"] if step["id"] == "game_id")
-        candidate = next(
-            (
-                item
-                for item in game_step["candidates"]
-                if item.get("value") == secondary["parent_value"]
-                and item.get("label") == secondary["parent_label"]
-            ),
-            None,
-        )
-        if not isinstance(candidate, dict) or not isinstance(
-            candidate.get("private_counts"), dict
-        ):
-            raise RunnerError("secondary parent no longer rehooks its game candidate")
-        return dict(candidate["private_counts"])
-
-    def _secondary_root_counts(self, state: dict[str, Any]) -> dict[str, Any]:
-        game_step = next(step for step in state["steps"] if step["id"] == "game_id")
-        return {
-            "current_numerator": game_step["root_current_numerator"],
-            "current_denominator": game_step["root_current_denominator"],
-            "baseline_numerator": game_step["root_baseline_numerator"],
-            "baseline_denominator": game_step["root_baseline_denominator"],
-        }
-
-    def _error_code_binding(self, step: dict[str, Any]) -> QueryBinding:
-        try:
-            scopes = self.error_code_result_validator._expected_scopes(
-                step.get("frozen_scopes")
-            )
-        except ErrorCodeValidationError as exc:
-            raise RunnerError(str(exc)) from exc
-        overall = scopes[("overall", 0)]
-        focus_entry = next(
-            (
-                (key, value)
-                for key, value in scopes.items()
-                if key[0] == "focus_game"
-            ),
-            None,
-        )
-        focus_game_id = focus_entry[0][1] if focus_entry is not None else 0
-        focus = focus_entry[1] if focus_entry is not None else None
-        return self.contracts.error_code_binding(
-            focus_game_id=focus_game_id,
-            overall_current_business_denominator=overall[
-                "current_business_denominator"
-            ],
-            overall_baseline_business_denominator=overall[
-                "baseline_business_denominator"
-            ],
-            focus_current_business_denominator=(
-                focus["current_business_denominator"] if focus is not None else 0
-            ),
-            focus_baseline_business_denominator=(
-                focus["baseline_business_denominator"] if focus is not None else 0
-            ),
-        )
 
     def load_state(self, run_id: str) -> dict[str, Any]:
         return self._load_state(run_id)
@@ -1085,7 +869,7 @@ class AttributionRunner:
             self._run_dir(state["run_id"])
             / "tickets"
             / (
-                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"{state['cursor']:02d}-{self.post_primary_executor.path_id(step)}-"
                 f"attempt-{attempt['attempt_no']}.json"
             ),
             ticket,
@@ -1132,7 +916,7 @@ class AttributionRunner:
             self._run_dir(state["run_id"])
             / "tickets"
             / (
-                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"{state['cursor']:02d}-{self.post_primary_executor.path_id(step)}-"
                 f"repair-{repair_attempt}.json"
             ),
             ticket,
@@ -1197,12 +981,12 @@ class AttributionRunner:
             baseline_sql, failed_sql, repaired_sql, binding, parameters
         )
         sql_path = self._sql_relative_path(
-            state["cursor"], self._post_primary_path_id(step), repair_attempt
+            state["cursor"], self.post_primary_executor.path_id(step), repair_attempt
         )
         diff_path = str(
             Path("sql")
             / (
-                f"{state['cursor']:02d}-{self._post_primary_path_id(step)}-"
+                f"{state['cursor']:02d}-{self.post_primary_executor.path_id(step)}-"
                 f"repair-{repair_attempt}.diff"
             )
         )
@@ -1275,7 +1059,7 @@ class AttributionRunner:
                 ):
                     post_query_items.extend(post_step["items"])
         if current is None:
-            post_current = self._current_post_primary_query(state)
+            post_current = self.post_primary_executor.current_query(state)
             current = post_current[1] if post_current is not None else None
         repair_count = sum(
             1
@@ -2004,9 +1788,15 @@ class AttributionRunner:
                     analysis_date=state["analysis_date"],
                     game_type=state["game_type"],
                     parent_value=secondary["parent_value"],
-                    parent_counts=self._secondary_parent_counts(state, secondary),
-                    root_counts=self._secondary_root_counts(state),
+                    parent_counts=self.post_primary_executor.secondary_parent_counts(
+                        state, secondary
+                    ),
+                    root_counts=self.post_primary_executor.secondary_root_counts(
+                        state
+                    ),
                 )
+            except PostPrimaryExecutionError as exc:
+                raise RunnerError(str(exc)) from exc
             except ResultValidationError as exc:
                 if status != "failed" or latest.get("validation") != {
                     "status": "failed",
@@ -2053,28 +1843,25 @@ class AttributionRunner:
         if latest.get("status") != "error" or status != "failed":
             raise RunnerError("terminal secondary query error state is invalid")
         raw_error = latest.get("error")
-        repair_suffix = (
-            " after two evidence-based repairs"
-            if isinstance(raw_error, dict)
-            and raw_error.get("class") == "semantic_analysis"
-            and latest["attempt_no"] == 2
-            else ""
-        )
         expected_reason = (
-            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
-            f"{raw_error['message']}"
+            self.post_primary_executor.query_failure_reason(
+                raw_error, latest["attempt_no"]
+            )
             if isinstance(raw_error, dict)
             and all(key in raw_error for key in ("class", "code", "message"))
             else None
         )
         if (
             not isinstance(raw_error, dict)
-            or secondary.get("failure_code") != self._query_failure_code(raw_error)
+            or secondary.get("failure_code")
+            != self.post_primary_executor.query_failure_code(raw_error)
             or secondary.get("reason") != expected_reason
             or latest.get("validation")
             != {
                 "status": "failed",
-                "failure_code": self._query_failure_code(raw_error),
+                "failure_code": self.post_primary_executor.query_failure_code(
+                    raw_error
+                ),
                 "reason": expected_reason,
             }
         ):
@@ -2407,16 +2194,10 @@ class AttributionRunner:
         if latest.get("status") != "error" or status != "failed":
             raise RunnerError("game background query error state is invalid")
         raw_error = latest.get("error")
-        repair_suffix = (
-            " after two evidence-based repairs"
-            if isinstance(raw_error, dict)
-            and raw_error.get("class") == "semantic_analysis"
-            and latest["attempt_no"] == 2
-            else ""
-        )
         expected_reason = (
-            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
-            f"{raw_error['message']}"
+            self.post_primary_executor.query_failure_reason(
+                raw_error, latest["attempt_no"]
+            )
             if isinstance(raw_error, dict)
             and all(key in raw_error for key in ("class", "code", "message"))
             else None
@@ -2425,12 +2206,15 @@ class AttributionRunner:
             not isinstance(raw_error, dict)
             or item.get("facts") != []
             or item.get("limit_codes") != []
-            or item.get("failure_code") != self._query_failure_code(raw_error)
+            or item.get("failure_code")
+            != self.post_primary_executor.query_failure_code(raw_error)
             or item.get("reason") != expected_reason
             or latest.get("validation")
             != {
                 "status": "failed",
-                "failure_code": self._query_failure_code(raw_error),
+                "failure_code": self.post_primary_executor.query_failure_code(
+                    raw_error
+                ),
                 "reason": expected_reason,
             }
         ):
@@ -2501,7 +2285,12 @@ class AttributionRunner:
                 raise RunnerError("planned error-code step contains runtime evidence")
             return
 
-        expected_binding = self._error_code_binding(error_code)
+        try:
+            expected_binding = self.post_primary_executor.error_code_binding(
+                error_code
+            )
+        except PostPrimaryExecutionError as exc:
+            raise RunnerError(str(exc)) from exc
         expected_snapshot = self._binding_snapshot(expected_binding)
         if error_code.get("binding") != expected_snapshot or error_code.get(
             "binding_sha256"
@@ -2748,16 +2537,10 @@ class AttributionRunner:
         if latest.get("status") != "error" or status != "failed":
             raise RunnerError("error-code query error state is invalid")
         raw_error = latest.get("error")
-        repair_suffix = (
-            " after two evidence-based repairs"
-            if isinstance(raw_error, dict)
-            and raw_error.get("class") == "semantic_analysis"
-            and latest["attempt_no"] == 2
-            else ""
-        )
         expected_reason = (
-            f"{raw_error['class']} {raw_error['code']}{repair_suffix}: "
-            f"{raw_error['message']}"
+            self.post_primary_executor.query_failure_reason(
+                raw_error, latest["attempt_no"]
+            )
             if isinstance(raw_error, dict)
             and all(key in raw_error for key in ("class", "code", "message"))
             else None
@@ -2766,12 +2549,15 @@ class AttributionRunner:
             not isinstance(raw_error, dict)
             or error_code.get("facts") != []
             or error_code.get("limit_codes") != []
-            or error_code.get("failure_code") != self._query_failure_code(raw_error)
+            or error_code.get("failure_code")
+            != self.post_primary_executor.query_failure_code(raw_error)
             or error_code.get("reason") != expected_reason
             or latest.get("validation")
             != {
                 "status": "failed",
-                "failure_code": self._query_failure_code(raw_error),
+                "failure_code": self.post_primary_executor.query_failure_code(
+                    raw_error
+                ),
                 "reason": expected_reason,
             }
         ):
@@ -3018,7 +2804,10 @@ class AttributionRunner:
                 "game_id": game_id,
             }
         if config.get("post_primary") == "error_code":
-            expected_binding = self._error_code_binding(step)
+            try:
+                expected_binding = self.post_primary_executor.error_code_binding(step)
+            except PostPrimaryExecutionError as exc:
+                raise RunnerError(str(exc)) from exc
             if self._binding_snapshot(binding) != self._binding_snapshot(
                 expected_binding
             ):
@@ -3040,13 +2829,6 @@ class AttributionRunner:
                 }
             )
         return parameters
-
-    @staticmethod
-    def _post_primary_path_id(step: dict[str, Any]) -> str:
-        item_index = step.get("item_index")
-        if isinstance(item_index, int):
-            return f"{step['id']}-{item_index:02d}"
-        return step["id"]
 
     def _sql_relative_path(self, cursor: int, step_id: str, attempt_no: int) -> str:
         return str(Path("sql") / f"{cursor:02d}-{step_id}-attempt-{attempt_no}.sql")
