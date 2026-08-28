@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +19,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
+    def test_documented_shadow_verifier_scripts_are_directly_executable(self):
+        for script in (
+            "primary_v1_shadow_acceptance.py",
+            "primary_v2_shadow_acceptance.py",
+        ):
+            with self.subTest(script=script):
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / script), "--help"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_profile_aware_fixture_passes_with_bounded_query_counts(self):
         with tempfile.TemporaryDirectory() as temp:
             root, transcript = self._fixture(Path(temp))

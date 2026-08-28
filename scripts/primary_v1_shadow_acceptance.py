@@ -9,12 +9,15 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from runtime.contracts import RepositoryContracts, canonical_sha256
 from runtime.task_assembler import writer_pack_size
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_ROOT = Path(__file__).resolve().parents[1]
 _SQL = re.compile(r"(?is)(\bselect\s+.+?\bfrom\b|\bwith\s+\w+\s+as\s*\()")
 _MARKDOWN_TABLE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|\s*:?-{3,}")
 _FORBIDDEN_TEXT = (
