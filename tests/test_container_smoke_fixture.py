@@ -1,11 +1,38 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from tests.container_dview_stub import _attribution_results
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class ContainerSmokeFixtureTest(unittest.TestCase):
+    def test_dview_stub_supports_direct_script_execution(self):
+        env = dict(os.environ)
+        for name in (
+            "XUANJI_SMOKE_DVIEW_PORT",
+            "XUANJI_SMOKE_DVIEW_COUNT_FILE",
+            "XUANJI_SMOKE_ANALYSIS_PROFILE",
+        ):
+            env.pop(name, None)
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "tests" / "container_dview_stub.py")],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertIn("XUANJI_SMOKE_DVIEW_PORT", completed.stderr)
+
     def test_profile_query_fixture_exercises_v2_post_primary_only(self):
         expected = {
             "primary_v1": (

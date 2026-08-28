@@ -3,17 +3,29 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from runtime.runner import AttributionRunner
-from tests.runtime_result_fixtures import (
-    raw_result_for_ticket,
-    self_reported_result_event,
-)
+
+if __package__:
+    from .runtime_result_fixtures import (
+        raw_result_for_ticket,
+        self_reported_result_event,
+    )
+else:
+    from runtime_result_fixtures import (
+        raw_result_for_ticket,
+        self_reported_result_event,
+    )
 
 
 def main() -> None:
@@ -26,7 +38,7 @@ def main() -> None:
     analysis_profile = os.environ["XUANJI_SMOKE_ANALYSIS_PROFILE"]
     query_spec = yaml.safe_load(
         (
-            Path(__file__).resolve().parents[1]
+            ROOT
             / "references"
             / "queries"
             / "registered-monitor-root.yaml"
@@ -115,11 +127,10 @@ def main() -> None:
 def _attribution_results(analysis_profile: str) -> dict[str, dict[str, Any]]:
     if analysis_profile not in {"primary_v1", "primary_v2"}:
         raise ValueError("container smoke analysis profile is invalid")
-    root = Path(__file__).resolve().parents[1]
     results: dict[str, dict[str, Any]] = {}
     with tempfile.TemporaryDirectory() as temp_dir:
         runner = AttributionRunner(
-            root,
+            ROOT,
             runs_root=temp_dir,
             analysis_profile=analysis_profile,
         )
