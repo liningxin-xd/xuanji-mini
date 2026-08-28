@@ -66,6 +66,10 @@
       "sha256": "5593ef88f79bf6bc687a500b511f51ee5821a1cb9ad9a87095bcfefdfba5c76b"
     },
     {
+      "path": "references/queries/download-cross-dimension-overlap.yaml",
+      "sha256": "ba6065c9c920b957f9c65c9a15532bf6db49b5011c4850281b791aadecf8d4e0"
+    },
+    {
       "path": "references/queries/primary-attribution-dimensions.md",
       "sha256": "4566fef7828fb248ea9946f3b6e27096eb6806edf84fdf92802e5a2f6ee8af48"
     }

@@ -193,11 +193,12 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 "game_background",
                 "breadth_check",
                 "error_code",
+                "cross_dimension_overlap",
             ],
             profile["enabled_post_primary_steps"],
         )
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
-        self.assertEqual(5, plan["max_additional_queries"])
+        self.assertEqual(6, plan["max_additional_queries"])
         self.assertEqual(
             "direction_enhancement_v1", plan["enhancement_priority_plan"]
         )
@@ -208,6 +209,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 "game_background",
                 "breadth_check",
                 "error_code",
+                "cross_dimension_overlap",
             ],
             [step["id"] for step in plan["steps"]],
         )
@@ -275,6 +277,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 "succeeded",
                 "succeeded",
                 "succeeded",
+                "skipped_by_policy",
                 "skipped_by_policy",
                 "skipped_by_policy",
             ],

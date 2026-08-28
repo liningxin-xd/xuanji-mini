@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from .contracts import RepositoryContracts, canonical_sha256
+from .cross_dimension_overlap_result_validator import (
+    CrossDimensionOverlapResultValidator,
+    CrossDimensionOverlapValidationError,
+)
 from .error_code_result_validator import (
     ErrorCodeResultValidator,
     ErrorCodeValidationError,
@@ -32,6 +36,9 @@ class PostPrimaryExecutor:
         secondary_result_validator: SecondaryResultValidator,
         game_background_validator: GameBackgroundValidator,
         error_code_result_validator: ErrorCodeResultValidator,
+        cross_dimension_overlap_result_validator: (
+            CrossDimensionOverlapResultValidator
+        ),
     ):
         self.contracts = contracts
         self.query_builder = query_builder
@@ -39,6 +46,9 @@ class PostPrimaryExecutor:
         self.secondary_result_validator = secondary_result_validator
         self.game_background_validator = game_background_validator
         self.error_code_result_validator = error_code_result_validator
+        self.cross_dimension_overlap_result_validator = (
+            cross_dimension_overlap_result_validator
+        )
 
     def current_query(
         self, state: dict[str, Any]
@@ -58,6 +68,14 @@ class PostPrimaryExecutor:
             }:
                 return step, step
             if step.get("id") == "error_code" and step.get("status") in {
+                "planned",
+                "in_progress",
+                "repair_required",
+            }:
+                return step, step
+            if step.get("id") == "cross_dimension_overlap" and step.get(
+                "status"
+            ) in {
                 "planned",
                 "in_progress",
                 "repair_required",
@@ -125,6 +143,16 @@ class PostPrimaryExecutor:
                 binding,
                 {
                     "business_date": state["analysis_date"],
+                    **binding.dimension_config["query_parameters"],
+                },
+            )
+        elif post_step["id"] == "cross_dimension_overlap":
+            binding = self.cross_dimension_overlap_binding(query_item, state)
+            built = self.query_builder.build(
+                binding,
+                {
+                    "business_date": state["analysis_date"],
+                    "game_type": state["game_type"],
                     **binding.dimension_config["query_parameters"],
                 },
             )
@@ -205,6 +233,7 @@ class PostPrimaryExecutor:
             ResultValidationError,
             GameBackgroundValidationError,
             ErrorCodeValidationError,
+            CrossDimensionOverlapValidationError,
         ) as exc:
             attempt["status"] = "failed"
             attempt["validation"] = {
@@ -221,7 +250,11 @@ class PostPrimaryExecutor:
         query_item["status"] = StepStatus.SUCCEEDED.value
         query_item["failure_code"] = None
         query_item["reason"] = None
-        if post_step["id"] in {"game_background", "error_code"}:
+        if post_step["id"] in {
+            "game_background",
+            "error_code",
+            "cross_dimension_overlap",
+        }:
             attempt["validation"] = {
                 "status": "succeeded",
                 "fact_count": len(outcome.facts),
@@ -339,6 +372,26 @@ class PostPrimaryExecutor:
             ),
         )
 
+    def cross_dimension_overlap_binding(
+        self, step: dict[str, Any], state: dict[str, Any]
+    ) -> QueryBinding:
+        candidates = step.get("frozen_candidates")
+        if not isinstance(candidates, list) or len(candidates) != 2:
+            raise PostPrimaryExecutionError(
+                "overlap step lacks two frozen candidates"
+            )
+        left, right = candidates
+        try:
+            return self.contracts.cross_dimension_overlap_binding(
+                metric=state["metric"],
+                left_game_id=int(left["value"]),
+                right_reserve_value=int(right["value"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PostPrimaryExecutionError(
+                "overlap frozen candidate identity is invalid"
+            ) from exc
+
     @staticmethod
     def binding_snapshot(binding: QueryBinding) -> dict[str, Any]:
         return {
@@ -447,6 +500,16 @@ class PostPrimaryExecutor:
                 binding=binding,
                 analysis_date=state["analysis_date"],
                 frozen_scopes=query_item["frozen_scopes"],
+            )
+        if post_step["id"] == "cross_dimension_overlap":
+            return self.cross_dimension_overlap_result_validator.validate(
+                raw_result=raw_result,
+                binding=binding,
+                metric=state["metric"],
+                analysis_date=state["analysis_date"],
+                game_type=state["game_type"],
+                frozen_candidates=query_item["frozen_candidates"],
+                frozen_root_counts=query_item["frozen_root_counts"],
             )
         raise PostPrimaryExecutionError(
             f"unsupported post-primary query step: {post_step['id']}"

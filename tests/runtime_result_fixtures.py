@@ -83,6 +83,18 @@ def raw_result_for_ticket(
             "columns": list(columns),
             "rows": _error_code_rows(columns, state, error_code),
         }
+    if ticket["step_id"] == "cross_dimension_overlap":
+        overlap = next(
+            step
+            for step in state["post_primary"]["steps"]
+            if step["id"] == "cross_dimension_overlap"
+        )
+        binding = runner._binding_from_step(overlap)
+        columns, _ = runner.contracts.query_spec_result_contract(binding)
+        return {
+            "columns": list(columns),
+            "rows": _cross_dimension_overlap_rows(columns, state, overlap),
+        }
     step = state["steps"][state["cursor"]]
     binding = runner._binding_from_step(step)
     schema = runner.contracts.result_schema(binding.result_schema_id)
@@ -314,6 +326,75 @@ def _error_code_rows(
                 }
             )
             rows.append(row)
+    return rows
+
+
+def _cross_dimension_overlap_rows(
+    columns: dict[str, str],
+    state: dict[str, Any],
+    overlap: dict[str, Any],
+) -> list[dict[str, Any]]:
+    left, right = overlap["frozen_candidates"]
+    root = overlap["frozen_root_counts"]
+    left_counts = left["private_counts"]
+    right_counts = right["private_counts"]
+    both = {
+        "current_denominator": 200,
+        "baseline_denominator": 400,
+        "current_numerator": 100 if state["metric"] == "下载完成率" else 180,
+        "baseline_numerator": 320,
+    }
+    left_only = {
+        field: left_counts[field] - both[field]
+        for field in both
+    }
+    right_only = {
+        field: right_counts[field] - both[field]
+        for field in both
+    }
+    neither = {
+        field: root[field] - left_counts[field] - right_counts[field] + both[field]
+        for field in both
+    }
+    quadrant_counts = (
+        ("BOTH", both),
+        ("LEFT_ONLY", left_only),
+        ("RIGHT_ONLY", right_only),
+        ("NEITHER", neither),
+    )
+    overall_current_rows = sum(
+        item["current_denominator"] for _, item in quadrant_counts
+    )
+    overall_baseline_rows = sum(
+        item["baseline_denominator"] for _, item in quadrant_counts
+    )
+    rows = []
+    for quadrant, counts in quadrant_counts:
+        row = _empty_row(columns)
+        row.update(
+            {
+                "analysis_date": state["analysis_date"],
+                "game_type": state["game_type"],
+                "left_game_id": int(left["value"]),
+                "right_reserve_value": int(right["value"]),
+                "quadrant": quadrant,
+                "baseline_day_count": 7,
+                **counts,
+                "current_row_count": counts["current_denominator"],
+                "baseline_row_count": counts["baseline_denominator"],
+                "duplicate_row_count": 0,
+                "invalid_metric_row_count": 0,
+                "overall_current_denominator": root["current_denominator"],
+                "overall_baseline_denominator": root["baseline_denominator"],
+                "overall_current_numerator": root["current_numerator"],
+                "overall_baseline_numerator": root["baseline_numerator"],
+                "overall_current_row_count": overall_current_rows,
+                "overall_baseline_row_count": overall_baseline_rows,
+                "overall_duplicate_row_count": 0,
+                "overall_invalid_metric_row_count": 0,
+            }
+        )
+        rows.append(row)
     return rows
 
 

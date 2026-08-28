@@ -66,7 +66,7 @@ class EnhancementPlannerTest(unittest.TestCase):
             plan["evidence_policy"],
         )
         self.assertEqual(
-            ["error_code"],
+            ["error_code", "cross_dimension_overlap"],
             [
                 module["id"]
                 for module in plan["modules"]
@@ -127,13 +127,23 @@ class EnhancementPlannerTest(unittest.TestCase):
         scanned = copy.deepcopy(decision)
         scanned["module_source_scan_performed"] = True
         with self.assertRaisesRegex(EnhancementPlanError, "not frozen"):
-            self.planner.create(self.post_primary, {"error_code": scanned})
+            self.planner.create(
+                self.post_primary,
+                {
+                    "error_code": scanned,
+                    "cross_dimension_overlap": self._overlap_not_triggered(),
+                },
+            )
 
         model_selected = copy.deepcopy(decision)
         model_selected["selected_by_model"] = True
         with self.assertRaisesRegex(EnhancementPlanError, "decision is invalid"):
             self.planner.create(
-                self.post_primary, {"error_code": model_selected}
+                self.post_primary,
+                {
+                    "error_code": model_selected,
+                    "cross_dimension_overlap": self._overlap_not_triggered(),
+                },
             )
 
     def test_not_triggered_module_consumes_no_query_budget(self):
@@ -144,7 +154,11 @@ class EnhancementPlannerTest(unittest.TestCase):
             frozen_evidence_sha256=FROZEN_EVIDENCE_SHA256,
         )
         result = self.planner.create(
-            self.post_primary, {"error_code": decision}
+            self.post_primary,
+            {
+                "error_code": decision,
+                "cross_dimension_overlap": self._overlap_not_triggered(),
+            },
         )
         self.assertEqual([], result["selected_modules"])
         self.assertEqual(0, result["query_module_count"])
@@ -152,6 +166,14 @@ class EnhancementPlannerTest(unittest.TestCase):
         self.assertEqual(
             "not_triggered",
             self.planner.module(result, "error_code")["status"],
+        )
+
+    def _overlap_not_triggered(self) -> dict:
+        return self.planner.selector_decision(
+            module_id="cross_dimension_overlap",
+            triggered=False,
+            reason="required_primary_candidate_missing",
+            frozen_evidence_sha256=FROZEN_EVIDENCE_SHA256,
         )
 
 

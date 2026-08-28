@@ -168,3 +168,6 @@ schemas:
   game_background_events:
     validator: game_background_events
     columns_from_query_spec: true
+  cross_dimension_overlap:
+    validator: cross_dimension_overlap
+    columns_from_query_spec: true

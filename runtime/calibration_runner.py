@@ -6,6 +6,10 @@ from typing import Any
 from .breadth_selector import BreadthSelectionError, BreadthSelector
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
+from .cross_dimension_overlap_selector import (
+    CrossDimensionOverlapSelectionError,
+    CrossDimensionOverlapSelector,
+)
 from .error_code_selector import ErrorCodeSelectionError, ErrorCodeSelector
 from .enhancement_planner import EnhancementPlanError, EnhancementPlanner
 from .game_background_selector import (
@@ -29,6 +33,9 @@ class CalibrationRunner:
         self.game_background_selector = GameBackgroundSelector(contracts)
         self.breadth_selector = BreadthSelector(contracts)
         self.error_code_selector = ErrorCodeSelector(contracts)
+        self.cross_dimension_overlap_selector = CrossDimensionOverlapSelector(
+            contracts
+        )
         self.enhancement_planner = EnhancementPlanner(contracts)
 
     def create_plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
@@ -104,7 +111,10 @@ class CalibrationRunner:
                 step.update(outcome)
                 continue
             if step["id"] == "error_code":
-                outcome, enhancement_plan = self._select_enhancements(state, result)
+                selections, enhancement_plan = self._select_enhancements(
+                    state, result
+                )
+                outcome = selections["error_code"]
                 result["enhancement_plan"] = enhancement_plan
                 try:
                     module = self.enhancement_planner.module(
@@ -131,6 +141,46 @@ class CalibrationRunner:
                 else:
                     raise CalibrationError(
                         "error-code enhancement allocation is inconsistent"
+                    )
+                if step["status"] == "planned":
+                    break
+                continue
+            if step["id"] == "cross_dimension_overlap":
+                selections, enhancement_plan = self._select_enhancements(
+                    state, result
+                )
+                if canonical_sha256(result.get("enhancement_plan")) != (
+                    canonical_sha256(enhancement_plan)
+                ):
+                    raise CalibrationError(
+                        "overlap enhancement plan changed after scheduling"
+                    )
+                outcome = selections["cross_dimension_overlap"]
+                try:
+                    module = self.enhancement_planner.module(
+                        enhancement_plan, "cross_dimension_overlap"
+                    )
+                except EnhancementPlanError as exc:
+                    raise CalibrationError(str(exc)) from exc
+                if module["status"] == "selected":
+                    if outcome["status"] != "planned":
+                        raise CalibrationError(
+                            "selected overlap enhancement was not triggered"
+                        )
+                    step.update(outcome)
+                elif outcome["status"] == "skipped_by_policy":
+                    step.update(outcome)
+                elif module["status"] == "skipped_by_budget":
+                    step.update(
+                        {
+                            "status": "skipped_by_policy",
+                            "reason": module["reason"],
+                            "limit_code": module["limit_code"],
+                        }
+                    )
+                else:
+                    raise CalibrationError(
+                        "overlap enhancement allocation is inconsistent"
                     )
                 if step["status"] == "planned":
                     break
@@ -288,9 +338,10 @@ class CalibrationRunner:
                 "breadth check does not match frozen primary evidence"
             )
 
-        error_code_selection, expected_enhancement_plan = self._select_enhancements(
+        selections, expected_enhancement_plan = self._select_enhancements(
             state, post_primary
         )
+        error_code_selection = selections["error_code"]
         if canonical_sha256(post_primary.get("enhancement_plan")) != canonical_sha256(
             expected_enhancement_plan
         ):
@@ -342,9 +393,55 @@ class CalibrationRunner:
                         f"error-code {field} does not match frozen evidence"
                     )
 
+        overlap_selection = selections["cross_dimension_overlap"]
+        try:
+            overlap_module = self.enhancement_planner.module(
+                expected_enhancement_plan, "cross_dimension_overlap"
+            )
+        except EnhancementPlanError as exc:
+            raise CalibrationError(str(exc)) from exc
+        actual_overlap = post_primary["steps"][5]
+        if overlap_selection["status"] == "skipped_by_policy":
+            if actual_overlap != {
+                "id": "cross_dimension_overlap",
+                **overlap_selection,
+            }:
+                raise CalibrationError(
+                    "overlap skip does not match frozen evidence"
+                )
+        elif overlap_module["status"] == "skipped_by_budget":
+            expected_overlap = {
+                "id": "cross_dimension_overlap",
+                "status": "skipped_by_policy",
+                "reason": overlap_module["reason"],
+                "limit_code": overlap_module["limit_code"],
+            }
+            if actual_overlap != expected_overlap:
+                raise CalibrationError(
+                    "overlap budget skip does not match enhancement plan"
+                )
+        else:
+            if overlap_module["status"] != "selected":
+                raise CalibrationError(
+                    "triggered overlap enhancement was not allocated"
+                )
+            if actual_overlap.get("status") not in {"succeeded", "failed"}:
+                raise CalibrationError("completed overlap step is not terminal")
+            for field in (
+                "selection_id",
+                "root_adverse_delta_bp",
+                "minimum_candidate_adverse_impact_bp",
+                "frozen_root_counts",
+                "frozen_candidates",
+            ):
+                if actual_overlap.get(field) != overlap_selection[field]:
+                    raise CalibrationError(
+                        f"overlap {field} does not match frozen evidence"
+                    )
+
     def _select_enhancements(
         self, state: dict[str, Any], post_primary: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         try:
             error_code_selection = self.error_code_selector.select(
                 state, post_primary
@@ -354,7 +451,7 @@ class CalibrationRunner:
         status = error_code_selection.get("status")
         if status not in {"planned", "skipped_by_policy"}:
             raise CalibrationError("error-code selector returned an invalid status")
-        decision = self.enhancement_planner.selector_decision(
+        error_code_decision = self.enhancement_planner.selector_decision(
             module_id="error_code",
             triggered=status == "planned",
             reason=(
@@ -365,9 +462,35 @@ class CalibrationRunner:
             frozen_evidence_sha256=post_primary["primary_evidence_sha256"],
         )
         try:
+            overlap_selection = self.cross_dimension_overlap_selector.select(
+                state
+            )
+        except CrossDimensionOverlapSelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        overlap_status = overlap_selection.get("status")
+        if overlap_status not in {"planned", "skipped_by_policy"}:
+            raise CalibrationError("overlap selector returned an invalid status")
+        overlap_decision = self.enhancement_planner.selector_decision(
+            module_id="cross_dimension_overlap",
+            triggered=overlap_status == "planned",
+            reason=(
+                overlap_selection.get("reason")
+                if overlap_status == "skipped_by_policy"
+                else None
+            ),
+            frozen_evidence_sha256=post_primary["primary_evidence_sha256"],
+        )
+        try:
             enhancement_plan = self.enhancement_planner.create(
-                post_primary, {"error_code": decision}
+                post_primary,
+                {
+                    "error_code": error_code_decision,
+                    "cross_dimension_overlap": overlap_decision,
+                },
             )
         except EnhancementPlanError as exc:
             raise CalibrationError(str(exc)) from exc
-        return error_code_selection, enhancement_plan
+        return {
+            "error_code": error_code_selection,
+            "cross_dimension_overlap": overlap_selection,
+        }, enhancement_plan

@@ -207,7 +207,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode("utf-8")), 12 * 1024)
         for forbidden in ("rendered_sql", "raw_result", "query_id", "receipt"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(4, len(pack["post_primary_steps"]))
+        self.assertEqual(5, len(pack["post_primary_steps"]))
 
     def test_non_dominant_head_game_still_selects_secondary_parent(self):
         runner, query_count = self._complete(

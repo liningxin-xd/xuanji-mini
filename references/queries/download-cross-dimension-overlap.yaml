@@ -1,0 +1,171 @@
+version: 1
+id: xuanji-download-cross-dimension-overlap
+domain: android-download-install
+provider: taptap-data-query
+database_type: MaxCompute
+timezone: Asia/Shanghai
+data_lag_days: 1
+retention_days: 45
+parameters:
+  business_date: {type: date}
+  game_type: {type: enum, allowed_values: [app, sandbox]}
+  left_game_id: {type: integer}
+  right_reserve_value: {type: integer}
+sql: |
+  WITH raw_scoped_rows AS (
+    SELECT
+      dt,
+      device_id,
+      game_id,
+      is_reserve_auto_download,
+      __DENOMINATOR_SOURCE_FIELD__ AS metric_denominator,
+      __NUMERATOR_SOURCE_FIELD__ AS metric_numerator
+    FROM tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+    WHERE dt BETWEEN TO_CHAR(
+        DATEADD(TO_DATE(${business_date}), -7, 'dd'), 'yyyy-mm-dd'
+      ) AND ${business_date}
+      AND platform = 'ANDROID'
+      AND game_type = ${game_type}
+  ), scoped_rows AS (
+    SELECT
+      raw_scoped_rows.*,
+      COUNT(*) OVER (PARTITION BY dt, device_id, game_id) AS grain_row_count
+    FROM raw_scoped_rows
+  ), classified_rows AS (
+    SELECT
+      dt,
+      CASE
+        WHEN game_id = ${left_game_id}
+          AND is_reserve_auto_download = ${right_reserve_value} THEN 'BOTH'
+        WHEN game_id = ${left_game_id} THEN 'LEFT_ONLY'
+        WHEN is_reserve_auto_download = ${right_reserve_value} THEN 'RIGHT_ONLY'
+        ELSE 'NEITHER'
+      END AS quadrant,
+      metric_denominator,
+      metric_numerator,
+      grain_row_count,
+      CASE WHEN __INVALID_METRIC_PREDICATE__ THEN 1 ELSE 0 END
+        AS invalid_metric_row
+    FROM scoped_rows
+  ), bucket_aggregates AS (
+    SELECT
+      quadrant,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN metric_denominator ELSE 0 END) AS current_denominator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN metric_denominator ELSE 0 END) AS baseline_denominator,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN metric_numerator ELSE 0 END) AS current_numerator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN metric_numerator ELSE 0 END) AS baseline_numerator,
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS current_row_count,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS baseline_row_count,
+      SUM(CASE WHEN grain_row_count > 1 THEN 1 ELSE 0 END)
+        AS duplicate_row_count,
+      SUM(invalid_metric_row) AS invalid_metric_row_count
+    FROM classified_rows
+    GROUP BY quadrant
+  ), scope_audit AS (
+    SELECT
+      1 AS join_key,
+      COUNT(DISTINCT CASE WHEN dt < ${business_date} THEN dt END)
+        AS baseline_day_count,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN metric_denominator ELSE 0 END) AS overall_current_denominator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN metric_denominator ELSE 0 END) AS overall_baseline_denominator,
+      SUM(CASE WHEN dt = ${business_date}
+        THEN metric_numerator ELSE 0 END) AS overall_current_numerator,
+      SUM(CASE WHEN dt < ${business_date}
+        THEN metric_numerator ELSE 0 END) AS overall_baseline_numerator,
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS overall_current_row_count,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS overall_baseline_row_count,
+      SUM(CASE WHEN grain_row_count > 1 THEN 1 ELSE 0 END)
+        AS overall_duplicate_row_count,
+      SUM(invalid_metric_row) AS overall_invalid_metric_row_count
+    FROM classified_rows
+  ), quadrants AS (
+    SELECT 1 AS join_key, 1 AS sort_order, 'BOTH' AS quadrant
+    UNION ALL
+    SELECT 1 AS join_key, 2 AS sort_order, 'LEFT_ONLY' AS quadrant
+    UNION ALL
+    SELECT 1 AS join_key, 3 AS sort_order, 'RIGHT_ONLY' AS quadrant
+    UNION ALL
+    SELECT 1 AS join_key, 4 AS sort_order, 'NEITHER' AS quadrant
+  )
+  SELECT
+    ${business_date} AS analysis_date,
+    ${game_type} AS game_type,
+    ${left_game_id} AS left_game_id,
+    ${right_reserve_value} AS right_reserve_value,
+    quadrants.quadrant,
+    COALESCE(scope_audit.baseline_day_count, 0) AS baseline_day_count,
+    COALESCE(bucket_aggregates.current_denominator, 0) AS current_denominator,
+    COALESCE(bucket_aggregates.baseline_denominator, 0) AS baseline_denominator,
+    COALESCE(bucket_aggregates.current_numerator, 0) AS current_numerator,
+    COALESCE(bucket_aggregates.baseline_numerator, 0) AS baseline_numerator,
+    COALESCE(bucket_aggregates.current_row_count, 0) AS current_row_count,
+    COALESCE(bucket_aggregates.baseline_row_count, 0) AS baseline_row_count,
+    COALESCE(bucket_aggregates.duplicate_row_count, 0) AS duplicate_row_count,
+    COALESCE(bucket_aggregates.invalid_metric_row_count, 0)
+      AS invalid_metric_row_count,
+    COALESCE(scope_audit.overall_current_denominator, 0)
+      AS overall_current_denominator,
+    COALESCE(scope_audit.overall_baseline_denominator, 0)
+      AS overall_baseline_denominator,
+    COALESCE(scope_audit.overall_current_numerator, 0)
+      AS overall_current_numerator,
+    COALESCE(scope_audit.overall_baseline_numerator, 0)
+      AS overall_baseline_numerator,
+    COALESCE(scope_audit.overall_current_row_count, 0)
+      AS overall_current_row_count,
+    COALESCE(scope_audit.overall_baseline_row_count, 0)
+      AS overall_baseline_row_count,
+    COALESCE(scope_audit.overall_duplicate_row_count, 0)
+      AS overall_duplicate_row_count,
+    COALESCE(scope_audit.overall_invalid_metric_row_count, 0)
+      AS overall_invalid_metric_row_count
+  FROM quadrants
+  JOIN scope_audit
+    ON quadrants.join_key = scope_audit.join_key
+  LEFT JOIN bucket_aggregates
+    ON quadrants.quadrant = bucket_aggregates.quadrant
+  ORDER BY quadrants.sort_order
+output:
+  date_column: analysis_date
+  dimensions: [game_type, left_game_id, right_reserve_value, quadrant]
+  columns:
+    analysis_date: date
+    game_type: string
+    left_game_id: integer
+    right_reserve_value: integer
+    quadrant: string
+    baseline_day_count: integer
+    current_denominator: integer
+    baseline_denominator: integer
+    current_numerator: integer
+    baseline_numerator: integer
+    current_row_count: integer
+    baseline_row_count: integer
+    duplicate_row_count: integer
+    invalid_metric_row_count: integer
+    overall_current_denominator: integer
+    overall_baseline_denominator: integer
+    overall_current_numerator: integer
+    overall_baseline_numerator: integer
+    overall_current_row_count: integer
+    overall_baseline_row_count: integer
+    overall_duplicate_row_count: integer
+    overall_invalid_metric_row_count: integer
+quality:
+  max_rows: 4
+  row_limit_exclusive: 250
+  baseline_day_count: 7
+  marginal_rehook_tolerance: 0.000001
+  required_quadrants: [BOTH, LEFT_ONLY, RIGHT_ONLY, NEITHER]
+  duplicate_row_count_must_equal: 0
+  invalid_metric_row_count_must_equal: 0

@@ -27,9 +27,8 @@ plans:
       - id: cross_dimension_overlap
         priority: 3
         query_cost: 1
-        runtime_status: disabled
-        selector: null
-        reason: overlap_query_contract_unavailable
+        runtime_status: enabled
+        selector: cross_dimension_overlap_v1
       - id: same_day_version_quasi_experiment
         priority: 4
         query_cost: 1

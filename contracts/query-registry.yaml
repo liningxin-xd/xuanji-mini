@@ -114,6 +114,24 @@ game_background:
     - transition_evidence
     - source_snapshot_dt
 
+cross_dimension_overlap:
+  query:
+    path: references/queries/download-cross-dimension-overlap.yaml
+  data_sources:
+    - tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d
+  protected_tokens:
+    - device_id
+    - game_id
+    - is_reserve_auto_download
+    - metric_denominator
+    - metric_numerator
+    - grain_row_count
+    - invalid_metric_row
+    - BOTH
+    - LEFT_ONLY
+    - RIGHT_ONLY
+    - NEITHER
+
 dimensions:
   download:
     is_reserve_auto_download:
