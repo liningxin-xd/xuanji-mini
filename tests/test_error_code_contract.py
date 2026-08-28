@@ -1,3 +1,4 @@
+import re
 import shutil
 import tempfile
 import unittest
@@ -10,6 +11,37 @@ from runtime.query_builder import QueryBuilder
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _count_distinct_top_level_commas(sql: str) -> list[int]:
+    result = []
+    marker = re.compile(r"\bCOUNT\s*\(\s*DISTINCT\b", re.IGNORECASE)
+    for match in marker.finditer(sql):
+        depth = 0
+        commas = 0
+        quote = None
+        index = match.end()
+        while index < len(sql):
+            character = sql[index]
+            if quote is not None:
+                if character == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    quote = None
+            elif character in {"'", '"', "`"}:
+                quote = character
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    result.append(commas)
+                    break
+                depth -= 1
+            elif character == "," and depth == 0:
+                commas += 1
+            index += 1
+    return result
 
 
 class ErrorCodeContractTest(unittest.TestCase):
@@ -118,6 +150,29 @@ class ErrorCodeContractTest(unittest.TestCase):
         self.assertNotIn("recovery", built.sql.lower())
         self.assertNotIn("final_failure", built.sql.lower())
         self.assertNotIn("action_args, '$.info'", built.sql)
+
+    def test_maxcompute_query_specs_use_single_expression_count_distinct(self):
+        self.assertEqual(
+            [1],
+            _count_distinct_top_level_commas(
+                "SELECT COUNT(DISTINCT device_id, game_id) FROM events"
+            ),
+        )
+        for path in sorted((ROOT / "references/queries").glob("*.yaml")):
+            query_spec = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if query_spec.get("database_type") != "MaxCompute":
+                continue
+            sql = query_spec.get("sql")
+            if not isinstance(sql, str):
+                continue
+            with self.subTest(path=path.name):
+                self.assertTrue(
+                    all(
+                        comma_count == 0
+                        for comma_count in _count_distinct_top_level_commas(sql)
+                    ),
+                    "ordinary COUNT(DISTINCT ...) must have one expression",
+                )
 
     def test_source_contract_preserves_entity_and_redaction_boundaries(self):
         source = self.contracts.error_code_capability("download", "app")[

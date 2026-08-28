@@ -149,49 +149,95 @@ sql: |
       MAX(overall_baseline_error_events) AS overall_baseline_error_events
     FROM classified_codes
     GROUP BY scope, focus_game_id, bucket_kind, output_error_code
-  ), bucket_metrics AS (
+  ), bucket_event_rows AS (
     SELECT
       events.scope,
       events.focus_game_id,
       codes.bucket_kind,
       codes.output_error_code AS error_code,
-      SUM(CASE WHEN events.dt = ${business_date} THEN 1 ELSE 0 END)
-        AS current_error_events,
-      SUM(CASE WHEN events.dt < ${business_date} THEN 1 ELSE 0 END)
-        AS baseline_error_events,
-      COUNT(DISTINCT
-        CASE WHEN events.dt = ${business_date} THEN events.device_id END,
-        CASE WHEN events.dt = ${business_date} THEN events.game_id END
-      ) AS current_affected_entities,
-      COUNT(DISTINCT
-        CASE WHEN events.dt < ${business_date} THEN events.dt END,
-        CASE WHEN events.dt < ${business_date} THEN events.device_id END,
-        CASE WHEN events.dt < ${business_date} THEN events.game_id END
-      ) AS baseline_affected_entities
+      events.dt,
+      events.device_id,
+      events.game_id
     FROM scoped_events events
     JOIN classified_codes codes
       ON events.scope = codes.scope
       AND events.focus_game_id = codes.focus_game_id
       AND events.error_code = codes.error_code
+  ), bucket_event_counts AS (
+    SELECT
+      scope,
+      focus_game_id,
+      bucket_kind,
+      error_code,
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS current_error_events,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS baseline_error_events
+    FROM bucket_event_rows
     GROUP BY
+      scope,
+      focus_game_id,
+      bucket_kind,
+      error_code
+  ), bucket_entity_rows AS (
+    SELECT DISTINCT
+      scope,
+      focus_game_id,
+      bucket_kind,
+      error_code,
+      dt,
+      device_id,
+      game_id
+    FROM bucket_event_rows
+  ), bucket_entity_counts AS (
+    SELECT
+      scope,
+      focus_game_id,
+      bucket_kind,
+      error_code,
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS current_affected_entities,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS baseline_affected_entities
+    FROM bucket_entity_rows
+    GROUP BY
+      scope,
+      focus_game_id,
+      bucket_kind,
+      error_code
+  ), bucket_metrics AS (
+    SELECT
       events.scope,
       events.focus_game_id,
-      codes.bucket_kind,
-      codes.output_error_code
+      events.bucket_kind,
+      events.error_code,
+      events.current_error_events,
+      events.baseline_error_events,
+      entities.current_affected_entities,
+      entities.baseline_affected_entities
+    FROM bucket_event_counts events
+    JOIN bucket_entity_counts entities
+      ON events.scope = entities.scope
+      AND events.focus_game_id = entities.focus_game_id
+      AND events.bucket_kind = entities.bucket_kind
+      AND events.error_code = entities.error_code
+  ), scope_entity_rows AS (
+    SELECT DISTINCT
+      scope,
+      focus_game_id,
+      dt,
+      device_id,
+      game_id
+    FROM scoped_events
   ), scope_totals AS (
     SELECT
       scope,
       focus_game_id,
-      COUNT(DISTINCT
-        CASE WHEN dt = ${business_date} THEN device_id END,
-        CASE WHEN dt = ${business_date} THEN game_id END
-      ) AS overall_current_affected_entities,
-      COUNT(DISTINCT
-        CASE WHEN dt < ${business_date} THEN dt END,
-        CASE WHEN dt < ${business_date} THEN device_id END,
-        CASE WHEN dt < ${business_date} THEN game_id END
-      ) AS overall_baseline_affected_entities
-    FROM scoped_events
+      SUM(CASE WHEN dt = ${business_date} THEN 1 ELSE 0 END)
+        AS overall_current_affected_entities,
+      SUM(CASE WHEN dt < ${business_date} THEN 1 ELSE 0 END)
+        AS overall_baseline_affected_entities
+    FROM scope_entity_rows
     GROUP BY scope, focus_game_id
   ), collapsed_buckets AS (
     SELECT
