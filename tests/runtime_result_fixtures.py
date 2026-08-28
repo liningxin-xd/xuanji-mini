@@ -71,6 +71,18 @@ def raw_result_for_ticket(
             "columns": list(columns),
             "rows": _secondary_bucket_rows(columns, state, secondary),
         }
+    if ticket["step_id"] == "error_code":
+        error_code = next(
+            step
+            for step in state["post_primary"]["steps"]
+            if step["id"] == "error_code"
+        )
+        binding = runner._binding_from_step(error_code)
+        columns, _ = runner.contracts.query_spec_result_contract(binding)
+        return {
+            "columns": list(columns),
+            "rows": _error_code_rows(columns, state, error_code),
+        }
     step = state["steps"][state["cursor"]]
     binding = runner._binding_from_step(step)
     schema = runner.contracts.result_schema(binding.result_schema_id)
@@ -225,6 +237,83 @@ def _secondary_bucket_rows(
         }
         row.update({name: item for name, item in values.items() if name in row})
         rows.append(row)
+    return rows
+
+
+def _error_code_rows(
+    columns: dict[str, str],
+    state: dict[str, Any],
+    error_code: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for scope in error_code["frozen_scopes"]:
+        current_total = scope["current_affected_entities"]
+        baseline_total = scope["baseline_affected_entities"]
+        current_code_entities = current_total // 3
+        baseline_code_entities = baseline_total // 4
+        buckets = (
+            (
+                "error_code",
+                "0200",
+                current_code_entities,
+                baseline_code_entities,
+                current_code_entities + 20,
+                baseline_code_entities + 30,
+            ),
+            (
+                "residual",
+                "__other_below_threshold__",
+                current_total - current_code_entities,
+                baseline_total - baseline_code_entities,
+                current_total - current_code_entities + 30,
+                baseline_total - baseline_code_entities + 40,
+            ),
+        )
+        overall_current_events = sum(item[4] for item in buckets)
+        overall_baseline_events = sum(item[5] for item in buckets)
+        for bucket_kind, code, current_entities, baseline_entities, current_events, baseline_events in buckets:
+            row = _empty_row(columns)
+            row.update(
+                {
+                    "analysis_date": state["analysis_date"],
+                    "scope": scope["scope"],
+                    "focus_game_id": scope["focus_game_id"],
+                    "bucket_kind": bucket_kind,
+                    "error_code": code,
+                    "collapsed_source_bucket_count": 1,
+                    "source_bucket_count": len(buckets),
+                    "baseline_day_count": 7,
+                    "current_error_events": current_events,
+                    "baseline_error_events": baseline_events,
+                    "current_affected_entities": current_entities,
+                    "baseline_affected_entities": baseline_entities,
+                    "current_business_denominator": scope[
+                        "current_business_denominator"
+                    ],
+                    "baseline_business_denominator": scope[
+                        "baseline_business_denominator"
+                    ],
+                    "current_entity_rate": current_entities
+                    / scope["current_business_denominator"],
+                    "baseline_entity_rate": baseline_entities
+                    / scope["baseline_business_denominator"],
+                    "current_repeats_per_entity": (
+                        current_events / current_entities
+                        if current_entities > 0
+                        else None
+                    ),
+                    "baseline_repeats_per_entity": (
+                        baseline_events / baseline_entities
+                        if baseline_entities > 0
+                        else None
+                    ),
+                    "overall_current_error_events": overall_current_events,
+                    "overall_baseline_error_events": overall_baseline_events,
+                    "overall_current_affected_entities": current_total,
+                    "overall_baseline_affected_entities": baseline_total,
+                }
+            )
+            rows.append(row)
     return rows
 
 

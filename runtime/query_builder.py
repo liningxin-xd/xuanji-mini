@@ -151,6 +151,63 @@ class QueryBuilder:
                 )
             return
 
+        if config.get("post_primary") == "error_code":
+            frozen = config.get("query_parameters")
+            if not isinstance(frozen, dict):
+                raise QueryBuildError("error-code frozen parameters are missing")
+            expected = {"business_date": business_date, **frozen}
+            if parameters != expected:
+                raise QueryBuildError("error-code query parameters changed")
+            required_fragments = (
+                "behavior_type = 'game_download_failed'",
+                "action = 'appDownloadNewFailed'",
+                "platform = 'ANDROID'",
+                "game_type = 'app'",
+                "is_risk_device = 0",
+                "__source_contract_mismatch__",
+                "unmatched_code",
+                "__other_below_threshold__",
+            )
+            if any(fragment.lower() not in normalized.lower() for fragment in required_fragments):
+                raise QueryBuildError("error-code SQL changed its registered source")
+            if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
+                raise QueryBuildError("error-code partition range is missing")
+            focus_game_id = frozen["focus_game_id"]
+            focus_patterns = (
+                rf"(?i)\b{focus_game_id}\s+AS\s+focus_game_id\b",
+                rf"(?i)\bWHERE\s+{focus_game_id}\s*>\s*0\b",
+                rf"(?i)\bAND\s+game_id\s*=\s*{focus_game_id}\b",
+            )
+            if any(re.search(pattern, normalized) is None for pattern in focus_patterns):
+                raise QueryBuildError("error-code focus game identity is missing")
+            denominator_pairs = (
+                (
+                    frozen["overall_current_business_denominator"],
+                    frozen["focus_current_business_denominator"],
+                    "current_business_denominator",
+                ),
+                (
+                    frozen["overall_baseline_business_denominator"],
+                    frozen["focus_baseline_business_denominator"],
+                    "baseline_business_denominator",
+                ),
+            )
+            for overall, focus, alias in denominator_pairs:
+                pattern = (
+                    rf"(?is)CASE\s+WHEN\s+metrics\.scope\s*=\s*'overall'\s+"
+                    rf"THEN\s+{overall}\s+ELSE\s+{focus}\s+END\s+AS\s+{alias}"
+                )
+                if re.search(pattern, normalized) is None:
+                    raise QueryBuildError(
+                        f"error-code SQL changed frozen {alias}"
+                    )
+            if re.search(
+                r"(?i)\b(recovered|recovery|final_failure|final_failed)\b",
+                normalized,
+            ):
+                raise QueryBuildError("error-code SQL cannot infer recovery")
+            return
+
         if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
             raise QueryBuildError("registered partition range filter is missing")
         if not re.search(r"(?i)\bplatform\s*=\s*'ANDROID'", normalized):

@@ -1,0 +1,87 @@
+version: 1
+module: error_code
+
+evidence_policy:
+  allowed_source: frozen_root_and_attribution_evidence
+  module_source_scan_before_trigger: false
+  retry_signal_may_trigger: false
+
+routes:
+  - chain: download
+    game_type: app
+    metric: 下载完成率
+    capability: download_app
+    status: disabled
+    reason: explicit_failed_signal_not_frozen
+
+  - chain: download
+    game_type: app
+    metric: 下载失败率
+    capability: download_app
+    status: enabled
+    trigger_id: download_app_failed_entity_rate
+    requirements:
+      legal_primary_candidate: true
+      evidence_source: frozen_root_metric
+      root_adverse_delta_bp:
+        operator: at_least
+        value: 5
+      current_affected_entity_count:
+        operator: at_least
+        value: 100
+
+  - chain: download
+    game_type: app
+    metric: 下载失败次数比率
+    capability: download_app
+    status: disabled
+    reason: affected_entity_count_not_frozen
+
+  - chain: download
+    game_type: app
+    metric: 下载人为停止率
+    capability: download_app
+    status: disabled
+    reason: explicit_failed_signal_not_frozen
+
+  - chain: download
+    game_type: sandbox
+    metric: 下载完成率
+    capability: download_sandbox
+    status: disabled
+    reason: download_sandbox_source_unregistered
+
+  - chain: download
+    game_type: sandbox
+    metric: 下载失败率
+    capability: download_sandbox
+    status: disabled
+    reason: download_sandbox_source_unregistered
+
+  - chain: download
+    game_type: sandbox
+    metric: 下载失败次数比率
+    capability: download_sandbox
+    status: disabled
+    reason: download_sandbox_source_unregistered
+
+  - chain: download
+    game_type: sandbox
+    metric: 下载人为停止率
+    capability: download_sandbox
+    status: disabled
+    reason: download_sandbox_source_unregistered
+
+  - chain: install
+    game_type: app
+    metric: 下载安装完成率
+    capability: install_app
+    status: disabled
+    reason: install_event_semantics_candidate_incomplete
+
+  - chain: install
+    game_type: sandbox
+    metric: 下载安装完成率
+    capability: install_sandbox
+    status: disabled
+    reason: install_sandbox_source_unregistered

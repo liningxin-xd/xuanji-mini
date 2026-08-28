@@ -49,7 +49,9 @@ class ProductionDViewExecutor:
     _TEXT_COLUMNS = {
         "analysis_date",
         "game_type",
+        "scope",
         "bucket_kind",
+        "error_code",
         "dimension_value",
         "dimension_label",
     }

@@ -82,6 +82,8 @@ class _FixtureDViewClient:
         *,
         game_candidate: bool = False,
         background_failure: bool = False,
+        root_current_rate: float = 0.79,
+        root_historical_rate: float = 0.80,
     ):
         self._settings = settings
         self._repository_root = repository_root
@@ -89,8 +91,8 @@ class _FixtureDViewClient:
         self._background_failure = background_failure
         self._query_counts: dict[str, int] = {}
         self._root_executor = FixtureRootExecutor(
-            current_rate=0.79,
-            historical_rate=0.80,
+            current_rate=root_current_rate,
+            historical_rate=root_historical_rate,
         )
 
     @asynccontextmanager
@@ -670,6 +672,110 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ):
                 self.assertNotIn(forbidden, transcript)
                 self.assertNotIn(forbidden, structured_logs)
+
+    async def test_error_code_calibration_is_bound_to_signed_handoff(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(
+                settings,
+                Path(__file__).parents[1],
+                game_candidate=True,
+                root_current_rate=0.81,
+                root_historical_rate=0.80,
+            )
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            task_id = "daily-push-20260827T020000Z-0123456789ab-" + "b" * 64
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": (
+                        "ads_dmg_quality_platform_download_chain_monitor_1d"
+                    ),
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载失败率】最近1天_高于3%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">",
+                        "expectValue": 0.03,
+                        "property": "game_download_failed_rate_1d",
+                    }
+                ],
+            }
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id=task_id, dqc_payload=payload
+                )
+                self.assertEqual("write_conclusion", result["action"])
+                facts = result["writer_pack"]["error_code_calibration"]
+                self.assertLessEqual(len(facts), 5)
+                self.assertEqual({"0200"}, {fact["code"] for fact in facts})
+                marker = "错误码 0200 仅用于校准既有下载失败率结论。"
+                completed = await runtime.finalize(
+                    task_id=task_id,
+                    investigation_id=result["investigation_id"],
+                    writer_patch={
+                        "summary": marker,
+                        "finding_texts": {
+                            candidate["candidate_id"]: (
+                                f"{candidate['label']} 达到冻结候选门槛。"
+                            )
+                            for candidate in result["writer_pack"]["candidates"]
+                        },
+                        "evidence_limits": [],
+                        "recommended_action": "复核该错误码对应实体率和重试变化。",
+                    },
+                )
+
+            preview = completed["analysis_preview"]
+            handoff = completed["pipeline_handoff"]
+            self.assertEqual("task_complete", completed["action"])
+            self.assertIn(marker, json.dumps(preview, ensure_ascii=False))
+            self.assertEqual(task_id, handoff["task_id"])
+            self.assertEqual(canonical_sha256(payload), handoff["payload_sha256"])
+            self.assertEqual(
+                canonical_sha256(preview), handoff["analysis_preview_sha256"]
+            )
+            self.assertEqual(
+                completed["validation_receipt"]["validation_receipt_sha256"],
+                handoff["validation_receipt_sha256"],
+            )
+            signer = PipelineHandoffSigner(
+                receipt_key_id=settings.receipt_key_id,
+                receipt_secret=settings.receipt_secret,
+            )
+            public_key = Ed25519PublicKey.from_public_bytes(
+                _decode_base64url(signer.public_key_base64url)
+            )
+            unsigned = dict(handoff)
+            signature = _decode_base64url(unsigned.pop("signature"))
+            public_key.verify(
+                signature,
+                json.dumps(
+                    unsigned,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8"),
+            )
+            encoded = json.dumps([result, completed], ensure_ascii=False)
+            for forbidden in (
+                "SELECT ",
+                "WITH ",
+                "query_id",
+                "raw_result",
+                "action_args",
+                "/private/tmp/",
+            ):
+                self.assertNotIn(forbidden, encoded)
+            self.assertIn('"attribution_query_count":10', "\n".join(logs.output))
 
 
 class ValidatedResultSinkTest(unittest.TestCase):

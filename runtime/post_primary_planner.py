@@ -95,6 +95,12 @@ class PostPrimaryPlanner:
             "secondary_relations_sha256": state.get(
                 "secondary_relations_sha256"
             ),
+            "error_code_capabilities_sha256": state.get(
+                "error_code_capabilities_sha256"
+            ),
+            "error_code_triggers_sha256": state.get(
+                "error_code_triggers_sha256"
+            ),
             "chain": state["chain"],
             "game_type": state["game_type"],
             "metric": state["metric"],

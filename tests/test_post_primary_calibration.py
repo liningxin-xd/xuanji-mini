@@ -187,7 +187,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         )
         profile = contracts.analysis_profile("primary_v2")
         self.assertEqual(
-            ["counterfactual", "secondary", "game_background"],
+            ["counterfactual", "secondary", "game_background", "error_code"],
             profile["enabled_post_primary_steps"],
         )
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
