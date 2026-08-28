@@ -249,6 +249,11 @@ class ErrorCodeResultValidator:
                 fact["code"],
             )
         )
+        overall_facts = [fact for fact in facts if fact["scope"] == "overall"]
+        focus_facts = [
+            fact for fact in facts if fact["scope"] == "focus_game"
+        ]
+        selected_facts = overall_facts[:3] + focus_facts[:2]
 
         limit_codes = list(dictionary_limits)
         if not code_rows:
@@ -258,7 +263,7 @@ class ErrorCodeResultValidator:
         if any(row["bucket_kind"] == "residual" for row in rows):
             limit_codes.append("below_threshold_codes_collapsed")
         return ErrorCodeOutcome(
-            tuple(facts[:5]), tuple(dict.fromkeys(limit_codes))
+            tuple(selected_facts), tuple(dict.fromkeys(limit_codes))
         )
 
     @staticmethod

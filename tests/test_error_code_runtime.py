@@ -177,6 +177,92 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
             )
         raw["rows"] = rows
 
+    @staticmethod
+    def _set_competing_error_code_facts(raw: dict) -> None:
+        rows_by_scope = {}
+        for row in raw["rows"]:
+            rows_by_scope.setdefault(
+                (row["scope"], row["focus_game_id"]), []
+            ).append(row)
+
+        expanded = []
+        for (scope, _), rows in rows_by_scope.items():
+            code_template = next(
+                row for row in rows if row["bucket_kind"] == "error_code"
+            )
+            residual = copy.deepcopy(
+                next(row for row in rows if row["bucket_kind"] == "residual")
+            )
+            code_count = 5 if scope == "overall" else 2
+            current_entities = (
+                min(
+                    code_template["overall_current_affected_entities"],
+                    max(1, code_template["current_business_denominator"] // 10),
+                )
+                if scope == "overall"
+                else 1
+            )
+            scope_rows = []
+            for offset in range(code_count):
+                row = copy.deepcopy(code_template)
+                row.update(
+                    {
+                        "error_code": str(1000 + offset),
+                        "source_bucket_count": code_count + 1,
+                        "current_error_events": max(100, current_entities),
+                        "baseline_error_events": 0,
+                        "current_affected_entities": current_entities,
+                        "baseline_affected_entities": 0,
+                        "current_entity_rate": current_entities
+                        / row["current_business_denominator"],
+                        "baseline_entity_rate": 0.0,
+                        "current_repeats_per_entity": max(
+                            100, current_entities
+                        )
+                        / current_entities,
+                        "baseline_repeats_per_entity": None,
+                    }
+                )
+                scope_rows.append(row)
+
+            residual.update(
+                {
+                    "source_bucket_count": code_count + 1,
+                    "current_error_events": residual[
+                        "overall_current_affected_entities"
+                    ],
+                    "baseline_error_events": residual[
+                        "overall_baseline_affected_entities"
+                    ],
+                    "current_affected_entities": residual[
+                        "overall_current_affected_entities"
+                    ],
+                    "baseline_affected_entities": residual[
+                        "overall_baseline_affected_entities"
+                    ],
+                    "current_entity_rate": residual[
+                        "overall_current_affected_entities"
+                    ]
+                    / residual["current_business_denominator"],
+                    "baseline_entity_rate": residual[
+                        "overall_baseline_affected_entities"
+                    ]
+                    / residual["baseline_business_denominator"],
+                    "current_repeats_per_entity": 1.0,
+                    "baseline_repeats_per_entity": 1.0,
+                }
+            )
+            scope_rows.append(residual)
+            current_events = sum(row["current_error_events"] for row in scope_rows)
+            baseline_events = sum(
+                row["baseline_error_events"] for row in scope_rows
+            )
+            for row in scope_rows:
+                row["overall_current_error_events"] = current_events
+                row["overall_baseline_error_events"] = baseline_events
+            expanded.extend(scope_rows)
+        raw["rows"] = expanded
+
     def test_eligible_failure_rate_executes_one_calibration_query(self):
         runner, query_count, tickets = self._complete("error-code-eligible")
         self.assertEqual(10, query_count)
@@ -212,6 +298,29 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
             "action_args",
         ):
             self.assertNotIn(forbidden, encoded)
+
+    def test_writer_pack_preserves_focus_facts_when_overall_has_five_stronger_codes(self):
+        runner, _, _ = self._complete(
+            "error-code-focus-budget",
+            error_code_mutator=self._set_competing_error_code_facts,
+        )
+        facts = runner.load_state("error-code-focus-budget")["post_primary"][
+            "steps"
+        ][3]["facts"]
+        overall = [fact for fact in facts if fact["scope"] == "overall"]
+        focus = [fact for fact in facts if fact["scope"] == "focus_game"]
+        self.assertEqual(3, len(overall))
+        self.assertEqual(2, len(focus))
+        self.assertGreater(
+            min(fact["entity_rate_delta_bp"] for fact in overall),
+            max(fact["entity_rate_delta_bp"] for fact in focus),
+        )
+        self.assertEqual(
+            facts,
+            runner.build_writer_pack("error-code-focus-budget")[
+                "error_code_calibration"
+            ],
+        )
 
     def test_three_background_queries_reach_the_total_budget_of_twelve(self):
         runner, query_count, tickets = self._complete(
