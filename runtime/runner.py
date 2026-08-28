@@ -174,6 +174,11 @@ class AttributionRunner:
                     if self.analysis_profile == "primary_v2"
                     else None
                 ),
+                "enhancement_priority_sha256": (
+                    self.contracts.enhancement_priority_sha256
+                    if self.analysis_profile == "primary_v2"
+                    else None
+                ),
             }
             mismatches = {
                 key: {"expected": value, "actual": state.get(key)}
@@ -273,6 +278,11 @@ class AttributionRunner:
             ),
             "error_code_triggers_sha256": (
                 self.contracts.error_code_triggers_sha256
+                if self.analysis_profile == "primary_v2"
+                else None
+            ),
+            "enhancement_priority_sha256": (
+                self.contracts.enhancement_priority_sha256
                 if self.analysis_profile == "primary_v2"
                 else None
             ),
@@ -754,6 +764,19 @@ class AttributionRunner:
                     },
                 }
             )
+            enhancement_plan = post_primary.get("enhancement_plan")
+            if isinstance(enhancement_plan, dict):
+                evidence["post_primary"]["enhancement_plan"] = {
+                    field: deepcopy(enhancement_plan[field])
+                    for field in (
+                        "plan_id",
+                        "frozen_evidence_sha256",
+                        "max_query_modules",
+                        "query_module_count",
+                        "selected_modules",
+                        "evidence_limits",
+                    )
+                }
             if secondary_steps:
                 evidence["secondary_steps"] = secondary_steps
         return evidence
@@ -1144,6 +1167,11 @@ class AttributionRunner:
             ),
             "error_code_triggers_sha256": (
                 self.contracts.error_code_triggers_sha256
+                if analysis_profile == "primary_v2"
+                else None
+            ),
+            "enhancement_priority_sha256": (
+                self.contracts.enhancement_priority_sha256
                 if analysis_profile == "primary_v2"
                 else None
             ),

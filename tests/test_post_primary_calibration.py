@@ -193,6 +193,9 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
         self.assertEqual(5, plan["max_additional_queries"])
         self.assertEqual(
+            "direction_enhancement_v1", plan["enhancement_priority_plan"]
+        )
+        self.assertEqual(
             ["counterfactual", "secondary", "game_background", "error_code"],
             [step["id"] for step in plan["steps"]],
         )
@@ -219,6 +222,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             "analysis_profile",
             "analysis_profile_sha256",
             "post_primary_plan_sha256",
+            "enhancement_priority_sha256",
             "post_primary",
         ):
             state.pop(field, None)
@@ -248,6 +252,12 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         self.assertEqual(1.0, pack["counterfactual"]["restoration_ratio"])
         self.assertTrue(pack["counterfactual"]["dominant"])
         self.assertEqual("completed", state["post_primary"]["status"])
+        self.assertEqual(
+            [], state["post_primary"]["enhancement_plan"]["selected_modules"]
+        )
+        self.assertEqual(
+            0, state["post_primary"]["enhancement_plan"]["query_module_count"]
+        )
         self.assertEqual(
             ["succeeded", "succeeded", "succeeded", "skipped_by_policy"],
             [step["status"] for step in state["post_primary"]["steps"]],

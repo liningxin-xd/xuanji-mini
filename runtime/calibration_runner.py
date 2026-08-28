@@ -6,6 +6,7 @@ from typing import Any
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
 from .error_code_selector import ErrorCodeSelectionError, ErrorCodeSelector
+from .enhancement_planner import EnhancementPlanError, EnhancementPlanner
 from .game_background_selector import (
     GameBackgroundSelectionError,
     GameBackgroundSelector,
@@ -26,6 +27,7 @@ class CalibrationRunner:
         self.secondary_selector = SecondarySelector(contracts)
         self.game_background_selector = GameBackgroundSelector(contracts)
         self.error_code_selector = ErrorCodeSelector(contracts)
+        self.enhancement_planner = EnhancementPlanner(contracts)
 
     def create_plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
         return self.planner.create(state)
@@ -41,6 +43,16 @@ class CalibrationRunner:
         except PostPrimaryPlanError as exc:
             raise CalibrationError(str(exc)) from exc
         self._validate_counterfactual(state, post_primary)
+        if post_primary.get("enhancement_plan") is not None:
+            _, expected_enhancement_plan = self._select_enhancements(
+                state, post_primary
+            )
+            if canonical_sha256(post_primary["enhancement_plan"]) != (
+                canonical_sha256(expected_enhancement_plan)
+            ):
+                raise CalibrationError(
+                    "enhancement plan does not match frozen selector evidence"
+                )
         if post_primary["status"] == "completed":
             self._validate_completed(state, post_primary)
             return deepcopy(post_primary)
@@ -83,11 +95,34 @@ class CalibrationRunner:
                     break
                 continue
             if step["id"] == "error_code":
+                outcome, enhancement_plan = self._select_enhancements(state, result)
+                result["enhancement_plan"] = enhancement_plan
                 try:
-                    outcome = self.error_code_selector.select(state, result)
-                except ErrorCodeSelectionError as exc:
+                    module = self.enhancement_planner.module(
+                        enhancement_plan, "error_code"
+                    )
+                except EnhancementPlanError as exc:
                     raise CalibrationError(str(exc)) from exc
-                step.update(outcome)
+                if module["status"] == "selected":
+                    if outcome["status"] != "planned":
+                        raise CalibrationError(
+                            "selected error-code enhancement was not triggered"
+                        )
+                    step.update(outcome)
+                elif outcome["status"] == "skipped_by_policy":
+                    step.update(outcome)
+                elif module["status"] == "skipped_by_budget":
+                    step.update(
+                        {
+                            "status": "skipped_by_policy",
+                            "reason": module["reason"],
+                            "limit_code": module["limit_code"],
+                        }
+                    )
+                else:
+                    raise CalibrationError(
+                        "error-code enhancement allocation is inconsistent"
+                    )
                 if step["status"] == "planned":
                     break
                 continue
@@ -233,11 +268,20 @@ class CalibrationRunner:
                     "game background aggregate status is inconsistent"
                 )
 
-        try:
-            error_code_selection = self.error_code_selector.select(
-                state, post_primary
+        error_code_selection, expected_enhancement_plan = self._select_enhancements(
+            state, post_primary
+        )
+        if canonical_sha256(post_primary.get("enhancement_plan")) != canonical_sha256(
+            expected_enhancement_plan
+        ):
+            raise CalibrationError(
+                "enhancement plan does not match frozen selector evidence"
             )
-        except ErrorCodeSelectionError as exc:
+        try:
+            error_code_module = self.enhancement_planner.module(
+                expected_enhancement_plan, "error_code"
+            )
+        except EnhancementPlanError as exc:
             raise CalibrationError(str(exc)) from exc
         actual_error_code = post_primary["steps"][3]
         if error_code_selection["status"] == "skipped_by_policy":
@@ -248,7 +292,22 @@ class CalibrationRunner:
                 raise CalibrationError(
                     "error-code skip does not match frozen evidence"
                 )
+        elif error_code_module["status"] == "skipped_by_budget":
+            expected_error_code = {
+                "id": "error_code",
+                "status": "skipped_by_policy",
+                "reason": error_code_module["reason"],
+                "limit_code": error_code_module["limit_code"],
+            }
+            if actual_error_code != expected_error_code:
+                raise CalibrationError(
+                    "error-code budget skip does not match enhancement plan"
+                )
         else:
+            if error_code_module["status"] != "selected":
+                raise CalibrationError(
+                    "triggered error-code enhancement was not allocated"
+                )
             if actual_error_code.get("status") not in {"succeeded", "failed"}:
                 raise CalibrationError("completed error-code step is not terminal")
             for field in (
@@ -262,3 +321,33 @@ class CalibrationRunner:
                     raise CalibrationError(
                         f"error-code {field} does not match frozen evidence"
                     )
+
+    def _select_enhancements(
+        self, state: dict[str, Any], post_primary: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            error_code_selection = self.error_code_selector.select(
+                state, post_primary
+            )
+        except ErrorCodeSelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        status = error_code_selection.get("status")
+        if status not in {"planned", "skipped_by_policy"}:
+            raise CalibrationError("error-code selector returned an invalid status")
+        decision = self.enhancement_planner.selector_decision(
+            module_id="error_code",
+            triggered=status == "planned",
+            reason=(
+                error_code_selection.get("reason")
+                if status == "skipped_by_policy"
+                else None
+            ),
+            frozen_evidence_sha256=post_primary["primary_evidence_sha256"],
+        )
+        try:
+            enhancement_plan = self.enhancement_planner.create(
+                post_primary, {"error_code": decision}
+            )
+        except EnhancementPlanError as exc:
+            raise CalibrationError(str(exc)) from exc
+        return error_code_selection, enhancement_plan

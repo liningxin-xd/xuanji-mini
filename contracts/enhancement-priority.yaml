@@ -1,0 +1,44 @@
+version: 1
+
+plans:
+  direction_enhancement_v1:
+    max_query_modules: 2
+    evidence_policy:
+      allowed_source: frozen_root_and_attribution_evidence
+      module_source_scan_before_trigger: false
+      model_selection_allowed: false
+    excluded_from_query_module_budget:
+      - counterfactual
+      - secondary
+      - game_background
+      - breadth_check
+    modules:
+      - id: install_strict_funnel
+        priority: 1
+        query_cost: 1
+        runtime_status: disabled
+        selector: null
+        reason: install_event_semantics_incomplete
+      - id: error_code
+        priority: 2
+        query_cost: 1
+        runtime_status: enabled
+        selector: error_code_v1
+      - id: cross_dimension_overlap
+        priority: 3
+        query_cost: 1
+        runtime_status: disabled
+        selector: null
+        reason: overlap_query_contract_unavailable
+      - id: same_day_version_quasi_experiment
+        priority: 4
+        query_cost: 1
+        runtime_status: disabled
+        selector: null
+        reason: version_query_contract_unavailable
+      - id: peer_negative_control
+        priority: 5
+        query_cost: 1
+        runtime_status: disabled
+        selector: null
+        reason: peer_query_contract_unavailable

@@ -48,6 +48,7 @@ class PostPrimaryPlanner:
             "profile": profile_name,
             "plan_id": plan_id,
             "primary_evidence_sha256": primary_evidence_sha256,
+            "enhancement_plan": None,
             "status": "executing",
             "steps": steps,
         }
@@ -74,6 +75,24 @@ class PostPrimaryPlanner:
                 raise PostPrimaryPlanError("post-primary step status is invalid")
             if planned["status"] == "skipped_by_policy" and actual != planned:
                 raise PostPrimaryPlanError("disabled post-primary step changed")
+        if "enhancement_plan" not in post_primary:
+            raise PostPrimaryPlanError("post-primary state lacks enhancement plan state")
+        enhancement_plan = post_primary["enhancement_plan"]
+        if enhancement_plan is not None and not isinstance(enhancement_plan, dict):
+            raise PostPrimaryPlanError("post-primary enhancement plan is invalid")
+        error_code = next(step for step in steps if step["id"] == "error_code")
+        if error_code["status"] != "planned" and enhancement_plan is None:
+            raise PostPrimaryPlanError(
+                "scheduled error-code step lacks its enhancement plan"
+            )
+        if enhancement_plan is not None and any(
+            step["status"] in {"planned", "in_progress", "repair_required"}
+            for step in steps
+            if step["id"] in {"counterfactual", "secondary", "game_background"}
+        ):
+            raise PostPrimaryPlanError(
+                "enhancement plan was frozen before prerequisite evidence"
+            )
         if post_primary["status"] == "completed" and any(
             step["status"] in {"planned", "in_progress", "repair_required"}
             for step in steps
@@ -100,6 +119,9 @@ class PostPrimaryPlanner:
             ),
             "error_code_triggers_sha256": state.get(
                 "error_code_triggers_sha256"
+            ),
+            "enhancement_priority_sha256": state.get(
+                "enhancement_priority_sha256"
             ),
             "chain": state["chain"],
             "game_type": state["game_type"],

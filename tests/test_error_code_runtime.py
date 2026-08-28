@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.runner import AttributionRunner
+from runtime.runner import AttributionRunner, RunnerError
 from tests.runtime_result_fixtures import (
     raw_result_for_ticket,
     self_reported_result_event,
@@ -273,6 +273,10 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
         self.assertEqual(12345, error_tickets[0]["parameters"]["focus_game_id"])
 
         state = runner.load_state("error-code-eligible")
+        enhancement_plan = state["post_primary"]["enhancement_plan"]
+        self.assertEqual(["error_code"], enhancement_plan["selected_modules"])
+        self.assertEqual(1, enhancement_plan["query_module_count"])
+        self.assertEqual([], enhancement_plan["evidence_limits"])
         error_code = state["post_primary"]["steps"][3]
         self.assertEqual("succeeded", error_code["status"])
         self.assertLessEqual(len(error_code["facts"]), 5)
@@ -287,6 +291,15 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
         )
 
         pack = runner.build_writer_pack("error-code-eligible")
+        self.assertEqual(
+            {
+                "plan_id": "direction_enhancement_v1",
+                "max_query_modules": 2,
+                "query_module_count": 1,
+                "selected_modules": ["error_code"],
+            },
+            pack["enhancement_plan"],
+        )
         self.assertEqual(error_code["facts"], pack["error_code_calibration"])
         encoded = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))
         self.assertLessEqual(len(encoded.encode("utf-8")), 12 * 1024)
@@ -382,6 +395,15 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
         decision = selector.select(unsupported, unsupported["post_primary"])
         self.assertEqual("skipped_by_policy", decision["status"])
         self.assertEqual("explicit_failed_signal_not_frozen", decision["reason"])
+
+    def test_enhancement_plan_tampering_fails_closed_on_resume(self):
+        runner, _, _ = self._complete("enhancement-plan-tamper")
+        state = runner.load_state("enhancement-plan-tamper")
+        state["post_primary"]["enhancement_plan"]["selected_modules"] = []
+        runner._write_state(state)
+
+        with self.assertRaisesRegex(RunnerError, "enhancement plan"):
+            runner.next_action("enhancement-plan-tamper")
 
     def test_query_failure_details_stay_private(self):
         runner, _, _ = self._complete(

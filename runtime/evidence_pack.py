@@ -90,6 +90,20 @@ class EvidencePackBuilder:
                 "completed"
             ):
                 raise EvidencePackError("primary_v2 writer pack requires calibration")
+            enhancement_plan = post_primary.get("enhancement_plan")
+            if not isinstance(enhancement_plan, dict):
+                raise EvidencePackError(
+                    "primary_v2 writer pack requires an enhancement plan"
+                )
+            pack["enhancement_plan"] = {
+                "plan_id": enhancement_plan["plan_id"],
+                "max_query_modules": enhancement_plan["max_query_modules"],
+                "query_module_count": enhancement_plan["query_module_count"],
+                "selected_modules": list(enhancement_plan["selected_modules"]),
+            }
+            for code in enhancement_plan["evidence_limits"]:
+                if code not in evidence_limits:
+                    evidence_limits.append(code)
             pack["post_primary_steps"] = []
             for step in post_primary.get("steps", []):
                 if step.get("reason") == "profile_step_disabled":
