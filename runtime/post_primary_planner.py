@@ -88,7 +88,8 @@ class PostPrimaryPlanner:
         if enhancement_plan is not None and any(
             step["status"] in {"planned", "in_progress", "repair_required"}
             for step in steps
-            if step["id"] in {"counterfactual", "secondary", "game_background"}
+            if step["id"]
+            in {"counterfactual", "secondary", "game_background", "breadth_check"}
         ):
             raise PostPrimaryPlanError(
                 "enhancement plan was frozen before prerequisite evidence"
@@ -138,6 +139,7 @@ class PostPrimaryPlanner:
                         "status",
                         "candidate_count",
                         "candidates",
+                        "breadth_buckets",
                         "root_current_value",
                         "root_baseline_value",
                         "root_delta",

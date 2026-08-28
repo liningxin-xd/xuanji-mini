@@ -15,4 +15,5 @@ profiles:
       - counterfactual
       - secondary
       - game_background
+      - breadth_check
       - error_code

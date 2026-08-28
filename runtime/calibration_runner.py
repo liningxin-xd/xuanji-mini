@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .breadth_selector import BreadthSelectionError, BreadthSelector
 from .contracts import RepositoryContracts, canonical_sha256
 from .counterfactual import CounterfactualCalculator, CounterfactualError
 from .error_code_selector import ErrorCodeSelectionError, ErrorCodeSelector
@@ -26,6 +27,7 @@ class CalibrationRunner:
         self.counterfactual = CounterfactualCalculator(contracts)
         self.secondary_selector = SecondarySelector(contracts)
         self.game_background_selector = GameBackgroundSelector(contracts)
+        self.breadth_selector = BreadthSelector(contracts)
         self.error_code_selector = ErrorCodeSelector(contracts)
         self.enhancement_planner = EnhancementPlanner(contracts)
 
@@ -93,6 +95,13 @@ class CalibrationRunner:
                 step.update(outcome)
                 if step["status"] == "planned":
                     break
+                continue
+            if step["id"] == "breadth_check":
+                try:
+                    outcome = self.breadth_selector.select(state)
+                except BreadthSelectionError as exc:
+                    raise CalibrationError(str(exc)) from exc
+                step.update(outcome)
                 continue
             if step["id"] == "error_code":
                 outcome, enhancement_plan = self._select_enhancements(state, result)
@@ -268,6 +277,17 @@ class CalibrationRunner:
                     "game background aggregate status is inconsistent"
                 )
 
+        try:
+            breadth_selection = self.breadth_selector.select(state)
+        except BreadthSelectionError as exc:
+            raise CalibrationError(str(exc)) from exc
+        actual_breadth = post_primary["steps"][3]
+        expected_breadth = {"id": "breadth_check", **breadth_selection}
+        if canonical_sha256(actual_breadth) != canonical_sha256(expected_breadth):
+            raise CalibrationError(
+                "breadth check does not match frozen primary evidence"
+            )
+
         error_code_selection, expected_enhancement_plan = self._select_enhancements(
             state, post_primary
         )
@@ -283,7 +303,7 @@ class CalibrationRunner:
             )
         except EnhancementPlanError as exc:
             raise CalibrationError(str(exc)) from exc
-        actual_error_code = post_primary["steps"][3]
+        actual_error_code = post_primary["steps"][4]
         if error_code_selection["status"] == "skipped_by_policy":
             if actual_error_code != {
                 "id": "error_code",
