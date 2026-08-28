@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from copy import deepcopy
@@ -100,6 +101,19 @@ class PrimaryV1DeploymentTest(unittest.TestCase):
             loaded = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
         validate_documents(loaded, allow_template_image=False)
         self.assertNotIn("Secret", {item["kind"] for item in loaded})
+
+    def test_shared_contract_preserves_canonical_v1_render(self):
+        rendered = render_documents(
+            self.documents,
+            image=IMAGE,
+            host_public_url="http://xuanji.internal:8091",
+            dview_mcp_url="https://dview.example.test/mcp/query",
+        )
+        digest = hashlib.sha256(dump_documents(rendered).encode("utf-8"))
+        self.assertEqual(
+            "a820d3153e37b27acfc428b960ada941c4cd96890bf35b5c54796a7f502d8a40",
+            digest.hexdigest(),
+        )
 
     @staticmethod
     def _document(documents, kind):

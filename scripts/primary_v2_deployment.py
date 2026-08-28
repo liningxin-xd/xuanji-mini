@@ -26,14 +26,14 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "deploy" / "primary-v1" / "manifests.yaml"
-TEMPLATE_IMAGE = "xuanji-primary-v1.invalid/repository@sha256:" + "0" * 64
+DEFAULT_MANIFEST = ROOT / "deploy" / "primary-v2" / "manifests.yaml"
+TEMPLATE_IMAGE = "xuanji-primary-v2.invalid/repository@sha256:" + "0" * 64
 _PROFILE = DeploymentProfile(
-    analysis_profile="primary_v1",
-    resource_prefix="xuanji-primary-v1",
+    analysis_profile="primary_v2",
+    resource_prefix="xuanji-primary-v2",
     default_manifest=DEFAULT_MANIFEST,
     template_image=TEMPLATE_IMAGE,
-    ingress_client_selector=(("xuanji.taptap/client", "true"),),
+    ingress_client_selector=(("xuanji.taptap/client-profile", "primary-v2"),),
 )
 
 

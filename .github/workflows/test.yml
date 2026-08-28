@@ -28,6 +28,19 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m runtime.runner verify-assets
       - run: python scripts/primary_v1_deployment.py verify --allow-template-image
+      - run: python scripts/primary_v2_deployment.py verify --allow-template-image
+      - run: >-
+          python scripts/primary_v1_deployment.py render
+          --image registry.example/xuanji-mini@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          --host-public-url http://xuanji-primary-v1:8091
+          --dview-mcp-url https://dview-mcp-public.tapsvc.com/mcp/query
+          --output /tmp/xuanji-primary-v1.yaml
+      - run: >-
+          python scripts/primary_v2_deployment.py render
+          --image registry.example/xuanji-mini@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          --host-public-url http://xuanji-primary-v2:8091
+          --dview-mcp-url https://dview-mcp-public.tapsvc.com/mcp/query
+          --output /tmp/xuanji-primary-v2.yaml
       - name: Verify compiled metric definitions
         if: env.TAPTAP_DATA_ANALYSIS_SKILL_ROOT != ''
         run: python scripts/compile_metric_definitions.py --check
@@ -35,6 +48,10 @@ jobs:
   container-smoke:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        analysis-profile: [primary_v1, primary_v2]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,4 +59,6 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install -r requirements.lock
-      - run: python tests/container_smoke.py
+      - run: >-
+          python tests/container_smoke.py
+          --analysis-profile ${{ matrix.analysis-profile }}

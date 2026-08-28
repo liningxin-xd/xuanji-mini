@@ -24,8 +24,11 @@ credentials are present:
 3. a Host-owned receipt secret of at least 32 bytes.
 
 `XUANJI_ANALYSIS_PROFILE` is deployment-owned and accepts only `primary_v1` or
-`primary_v2`. The committed production template remains explicitly pinned to
-`primary_v1`; local `primary_v2` development does not change that deployment.
+`primary_v2`. The existing production deployment remains explicitly pinned to
+`primary_v1`. The separate `deploy/primary-v2/manifests.yaml` template is an
+isolated release candidate and does not authorize cluster apply or traffic.
+Its full gate is documented in
+[Primary V2 Deployment And Shadow](primary-v2-deployment-shadow.md).
 
 Grant the DView machine identity only the registered Android download/install
 monitor tables required by the locked query assets. Do not reuse an interactive
@@ -65,8 +68,9 @@ Pin the returned key ID and public key in the daily-push workspace as
 changing it changes the accepted Host authority and must be reviewed. Do not
 run this derivation by putting the receipt secret on a command line.
 
-The committed Kubernetes source is `deploy/primary-v1/manifests.yaml`. It is a
-fail-closed template: the placeholder image cannot pass the production gate.
+The existing production Kubernetes source is
+`deploy/primary-v1/manifests.yaml`. It is a fail-closed template: the
+placeholder image cannot pass the production gate.
 Render it with the exact image digest built from the release commit:
 
 ```bash

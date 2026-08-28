@@ -97,7 +97,9 @@ async def unauthenticated_status(url: str) -> int:
     return response.status_code
 
 
-async def exercise_task(url: str, token: str, *, resumed: bool) -> None:
+async def exercise_task(
+    url: str, token: str, *, resumed: bool
+) -> dict[str, Any]:
     async with _session(url, token) as session:
         tools = await session.list_tools()
         names = {tool.name for tool in tools.tools}
@@ -110,7 +112,8 @@ async def exercise_task(url: str, token: str, *, resumed: bool) -> None:
         })
         if resumed:
             _require_action(run, "task_complete")
-            return
+            _require_signed_handoff(run)
+            return run
 
         _require_action(run, "write_conclusion")
         investigation_id = run.get("investigation_id")
@@ -123,6 +126,7 @@ async def exercise_task(url: str, token: str, *, resumed: bool) -> None:
         }
         completed = await _call(session, "xuanji_finalize", arguments)
         _require_action(completed, "task_complete")
+        _require_signed_handoff(completed)
         if completed.get("overall_status") != "failed":
             raise ContainerProbeError("unknown-only task must have failed overall status")
 
@@ -138,6 +142,30 @@ async def exercise_task(url: str, token: str, *, resumed: bool) -> None:
         result = await session.call_tool("xuanji_finalize", arguments=conflicting)
         if not result.isError:
             raise ContainerProbeError("conflicting finalize was accepted")
+
+        conflicting_payload = {
+            **PAYLOAD,
+            "ruleChecks": [
+                {**PAYLOAD["ruleChecks"][0], "ruleName": "changed immutable rule"}
+            ],
+        }
+        result = await session.call_tool(
+            "xuanji_run_task",
+            arguments={"task_id": TASK_ID, "dqc_payload": conflicting_payload},
+        )
+        if not result.isError:
+            raise ContainerProbeError("conflicting task payload was accepted")
+        return completed
+
+
+async def assert_profile_mismatch_rejected(url: str, token: str) -> None:
+    async with _session(url, token) as session:
+        result = await session.call_tool(
+            "xuanji_run_task",
+            arguments={"task_id": TASK_ID, "dqc_payload": PAYLOAD},
+        )
+        if not result.isError:
+            raise ContainerProbeError("cross-profile task resume was accepted")
 
 
 async def exercise_snapshot_task(url: str, token: str, *, resumed: bool) -> None:
@@ -238,3 +266,17 @@ def _require_action(value: dict[str, Any], expected: str) -> None:
         raise ContainerProbeError(
             f"expected action {expected}, received {value.get('action')}"
         )
+
+
+def _require_signed_handoff(value: dict[str, Any]) -> None:
+    preview = value.get("analysis_preview")
+    handoff = value.get("pipeline_handoff")
+    if (
+        not isinstance(preview, dict)
+        or not isinstance(handoff, dict)
+        or handoff.get("task_id") != value.get("task_id")
+        or handoff.get("provider") != "xuanji-mini"
+        or handoff.get("schema_version") != 1
+        or not isinstance(handoff.get("signature"), str)
+    ):
+        raise ContainerProbeError("task completion lacks a signed pipeline handoff")
