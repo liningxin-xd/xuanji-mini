@@ -49,6 +49,13 @@ EXPECTED_POST_PRIMARY_STEPS = (
     "game_background",
     "error_code",
 )
+EXPECTED_ENHANCEMENT_MODULES = (
+    "install_strict_funnel",
+    "error_code",
+    "cross_dimension_overlap",
+    "same_day_version_quasi_experiment",
+    "peer_negative_control",
+)
 
 EXPECTED_LOCKED_ASSETS = {
     "references/queries/registered-monitor-root.yaml",
@@ -174,6 +181,9 @@ class RepositoryContracts:
         self.result_schemas_path = self.contract_root / "result-schemas.yaml"
         self.analysis_profiles_path = self.contract_root / "analysis-profiles.yaml"
         self.post_primary_plan_path = self.contract_root / "post-primary-plan.yaml"
+        self.enhancement_priority_path = (
+            self.contract_root / "enhancement-priority.yaml"
+        )
         self.error_code_capabilities_path = (
             self.contract_root / "error-code-capabilities.yaml"
         )
@@ -191,6 +201,9 @@ class RepositoryContracts:
         self._result_schemas = _load_yaml_mapping(self.result_schemas_path)
         self._analysis_profiles = _load_yaml_mapping(self.analysis_profiles_path)
         self._post_primary_plans = _load_yaml_mapping(self.post_primary_plan_path)
+        self._enhancement_priorities = _load_yaml_mapping(
+            self.enhancement_priority_path
+        )
         self._error_code_capabilities = _load_yaml_mapping(
             self.error_code_capabilities_path
         )
@@ -201,6 +214,7 @@ class RepositoryContracts:
             self.secondary_relations_path
         )
         self._plans = self._validate_plans()
+        self._validate_enhancement_priorities()
         self._validate_analysis_profiles()
         self._asset_hashes = self._load_asset_hashes()
         self._validate_error_code_contracts()
@@ -250,6 +264,10 @@ class RepositoryContracts:
         return sha256_bytes(self.error_code_triggers_path.read_bytes())
 
     @property
+    def enhancement_priority_sha256(self) -> str:
+        return sha256_bytes(self.enhancement_priority_path.read_bytes())
+
+    @property
     def default_analysis_profile(self) -> str:
         return self._analysis_profiles["default_profile"]
 
@@ -294,6 +312,20 @@ class RepositoryContracts:
     def post_primary_plan_contract_sha256(self, plan_id: str) -> str:
         return canonical_sha256(
             {"plan_id": plan_id, "contract": self.post_primary_plan(plan_id)}
+        )
+
+    def enhancement_priority_plan(self, plan_id: str) -> dict[str, Any]:
+        value = self._enhancement_priorities["plans"].get(plan_id)
+        if not isinstance(value, dict):
+            raise ContractError(f"unknown enhancement priority plan: {plan_id}")
+        return deepcopy(value)
+
+    def enhancement_priority_plan_contract_sha256(self, plan_id: str) -> str:
+        return canonical_sha256(
+            {
+                "plan_id": plan_id,
+                "contract": self.enhancement_priority_plan(plan_id),
+            }
         )
 
     def game_background_policy(self) -> dict[str, Any]:
@@ -743,6 +775,70 @@ class RepositoryContracts:
             )
         return plans
 
+    def _validate_enhancement_priorities(self) -> None:
+        priorities = self._enhancement_priorities
+        if priorities.get("version") != 1 or set(priorities.get("plans", {})) != {
+            "direction_enhancement_v1"
+        }:
+            raise ContractError(
+                "enhancement priorities must define direction_enhancement_v1"
+            )
+        plan = priorities["plans"]["direction_enhancement_v1"]
+        if not isinstance(plan, dict) or plan.get("max_query_modules") != 2:
+            raise ContractError("enhancement query module budget must be two")
+        if plan.get("evidence_policy") != {
+            "allowed_source": "frozen_root_and_attribution_evidence",
+            "module_source_scan_before_trigger": False,
+            "model_selection_allowed": False,
+        }:
+            raise ContractError("enhancement evidence policy changed")
+        if plan.get("excluded_from_query_module_budget") != [
+            "counterfactual",
+            "secondary",
+            "game_background",
+            "breadth_check",
+        ]:
+            raise ContractError("enhancement query budget exclusions changed")
+
+        modules = plan.get("modules")
+        if not isinstance(modules, list) or tuple(
+            item.get("id") for item in modules if isinstance(item, dict)
+        ) != EXPECTED_ENHANCEMENT_MODULES:
+            raise ContractError("enhancement module priority order changed")
+        for priority, module in enumerate(modules, start=1):
+            if (
+                module.get("priority") != priority
+                or module.get("query_cost") != 1
+                or module.get("runtime_status") not in {"enabled", "disabled"}
+            ):
+                raise ContractError(f"invalid enhancement module contract: {module}")
+            if module["id"] == "error_code":
+                if set(module) != {
+                    "id",
+                    "priority",
+                    "query_cost",
+                    "runtime_status",
+                    "selector",
+                } or module != {
+                    "id": "error_code",
+                    "priority": 2,
+                    "query_cost": 1,
+                    "runtime_status": "enabled",
+                    "selector": "error_code_v1",
+                }:
+                    raise ContractError(
+                        "error-code must remain the only enabled enhancement module"
+                    )
+            elif (
+                module.get("runtime_status") != "disabled"
+                or module.get("selector") is not None
+                or not isinstance(module.get("reason"), str)
+                or not module["reason"].strip()
+            ):
+                raise ContractError(
+                    f"unimplemented enhancement module must stay disabled: {module}"
+                )
+
     def _validate_analysis_profiles(self) -> None:
         profiles = self._analysis_profiles
         if profiles.get("version") != 1:
@@ -761,6 +857,10 @@ class RepositoryContracts:
         }:
             raise ContractError("post-primary plans must define post_primary_v1")
         plan = post_plans["plans"]["post_primary_v1"]
+        if plan.get("enhancement_priority_plan") != "direction_enhancement_v1":
+            raise ContractError(
+                "post-primary plan must bind direction_enhancement_v1"
+            )
         steps = plan.get("steps") if isinstance(plan, dict) else None
         if not isinstance(steps, list) or tuple(
             item.get("id") for item in steps if isinstance(item, dict)
