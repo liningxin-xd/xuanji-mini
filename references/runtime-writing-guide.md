@@ -14,6 +14,7 @@ Runtime 已冻结状态、候选、日期、数值、query ID 和执行证据；
 - `primary_v2` 的 `post_primary_steps` 和可选机器反事实
 - 最多每家族 3 个 `candidates`
 - 候选上的可选 `breadth_calibration`
+- 可选 `cross_dimension_overlap_calibration`
 - `evidence_limits`
 
 不要请求 SQL、raw rows、完整 state、receipt、hash 或 Playbook。
@@ -39,6 +40,7 @@ Runtime 已冻结状态、候选、日期、数值、query ID 和执行证据；
 - finding 写具体 label/value、当前与基线变化及不利影响，但不要手抄数值字段。
 - 机器反事实只用于校准 summary 和行动方向，不改写其数值、对象或 finding。
 - `breadth_calibration.specificity_status=broad_change` 时降低单一渠道、品牌或 OS 特异性，转向共同影响范围排查。
+- 四象限校准只用于区分两个既有候选的共享或独有范围，不新增候选、不相加影响，也不升级为机制根因。
 - `entrant/exit` 只描述流量进入或退出的结构影响，不写成切片表现恶化。
 - `evidence_limits` 只写当前真实限制，不填通用免责声明。
 - `recommended_action` 必须独立可读，明确对象、环节和观察目标。

@@ -49,6 +49,7 @@ EXPECTED_POST_PRIMARY_STEPS = (
     "game_background",
     "breadth_check",
     "error_code",
+    "cross_dimension_overlap",
 )
 EXPECTED_ENHANCEMENT_MODULES = (
     "install_strict_funnel",
@@ -75,6 +76,7 @@ EXPECTED_LOCKED_ASSETS = {
     "references/queries/secondary-attribution-template.md",
     "references/queries/game-operation-events.yaml",
     "references/queries/download-error-code-calibration.yaml",
+    "references/queries/download-cross-dimension-overlap.yaml",
     "references/queries/primary-attribution-dimensions.md",
 }
 
@@ -361,6 +363,22 @@ class RepositoryContracts:
             raise ContractError("breadth check selection policy is missing")
         return deepcopy(step["selection"])
 
+    def cross_dimension_overlap_policy(self) -> dict[str, Any]:
+        plan = self.post_primary_plan("post_primary_v1")
+        step = next(
+            (
+                item
+                for item in plan["steps"]
+                if item.get("id") == "cross_dimension_overlap"
+            ),
+            None,
+        )
+        if not isinstance(step, dict) or not isinstance(
+            step.get("selection"), dict
+        ):
+            raise ContractError("cross-dimension overlap policy is missing")
+        return deepcopy(step["selection"])
+
     def error_code_capability(
         self, chain: str, game_type: str
     ) -> dict[str, Any]:
@@ -461,6 +479,49 @@ class RepositoryContracts:
             dimension_config={
                 "post_primary": "error_code",
                 "query_parameters": numeric,
+            },
+        )
+
+    def cross_dimension_overlap_binding(
+        self,
+        *,
+        metric: str,
+        left_game_id: int,
+        right_reserve_value: int,
+    ) -> QueryBinding:
+        if (
+            isinstance(left_game_id, bool)
+            or not isinstance(left_game_id, int)
+            or left_game_id <= 0
+            or isinstance(right_reserve_value, bool)
+            or right_reserve_value not in {0, 1}
+        ):
+            raise ContractError("overlap candidate parameters are invalid")
+        metric_config = self._registry["download_metrics"].get(metric)
+        if not isinstance(metric_config, dict):
+            raise ContractError(f"download metric is not registered: {metric}")
+        projection = metric_config.get("secondary_metric")
+        if not isinstance(projection, dict):
+            raise ContractError("overlap metric projection is missing")
+        overlap = self._registry["cross_dimension_overlap"]
+        config = deepcopy(overlap)
+        config["protected_tokens"] = [
+            *config["protected_tokens"],
+            projection["denominator_source_field"],
+            projection["numerator_source_field"],
+        ]
+        return self._binding(
+            overlap["query"]["path"],
+            "query_spec",
+            config,
+            result_schema_id="cross_dimension_overlap",
+            dimension_config={
+                "post_primary": "cross_dimension_overlap",
+                "query_parameters": {
+                    "left_game_id": left_game_id,
+                    "right_reserve_value": right_reserve_value,
+                },
+                "metric_projection": deepcopy(projection),
             },
         )
 
@@ -843,9 +904,22 @@ class RepositoryContracts:
                     "runtime_status": "enabled",
                     "selector": "error_code_v1",
                 }:
-                    raise ContractError(
-                        "error-code must remain the only enabled enhancement module"
-                    )
+                    raise ContractError("error-code enhancement contract changed")
+            elif module["id"] == "cross_dimension_overlap":
+                if set(module) != {
+                    "id",
+                    "priority",
+                    "query_cost",
+                    "runtime_status",
+                    "selector",
+                } or module != {
+                    "id": "cross_dimension_overlap",
+                    "priority": 3,
+                    "query_cost": 1,
+                    "runtime_status": "enabled",
+                    "selector": "cross_dimension_overlap_v1",
+                }:
+                    raise ContractError("overlap enhancement contract changed")
             elif (
                 module.get("runtime_status") != "disabled"
                 or module.get("selector") is not None
@@ -889,6 +963,7 @@ class RepositoryContracts:
             "game_background": ("query", 3),
             "breadth_check": ("deterministic", 0),
             "error_code": ("query", 1),
+            "cross_dimension_overlap": ("query", 1),
         }
         for step in steps:
             expected = expected_queries.get(step.get("id"))
@@ -912,10 +987,21 @@ class RepositoryContracts:
                 "max_supporting_buckets": 2,
             }:
                 raise ContractError("breadth check selection policy changed")
+            if step.get("id") == "cross_dimension_overlap" and step.get(
+                "selection"
+            ) != {
+                "left_dimension": "game_id",
+                "right_dimension": "is_reserve_auto_download",
+                "minimum_candidate_adverse_impact": 0.0005,
+                "root_adverse_ratio": 0.25,
+                "marginal_rehook_tolerance": 0.000001,
+                "quadrants": ["BOTH", "LEFT_ONLY", "RIGHT_ONLY", "NEITHER"],
+            }:
+                raise ContractError("cross-dimension overlap policy changed")
         if plan.get("max_additional_queries") != sum(
             item[1] for item in expected_queries.values()
         ):
-            raise ContractError("post-primary query budget must total five")
+            raise ContractError("post-primary query budget must total six")
 
         primary_v1 = raw_profiles["primary_v1"]
         primary_v2 = raw_profiles["primary_v2"]
@@ -935,6 +1021,7 @@ class RepositoryContracts:
                 "game_background",
                 "breadth_check",
                 "error_code",
+                "cross_dimension_overlap",
             ]
         ):
             raise ContractError(
@@ -1358,6 +1445,33 @@ class RepositoryContracts:
         }:
             raise ContractError("game background query registry changed")
 
+        overlap = registry.get("cross_dimension_overlap")
+        self._validate_query_config(
+            "cross_dimension_overlap", overlap, ("query",)
+        )
+        if overlap != {
+            "query": {
+                "path": "references/queries/download-cross-dimension-overlap.yaml"
+            },
+            "data_sources": [
+                "tap_dw.ads_report_store_platform_device_game_download_chain_attribution_1d"
+            ],
+            "protected_tokens": [
+                "device_id",
+                "game_id",
+                "is_reserve_auto_download",
+                "metric_denominator",
+                "metric_numerator",
+                "grain_row_count",
+                "invalid_metric_row",
+                "BOTH",
+                "LEFT_ONLY",
+                "RIGHT_ONLY",
+                "NEITHER",
+            ],
+        }:
+            raise ContractError("cross-dimension overlap registry changed")
+
         for metric, config in download_metrics.items():
             projection = config.get("secondary_metric")
             if not isinstance(projection, dict) or set(projection) != {
@@ -1460,6 +1574,7 @@ class RepositoryContracts:
             "install_stage",
             "secondary_bucket",
             "game_background_events",
+            "cross_dimension_overlap",
         }:
             raise ContractError("result schemas do not cover every query binding kind")
         for name, config in metrics.items():
@@ -1473,6 +1588,7 @@ class RepositoryContracts:
                 "install_stage",
                 "secondary_contribution_buckets",
                 "game_background_events",
+                "cross_dimension_overlap",
             }:
                 raise ContractError(f"invalid result validator: {schema_id}")
             columns = schema.get("columns")

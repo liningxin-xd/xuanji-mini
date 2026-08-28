@@ -19,6 +19,11 @@ DIMENSION_PLACEHOLDER_COUNTS = {
     "__DIMENSION_VALUE_EXPR__": 2,
     "__DIMENSION_LABEL_EXPR__": 1,
 }
+METRIC_PROJECTION_PLACEHOLDER_COUNTS = {
+    "__DENOMINATOR_SOURCE_FIELD__": 1,
+    "__NUMERATOR_SOURCE_FIELD__": 1,
+    "__INVALID_METRIC_PREDICATE__": 1,
+}
 
 
 class QueryBuildError(ContractError):
@@ -42,6 +47,10 @@ class QueryBuilder:
 
         if binding.asset_kind == "query_spec":
             sql, parameter_specs = self._load_query_spec(asset_path)
+            if (binding.dimension_config or {}).get("post_primary") == (
+                "cross_dimension_overlap"
+            ):
+                sql = self._replace_metric_projection_placeholders(sql, binding)
         elif binding.asset_kind == "markdown_template":
             sql = self._load_markdown_template(asset_path)
             parameter_specs = {
@@ -206,6 +215,44 @@ class QueryBuilder:
                 normalized,
             ):
                 raise QueryBuildError("error-code SQL cannot infer recovery")
+            return
+
+        if config.get("post_primary") == "cross_dimension_overlap":
+            frozen = config.get("query_parameters")
+            if not isinstance(frozen, dict):
+                raise QueryBuildError("overlap frozen parameters are missing")
+            expected = {
+                "business_date": business_date,
+                "game_type": parameters.get("game_type"),
+                **frozen,
+            }
+            if parameters != expected:
+                raise QueryBuildError("overlap query parameters changed")
+            left_game_id = frozen["left_game_id"]
+            right_reserve_value = frozen["right_reserve_value"]
+            required_fragments = (
+                f"game_id = {left_game_id}",
+                f"is_reserve_auto_download = {right_reserve_value}",
+                "COUNT(*) OVER (PARTITION BY dt, device_id, game_id)",
+                "'BOTH'",
+                "'LEFT_ONLY'",
+                "'RIGHT_ONLY'",
+                "'NEITHER'",
+            )
+            if any(
+                fragment.lower() not in normalized.lower()
+                for fragment in required_fragments
+            ):
+                raise QueryBuildError("overlap SQL changed its frozen identities")
+            if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
+                raise QueryBuildError("overlap partition range is missing")
+            if not re.search(r"(?i)\bplatform\s*=\s*'ANDROID'", normalized):
+                raise QueryBuildError("overlap Android filter is missing")
+            game_type = parameters.get("game_type")
+            if game_type not in {"app", "sandbox"} or not re.search(
+                rf"(?i)\bgame_type\s*=\s*'{re.escape(game_type)}'", normalized
+            ):
+                raise QueryBuildError("overlap game_type filter is missing")
             return
 
         if not re.search(r"(?i)\bWHERE\s+dt\s+BETWEEN\b", normalized):
@@ -436,6 +483,39 @@ class QueryBuilder:
             "__DIMENSION_LABEL_EXPR__": config["label_expression"],
         }
         for placeholder, expected_count in DIMENSION_PLACEHOLDER_COUNTS.items():
+            actual_count = sql.count(placeholder)
+            if actual_count != expected_count:
+                raise QueryBuildError(
+                    f"placeholder {placeholder} expected {expected_count} times, "
+                    f"found {actual_count}"
+                )
+            sql = sql.replace(placeholder, replacements[placeholder])
+        return sql
+
+    @staticmethod
+    def _replace_metric_projection_placeholders(
+        sql: str, binding: QueryBinding
+    ) -> str:
+        config = binding.dimension_config
+        projection = (
+            config.get("metric_projection") if isinstance(config, dict) else None
+        )
+        if not isinstance(projection, dict):
+            raise QueryBuildError("overlap metric projection is missing")
+        replacements = {
+            "__DENOMINATOR_SOURCE_FIELD__": projection[
+                "denominator_source_field"
+            ],
+            "__NUMERATOR_SOURCE_FIELD__": projection[
+                "numerator_source_field"
+            ],
+            "__INVALID_METRIC_PREDICATE__": projection[
+                "invalid_metric_predicate"
+            ],
+        }
+        for placeholder, expected_count in (
+            METRIC_PROJECTION_PLACEHOLDER_COUNTS.items()
+        ):
             actual_count = sql.count(placeholder)
             if actual_count != expected_count:
                 raise QueryBuildError(

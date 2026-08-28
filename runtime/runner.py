@@ -20,6 +20,10 @@ from .contracts import (
     sha256_text,
 )
 from .calibration_runner import CalibrationError, CalibrationRunner
+from .cross_dimension_overlap_result_validator import (
+    CrossDimensionOverlapResultValidator,
+    CrossDimensionOverlapValidationError,
+)
 from .error_code_result_validator import (
     ErrorCodeResultValidator,
     ErrorCodeValidationError,
@@ -67,6 +71,9 @@ class AttributionRunner:
         self.secondary_result_validator = SecondaryResultValidator(self.contracts)
         self.game_background_validator = GameBackgroundValidator(self.contracts)
         self.error_code_result_validator = ErrorCodeResultValidator(self.contracts)
+        self.cross_dimension_overlap_result_validator = (
+            CrossDimensionOverlapResultValidator(self.contracts)
+        )
         self.post_primary_executor = PostPrimaryExecutor(
             self.contracts,
             query_builder=self.query_builder,
@@ -74,6 +81,9 @@ class AttributionRunner:
             secondary_result_validator=self.secondary_result_validator,
             game_background_validator=self.game_background_validator,
             error_code_result_validator=self.error_code_result_validator,
+            cross_dimension_overlap_result_validator=(
+                self.cross_dimension_overlap_result_validator
+            ),
         )
         configured_profile = os.environ.get("XUANJI_ANALYSIS_PROFILE")
         self.analysis_profile = (
@@ -1083,6 +1093,10 @@ class AttributionRunner:
                     post_step.get("attempts"), list
                 ):
                     post_query_items.append(post_step)
+                elif post_step.get("id") == "cross_dimension_overlap" and isinstance(
+                    post_step.get("attempts"), list
+                ):
+                    post_query_items.append(post_step)
                 elif post_step.get("id") == "game_background" and isinstance(
                     post_step.get("items"), list
                 ):
@@ -1487,6 +1501,9 @@ class AttributionRunner:
                 state, post_primary, known_query_ids
             )
             self._validate_error_code_runtime_state(
+                state, post_primary, known_query_ids
+            )
+            self._validate_cross_dimension_overlap_runtime_state(
                 state, post_primary, known_query_ids
             )
 
@@ -2656,6 +2673,375 @@ class AttributionRunner:
         ):
             raise RunnerError("error-code query failure classification changed")
 
+    def _validate_cross_dimension_overlap_runtime_state(
+        self,
+        state: dict[str, Any],
+        post_primary: dict[str, Any],
+        known_query_ids: set[str],
+    ) -> None:
+        overlap = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "cross_dimension_overlap"
+            ),
+            None,
+        )
+        error_code = next(
+            (
+                step
+                for step in post_primary.get("steps", [])
+                if step.get("id") == "error_code"
+            ),
+            None,
+        )
+        if not isinstance(overlap, dict) or not isinstance(error_code, dict):
+            raise RunnerError("post-primary state lacks overlap prerequisites")
+        if error_code.get("status") in {
+            "planned",
+            "in_progress",
+            "repair_required",
+        }:
+            if overlap != {"id": "cross_dimension_overlap", "status": "planned"}:
+                raise RunnerError(
+                    "overlap cannot advance before error-code is terminal"
+                )
+            return
+
+        try:
+            expected_selection = (
+                self.calibration_runner.cross_dimension_overlap_selector.select(
+                    state
+                )
+            )
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
+        if expected_selection["status"] == "skipped_by_policy":
+            if overlap != {
+                "id": "cross_dimension_overlap",
+                **expected_selection,
+            }:
+                raise RunnerError("overlap skip no longer matches frozen evidence")
+            return
+
+        enhancement_plan = post_primary.get("enhancement_plan")
+        if not isinstance(enhancement_plan, dict):
+            raise RunnerError("scheduled overlap lacks an enhancement plan")
+        try:
+            module = self.calibration_runner.enhancement_planner.module(
+                enhancement_plan, "cross_dimension_overlap"
+            )
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
+        if module["status"] == "skipped_by_budget":
+            expected_skip = {
+                "id": "cross_dimension_overlap",
+                "status": "skipped_by_policy",
+                "reason": module["reason"],
+                "limit_code": module["limit_code"],
+            }
+            if overlap != expected_skip:
+                raise RunnerError("overlap budget skip changed")
+            return
+        if module["status"] != "selected":
+            raise RunnerError("triggered overlap is not selected")
+
+        selection_fields = (
+            "selection_id",
+            "root_adverse_delta_bp",
+            "minimum_candidate_adverse_impact_bp",
+            "frozen_root_counts",
+            "frozen_candidates",
+        )
+        if any(
+            overlap.get(field) != expected_selection[field]
+            for field in selection_fields
+        ):
+            raise RunnerError("overlap selection no longer matches frozen evidence")
+        if overlap.get("status") == "planned":
+            if overlap != {"id": "cross_dimension_overlap", **expected_selection}:
+                raise RunnerError("planned overlap contains runtime evidence")
+            return
+
+        try:
+            expected_binding = (
+                self.post_primary_executor.cross_dimension_overlap_binding(
+                    overlap, state
+                )
+            )
+        except PostPrimaryExecutionError as exc:
+            raise RunnerError(str(exc)) from exc
+        expected_snapshot = self._binding_snapshot(expected_binding)
+        if overlap.get("binding") != expected_snapshot or overlap.get(
+            "binding_sha256"
+        ) != canonical_sha256(expected_snapshot):
+            raise RunnerError("overlap binding no longer matches frozen candidates")
+        attempts = overlap.get("attempts")
+        if not isinstance(attempts, list) or not attempts or len(attempts) > 3:
+            raise RunnerError(
+                "overlap step must contain one query with at most two repairs"
+            )
+
+        parameters = self._query_parameters(state, overlap)
+        run_dir = self._run_dir(state["run_id"]).resolve()
+        sql_by_attempt: list[str] = []
+        for index, attempt in enumerate(attempts):
+            if not isinstance(attempt, dict) or attempt.get("attempt_no") != index:
+                raise RunnerError("overlap attempt sequence changed")
+            attempt_status = attempt.get("status")
+            if attempt_status not in {"issued", "succeeded", "failed", "error"}:
+                raise RunnerError("overlap attempt status is invalid")
+            sql_path_value = attempt.get("sql_path")
+            digest = attempt.get("sql_sha256")
+            if (
+                not isinstance(sql_path_value, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise RunnerError("overlap attempt SQL identity is invalid")
+            sql_path = (run_dir / sql_path_value).resolve()
+            try:
+                sql_path.relative_to(run_dir)
+                sql = sql_path.read_text(encoding="utf-8")
+            except (ValueError, OSError) as exc:
+                raise RunnerError("overlap attempt SQL is unavailable") from exc
+            if sha256_text(sql) != digest:
+                raise RunnerError("overlap attempt SQL hash changed")
+            self.query_builder.validate_sql(sql, expected_binding, parameters)
+            if index > 0:
+                repair = attempt.get("repair")
+                if not isinstance(repair, dict) or set(repair) != {
+                    "source_attempt_no",
+                    "repair_reason",
+                    "error_evidence",
+                    "diff_path",
+                    "event_path",
+                } or repair.get("source_attempt_no") != index - 1:
+                    raise RunnerError("overlap repair lineage changed")
+                if any(
+                    not isinstance(repair.get(field), str)
+                    or not repair[field].strip()
+                    for field in (
+                        "repair_reason",
+                        "error_evidence",
+                        "diff_path",
+                        "event_path",
+                    )
+                ):
+                    raise RunnerError("overlap repair evidence is invalid")
+                expected_diff = self.query_builder.validate_repair(
+                    sql_by_attempt[0],
+                    sql_by_attempt[index - 1],
+                    sql,
+                    expected_binding,
+                    parameters,
+                )
+                repair_event_path = (run_dir / repair["event_path"]).resolve()
+                repair_diff_path = (run_dir / repair["diff_path"]).resolve()
+                try:
+                    repair_event_path.relative_to(run_dir)
+                    repair_diff_path.relative_to(run_dir)
+                    repair_event = json.loads(
+                        repair_event_path.read_text(encoding="utf-8")
+                    )
+                    repair_diff = repair_diff_path.read_text(encoding="utf-8")
+                except (ValueError, OSError, json.JSONDecodeError) as exc:
+                    raise RunnerError(
+                        "overlap repair evidence is unavailable"
+                    ) from exc
+                repair_event_hash = canonical_sha256(repair_event)
+                if (
+                    repair_event_path.name != f"{repair_event_hash}.json"
+                    or state["processed_events"].get(repair_event_hash)
+                    != {
+                        "event": "repair_submitted",
+                        "step_id": "cross_dimension_overlap",
+                        "event_path": repair["event_path"],
+                    }
+                    or repair_event
+                    != {
+                        "event": "repair_submitted",
+                        "step_id": "cross_dimension_overlap",
+                        "repair_attempt": index,
+                        "repair_reason": repair["repair_reason"],
+                        "error_evidence": repair["error_evidence"],
+                        "repaired_sql": sql,
+                    }
+                    or repair_diff != expected_diff
+                ):
+                    raise RunnerError("overlap repair evidence changed")
+            elif attempt.get("repair") is not None:
+                raise RunnerError("initial overlap attempt cannot be a repair")
+            sql_by_attempt.append(sql)
+
+            query_id = attempt.get("query_id")
+            if query_id is not None:
+                if not isinstance(query_id, str) or not query_id.strip():
+                    raise RunnerError("overlap query_id is invalid")
+                if query_id in known_query_ids:
+                    raise RunnerError("query_id is reused by overlap calibration")
+                known_query_ids.add(query_id)
+            event_path_value = attempt.get("event_path")
+            if query_id is None:
+                if (
+                    attempt_status != "issued"
+                    or event_path_value is not None
+                    or attempt.get("raw_result_sha256") is not None
+                    or attempt.get("error") is not None
+                ):
+                    raise RunnerError("unexecuted overlap attempt has an event")
+                continue
+            if not isinstance(event_path_value, str):
+                raise RunnerError("executed overlap attempt lacks its event")
+            event_path = (run_dir / event_path_value).resolve()
+            try:
+                event_path.relative_to(run_dir)
+                event = json.loads(event_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                raise RunnerError("overlap receipt event is unavailable") from exc
+            event_hash = canonical_sha256(event)
+            if event_path.name != f"{event_hash}.json" or state[
+                "processed_events"
+            ].get(event_hash) != {
+                "event": event.get("event"),
+                "step_id": "cross_dimension_overlap",
+                "event_path": event_path_value,
+            }:
+                raise RunnerError("overlap receipt event identity changed")
+            if (
+                event.get("query_id") != query_id
+                or event.get("attempt_no") != index
+                or event.get("step_id") != "cross_dimension_overlap"
+                or event.get("submitted_sql_sha256") != digest
+            ):
+                raise RunnerError("overlap receipt does not match its attempt")
+            if event.get("event") == "query_returned":
+                raw_result = event.get("raw_result")
+                raw_hash = event.get("raw_result_sha256")
+                if (
+                    not isinstance(raw_result, dict)
+                    or not isinstance(raw_hash, str)
+                    or canonical_sha256(raw_result) != raw_hash
+                    or attempt.get("raw_result_sha256") != raw_hash
+                ):
+                    raise RunnerError("overlap raw result evidence changed")
+                if (
+                    attempt_status not in {"succeeded", "failed"}
+                    or attempt.get("error") is not None
+                    or not isinstance(attempt.get("validation"), dict)
+                ):
+                    raise RunnerError("overlap returned attempt state changed")
+            elif event.get("event") == "query_error":
+                event_error = {
+                    "class": event.get("error_class"),
+                    "code": event.get("error_code"),
+                    "message": event.get("error_message"),
+                }
+                if attempt.get("error") != event_error:
+                    raise RunnerError("overlap query error evidence changed")
+                if (
+                    attempt_status != "error"
+                    or attempt.get("raw_result_sha256") is not None
+                ):
+                    raise RunnerError("overlap failed attempt state changed")
+            else:
+                raise RunnerError("overlap receipt event type is invalid")
+
+        status = overlap.get("status")
+        latest = attempts[-1]
+        if status == "in_progress":
+            if latest.get("status") != "issued" or latest.get("query_id") is not None:
+                raise RunnerError("in_progress overlap is not awaiting a query")
+            return
+        if status == "repair_required":
+            raw_error = latest.get("error") or {}
+            if (
+                latest.get("status") != "error"
+                or raw_error.get("class") != "semantic_analysis"
+                or latest["attempt_no"] >= 2
+            ):
+                raise RunnerError("overlap repair state is invalid")
+            return
+        if status not in {"succeeded", "failed"}:
+            raise RunnerError(f"overlap runtime status is invalid: {status}")
+
+        if latest.get("status") in {"succeeded", "failed"}:
+            event = json.loads(
+                (run_dir / latest["event_path"]).read_text(encoding="utf-8")
+            )
+            try:
+                outcome = self.cross_dimension_overlap_result_validator.validate(
+                    raw_result=event["raw_result"],
+                    binding=expected_binding,
+                    metric=state["metric"],
+                    analysis_date=state["analysis_date"],
+                    game_type=state["game_type"],
+                    frozen_candidates=overlap["frozen_candidates"],
+                    frozen_root_counts=overlap["frozen_root_counts"],
+                )
+            except CrossDimensionOverlapValidationError as exc:
+                expected_reason = f"{exc.code}: {exc}"
+                if (
+                    status != "failed"
+                    or overlap.get("facts") != []
+                    or overlap.get("limit_codes") != []
+                    or overlap.get("failure_code") != exc.code
+                    or overlap.get("reason") != expected_reason
+                    or latest.get("validation")
+                    != {
+                        "status": "failed",
+                        "failure_code": exc.code,
+                        "reason": str(exc),
+                    }
+                ):
+                    raise RunnerError("overlap validation failure changed") from exc
+                return
+            expected_validation = {
+                "status": "succeeded",
+                "fact_count": len(outcome.facts),
+                "limit_codes": list(outcome.limit_codes),
+            }
+            if (
+                status != "succeeded"
+                or latest.get("status") != "succeeded"
+                or latest.get("validation") != expected_validation
+                or overlap.get("facts") != list(outcome.facts)
+                or overlap.get("limit_codes") != list(outcome.limit_codes)
+                or overlap.get("failure_code") is not None
+                or overlap.get("reason") is not None
+            ):
+                raise RunnerError("overlap result no longer matches raw evidence")
+            return
+
+        if latest.get("status") != "error" or status != "failed":
+            raise RunnerError("overlap query error state is invalid")
+        raw_error = latest.get("error")
+        expected_reason = (
+            self.post_primary_executor.query_failure_reason(
+                raw_error, latest["attempt_no"]
+            )
+            if isinstance(raw_error, dict)
+            and all(key in raw_error for key in ("class", "code", "message"))
+            else None
+        )
+        if (
+            not isinstance(raw_error, dict)
+            or overlap.get("facts") != []
+            or overlap.get("limit_codes") != []
+            or overlap.get("failure_code")
+            != self.post_primary_executor.query_failure_code(raw_error)
+            or overlap.get("reason") != expected_reason
+            or latest.get("validation")
+            != {
+                "status": "failed",
+                "failure_code": self.post_primary_executor.query_failure_code(
+                    raw_error
+                ),
+                "reason": expected_reason,
+            }
+        ):
+            raise RunnerError("overlap query failure classification changed")
+
     def _write_state(self, state: dict[str, Any]) -> None:
         state.pop("integrity_sha256", None)
         state["integrity_sha256"] = canonical_sha256(state)
@@ -2909,6 +3295,29 @@ class AttributionRunner:
             if not isinstance(frozen, dict):
                 raise RunnerError("error-code binding lacks frozen parameters")
             return {"business_date": state["analysis_date"], **frozen}
+        if config.get("post_primary") == "cross_dimension_overlap":
+            try:
+                expected_binding = (
+                    self.post_primary_executor.cross_dimension_overlap_binding(
+                        step, state
+                    )
+                )
+            except PostPrimaryExecutionError as exc:
+                raise RunnerError(str(exc)) from exc
+            if self._binding_snapshot(binding) != self._binding_snapshot(
+                expected_binding
+            ):
+                raise RunnerError(
+                    "overlap binding changed its frozen candidates"
+                )
+            frozen = config.get("query_parameters")
+            if not isinstance(frozen, dict):
+                raise RunnerError("overlap binding lacks frozen parameters")
+            return {
+                "business_date": state["analysis_date"],
+                "game_type": state["game_type"],
+                **frozen,
+            }
         parameters = {
             "business_date": state["analysis_date"],
             "game_type": state["game_type"],

@@ -2,7 +2,7 @@ version: 1
 
 plans:
   post_primary_v1:
-    max_additional_queries: 5
+    max_additional_queries: 6
     enhancement_priority_plan: direction_enhancement_v1
     steps:
       - id: counterfactual
@@ -33,3 +33,13 @@ plans:
       - id: error_code
         kind: query
         max_queries: 1
+      - id: cross_dimension_overlap
+        kind: query
+        max_queries: 1
+        selection:
+          left_dimension: game_id
+          right_dimension: is_reserve_auto_download
+          minimum_candidate_adverse_impact: 0.0005
+          root_adverse_ratio: 0.25
+          marginal_rehook_tolerance: 0.000001
+          quadrants: [BOTH, LEFT_ONLY, RIGHT_ONLY, NEITHER]

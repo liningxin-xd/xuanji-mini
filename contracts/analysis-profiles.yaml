@@ -17,3 +17,4 @@ profiles:
       - game_background
       - breadth_check
       - error_code
+      - cross_dimension_overlap

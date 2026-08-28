@@ -286,6 +286,37 @@ class EvidencePackBuilder:
                         pack["error_code_calibration"] = facts
                         for code in step.get("limit_codes", []):
                             evidence_limits.append(f"error_code:{code}")
+                if step["id"] == "cross_dimension_overlap" and step[
+                    "status"
+                ] == "succeeded":
+                    facts = step.get("facts")
+                    candidates = step.get("frozen_candidates")
+                    if (
+                        not isinstance(facts, list)
+                        or len(facts) != 4
+                        or not isinstance(candidates, list)
+                        or len(candidates) != 2
+                    ):
+                        raise EvidencePackError(
+                            "overlap calibration is incomplete"
+                        )
+                    exposed_by_id = {
+                        item["candidate_id"]: item for item in exposed_candidates
+                    }
+                    missing_candidate = any(
+                        not isinstance(candidate, dict)
+                        or candidate.get("candidate_id") not in exposed_by_id
+                        for candidate in candidates
+                    )
+                    if missing_candidate:
+                        raise EvidencePackError(
+                            "overlap calibration lacks its writer candidates"
+                        )
+                    pack["cross_dimension_overlap_calibration"] = {
+                        "left_candidate_id": candidates[0]["candidate_id"],
+                        "right_candidate_id": candidates[1]["candidate_id"],
+                        "quadrants": facts,
+                    }
         root_metric = self.root_metric(state)
         if root_metric is not None:
             pack["root_metric"] = root_metric
