@@ -190,7 +190,7 @@ async def exercise_snapshot_task(url: str, token: str, *, resumed: bool) -> None
             {
                 "task_id": SNAPSHOT_TASK_ID,
                 "investigation_id": first_id,
-                "writer_patch": SNAPSHOT_WRITER_PATCH,
+                "writer_patch": _snapshot_writer_patch(run),
             },
         )
         _require_action(second, "write_conclusion")
@@ -203,7 +203,7 @@ async def exercise_snapshot_task(url: str, token: str, *, resumed: bool) -> None
             {
                 "task_id": SNAPSHOT_TASK_ID,
                 "investigation_id": second_id,
-                "writer_patch": SNAPSHOT_WRITER_PATCH,
+                "writer_patch": _snapshot_writer_patch(second),
             },
         )
         _require_action(completed, "task_complete")
@@ -211,6 +211,21 @@ async def exercise_snapshot_task(url: str, token: str, *, resumed: bool) -> None
             raise ContainerProbeError("snapshot task did not complete successfully")
         if "snapshot" in json.dumps([second, completed], ensure_ascii=False):
             raise ContainerProbeError("root snapshot leaked after task resume")
+
+
+def _snapshot_writer_patch(response: dict[str, Any]) -> dict[str, Any]:
+    writer_pack = response.get("writer_pack")
+    candidates = writer_pack.get("candidates") if isinstance(writer_pack, dict) else None
+    if not isinstance(candidates, list):
+        raise ContainerProbeError("snapshot writer response lacks candidate inventory")
+    finding_texts = {}
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id") if isinstance(candidate, dict) else None
+        label = candidate.get("label") if isinstance(candidate, dict) else None
+        if not isinstance(candidate_id, str) or not isinstance(label, str):
+            raise ContainerProbeError("snapshot writer candidate identity is invalid")
+        finding_texts[candidate_id] = f"Review the frozen candidate {label}."
+    return {**SNAPSHOT_WRITER_PATCH, "finding_texts": finding_texts}
 
 
 @asynccontextmanager

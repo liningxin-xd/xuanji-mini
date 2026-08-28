@@ -18,6 +18,7 @@ _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SQL = re.compile(r"(?is)(\bselect\s+.+?\bfrom\b|\bwith\s+\w+\s+as\s*\()")
 _MARKDOWN_TABLE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|\s*:?-{3,}")
+_RAW_ROWS_FIELD = re.compile(r'(?i)(?<!\\)"(?:raw_)?rows"\s*:')
 _POST_TERMINAL = {"succeeded", "failed", "skipped_by_policy"}
 _PRIMARY_TERMINAL = {"succeeded", "failed", "skipped_not_applicable"}
 _FORBIDDEN_TEXT = (
@@ -401,11 +402,12 @@ def _verify_run_state(
     primary_attempts = 0
     primary_queries = 0
     for step in steps:
-        attempts = _verify_attempts(
+        attempts = _verify_query_execution(
             step,
             allow_repair=allow_repair,
             all_query_ids=all_query_ids,
             label=f"primary step {step.get('id')}",
+            skipped_statuses={"skipped_not_applicable"},
         )
         primary_attempts += attempts
         primary_queries += int(attempts > 0)
@@ -429,24 +431,51 @@ def _verify_run_state(
     enhancement = post_primary.get("enhancement_plan")
     enhancement_id = post_plan["enhancement_priority_plan"]
     enhancement_contract = contracts.enhancement_priority_plan(enhancement_id)
+    modules = enhancement.get("modules") if isinstance(enhancement, dict) else None
+    contract_modules = enhancement_contract["modules"]
     if (
         not isinstance(enhancement, dict)
         or enhancement.get("plan_id") != enhancement_id
         or enhancement.get("plan_contract_sha256")
         != contracts.enhancement_priority_plan_contract_sha256(enhancement_id)
+        or enhancement.get("frozen_evidence_sha256")
+        != post_primary.get("primary_evidence_sha256")
         or enhancement.get("max_query_modules")
         != enhancement_contract["max_query_modules"]
         or enhancement.get("max_query_modules") != 2
+        or not isinstance(modules, list)
+        or len(modules) != len(contract_modules)
         or not isinstance(enhancement.get("selected_modules"), list)
-        or enhancement.get("query_module_count")
-        != len(enhancement["selected_modules"])
-        or enhancement.get("query_module_count") > 2
-        or any(
-            item not in {"error_code", "cross_dimension_overlap"}
-            for item in enhancement["selected_modules"]
-        )
     ):
         raise ShadowAcceptanceError("enhancement query-module budget changed")
+    selected_modules = []
+    for module, contract_module in zip(modules, contract_modules, strict=True):
+        if (
+            not isinstance(module, dict)
+            or module.get("id") != contract_module["id"]
+            or module.get("priority") != contract_module["priority"]
+            or module.get("query_cost") != contract_module["query_cost"]
+        ):
+            raise ShadowAcceptanceError("enhancement module order or identity changed")
+        status = module.get("status")
+        if contract_module["runtime_status"] == "disabled":
+            if status != "skipped_by_policy":
+                raise ShadowAcceptanceError("disabled enhancement module was scheduled")
+        elif status not in {"not_triggered", "selected", "skipped_by_budget"}:
+            raise ShadowAcceptanceError("enabled enhancement module status is invalid")
+        if status == "selected":
+            selected_modules.append(module["id"])
+    if (
+        enhancement["selected_modules"] != selected_modules
+        or enhancement.get("query_module_count") != len(selected_modules)
+        or len(selected_modules) > 2
+        or any(
+            item not in {"error_code", "cross_dimension_overlap"}
+            for item in selected_modules
+        )
+    ):
+        raise ShadowAcceptanceError("enhancement selection does not match its modules")
+    selected_query_modules = set(selected_modules)
 
     post_queries = 0
     post_attempts = 0
@@ -466,26 +495,51 @@ def _verify_run_state(
             if items and step.get("cursor") != len(items):
                 raise ShadowAcceptanceError("game background cursor is incomplete")
             for item in items:
-                if item.get("status") not in _POST_TERMINAL:
+                if not isinstance(item, dict) or item.get("status") not in {
+                    "succeeded",
+                    "failed",
+                }:
                     raise ShadowAcceptanceError(
                         "game background item is not terminal"
                     )
-                item_attempts = _verify_attempts(
+                item_attempts = _verify_query_execution(
                     item,
                     allow_repair=allow_repair,
                     all_query_ids=all_query_ids,
                     label="game background item",
+                    skipped_statuses=set(),
                 )
                 attempts += item_attempts
                 logical_queries += int(item_attempts > 0)
+            if items:
+                expected_status = (
+                    "succeeded"
+                    if any(item["status"] == "succeeded" for item in items)
+                    else "failed"
+                )
+                if step.get("status") != expected_status:
+                    raise ShadowAcceptanceError(
+                        "game background aggregate status is inconsistent"
+                    )
+            elif step.get("status") != "skipped_by_policy":
+                raise ShadowAcceptanceError(
+                    "game background terminal state lacks selected items"
+                )
         else:
-            attempts = _verify_attempts(
+            attempts = _verify_query_execution(
                 step,
                 allow_repair=allow_repair,
                 all_query_ids=all_query_ids,
                 label=f"post-primary step {step_id}",
+                skipped_statuses={"skipped_by_policy"},
             )
             logical_queries = int(attempts > 0)
+            if step_id in {"error_code", "cross_dimension_overlap"}:
+                selected = step_id in selected_query_modules
+                if selected != (step.get("status") in {"succeeded", "failed"}):
+                    raise ShadowAcceptanceError(
+                        f"enhancement selection and query step diverged: {step_id}"
+                    )
         if logical_queries > contract_step["max_queries"]:
             raise ShadowAcceptanceError(
                 f"post-primary step query cap exceeded: {step_id}"
@@ -500,6 +554,35 @@ def _verify_run_state(
         "post_primary_queries": post_queries,
         "post_primary_attempts": post_attempts,
     }
+
+
+def _verify_query_execution(
+    owner: dict[str, Any],
+    *,
+    allow_repair: bool,
+    all_query_ids: set[str],
+    label: str,
+    skipped_statuses: set[str],
+) -> int:
+    attempts = _verify_attempts(
+        owner,
+        allow_repair=allow_repair,
+        all_query_ids=all_query_ids,
+        label=label,
+    )
+    status = owner.get("status")
+    if status in skipped_statuses:
+        if attempts:
+            raise ShadowAcceptanceError(f"{label} issued a query after being skipped")
+        return 0
+    if status not in {"succeeded", "failed"} or not attempts:
+        raise ShadowAcceptanceError(f"{label} terminal status lacks a query attempt")
+    final_status = owner["attempts"][-1]["status"]
+    if status == "succeeded" and final_status != "succeeded":
+        raise ShadowAcceptanceError(f"{label} succeeded without a successful attempt")
+    if status == "failed" and final_status not in {"failed", "error"}:
+        raise ShadowAcceptanceError(f"{label} failed after a successful attempt")
+    return attempts
 
 
 def _verify_attempts(
@@ -522,10 +605,11 @@ def _verify_attempts(
         ):
             raise ShadowAcceptanceError(f"{label} query binding changed")
     for index, attempt in enumerate(attempts):
+        if not isinstance(attempt, dict):
+            raise ShadowAcceptanceError(f"{label} attempt state is incomplete")
         query_id = attempt.get("query_id")
         if (
-            not isinstance(attempt, dict)
-            or attempt.get("attempt_no") != index
+            attempt.get("attempt_no") != index
             or attempt.get("status") not in {"succeeded", "failed", "error"}
             or not isinstance(query_id, str)
             or not query_id
@@ -651,7 +735,10 @@ def _verify_transcript(
     allow_repair: bool,
 ) -> None:
     try:
-        if path.stat().st_size > 20 * 1024 * 1024:
+        metadata = path.stat()
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise ShadowAcceptanceError("model transcript permissions are too broad")
+        if metadata.st_size > 20 * 1024 * 1024:
             raise ShadowAcceptanceError("model transcript exceeds the acceptance limit")
         content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -661,6 +748,8 @@ def _verify_transcript(
         raise ShadowAcceptanceError("model transcript contains private evidence")
     if any(marker and marker in content for marker in private_markers):
         raise ShadowAcceptanceError("model transcript contains a private evidence identity")
+    if _RAW_ROWS_FIELD.search(content):
+        raise ShadowAcceptanceError("model transcript contains raw rows")
     if _MARKDOWN_TABLE.search(content) or (_SQL.search(content) and not allow_repair):
         raise ShadowAcceptanceError("model transcript contains SQL or a raw table")
 
@@ -674,6 +763,8 @@ def _verify_transcript(
     found_task_complete = False
     for value in parsed_values:
         for item, action_context in _walk_dicts(value):
+            if any(key in item for key in ("rows", "raw_rows")):
+                raise ShadowAcceptanceError("model transcript contains raw rows")
             own_action = item.get("action")
             repair_context = action_context == "repair_required" and allow_repair
             _verify_public_hash_keys(item, allow_private=repair_context)

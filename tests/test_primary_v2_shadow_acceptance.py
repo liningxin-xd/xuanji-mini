@@ -75,9 +75,44 @@ class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
                     transcript_path=transcript,
                 )
 
+    def test_unselected_enhancement_query_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, transcript = self._fixture(Path(temp))
+            path = root / "runs" / "shadow-v2-run" / "state.json"
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["post_primary"]["steps"][4].update(
+                self._query_owner("unselected-error-code")
+            )
+            self._write_state(path, state)
+            with self.assertRaises(ShadowAcceptanceError):
+                verify_shadow(
+                    data_root=root,
+                    task_id="shadow-v2-task",
+                    scenario="app-download",
+                    transcript_path=transcript,
+                )
+
+    def test_succeeded_query_step_without_attempt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, transcript = self._fixture(Path(temp))
+            path = root / "runs" / "shadow-v2-run" / "state.json"
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["post_primary"]["steps"][1].update(
+                {"status": "succeeded", "reason": None}
+            )
+            self._write_state(path, state)
+            with self.assertRaises(ShadowAcceptanceError):
+                verify_shadow(
+                    data_root=root,
+                    task_id="shadow-v2-task",
+                    scenario="app-download",
+                    transcript_path=transcript,
+                )
+
     def test_transcript_private_evidence_or_full_receipt_fails_closed(self):
         leaks = (
             '{"query_id":"private-query"}\n',
+            '{"action":"write_conclusion","rows":[["private-row",123]]}\n',
             "SELECT secret FROM private_table\n",
             json.dumps(
                 {
@@ -101,6 +136,20 @@ class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
                         scenario="app-download",
                         transcript_path=transcript,
                     )
+
+    def test_transcript_permissions_must_remain_private(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, transcript = self._fixture(Path(temp))
+            os.chmod(transcript, 0o644)
+            with self.assertRaisesRegex(
+                ShadowAcceptanceError, "transcript permissions"
+            ):
+                verify_shadow(
+                    data_root=root,
+                    task_id="shadow-v2-task",
+                    scenario="app-download",
+                    transcript_path=transcript,
+                )
 
     def test_nested_task_complete_and_bounded_repair_are_supported(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -208,6 +257,24 @@ class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
             owner.update({"id": plan_step.id, "status": "succeeded"})
             primary_steps.append(owner)
         post_plan = contracts.post_primary_plan("post_primary_v1")
+        enhancement_id = post_plan["enhancement_priority_plan"]
+        enhancement_contract = contracts.enhancement_priority_plan(enhancement_id)
+        enhancement_modules = []
+        for module in enhancement_contract["modules"]:
+            planned = {
+                "id": module["id"],
+                "priority": module["priority"],
+                "query_cost": module["query_cost"],
+            }
+            if module["runtime_status"] == "disabled":
+                planned.update(
+                    {"status": "skipped_by_policy", "reason": module["reason"]}
+                )
+            else:
+                planned.update(
+                    {"status": "not_triggered", "reason": "fixture_not_triggered"}
+                )
+            enhancement_modules.append(planned)
         post_steps = [
             {
                 "id": item["id"],
@@ -277,16 +344,17 @@ class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
                 "primary_evidence_sha256": "b" * 64,
                 "status": "completed",
                 "enhancement_plan": {
-                    "plan_id": post_plan["enhancement_priority_plan"],
+                    "plan_id": enhancement_id,
                     "plan_contract_sha256": (
                         contracts.enhancement_priority_plan_contract_sha256(
-                            post_plan["enhancement_priority_plan"]
+                            enhancement_id
                         )
                     ),
+                    "frozen_evidence_sha256": "b" * 64,
                     "max_query_modules": 2,
                     "query_module_count": 0,
                     "selected_modules": [],
-                    "modules": [],
+                    "modules": enhancement_modules,
                     "evidence_limits": [],
                 },
                 "steps": post_steps,
@@ -436,6 +504,7 @@ class PrimaryV2ShadowAcceptanceTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        os.chmod(transcript, 0o600)
         return root, transcript
 
     @staticmethod

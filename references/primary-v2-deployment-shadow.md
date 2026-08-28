@@ -95,9 +95,11 @@ checks unauthenticated `401`, the exact three-tool surface, UID 10001, cwd
 `/app`, writable persistent data, restart/resume, task and finalize conflicts,
 cross-profile resume rejection, stable signed handoff, and distinct
 root/primary/post-primary query counts. Its deterministic DView stub executes a
-full seven-step primary queue and a completed six-step post-primary plan with
-zero selected post-primary queries. Unit fixtures separately cover every
-post-primary query module, threshold, failure, repair, and total budget branch.
+full seven-step primary queue. The v2 profile also executes one secondary query
+and one game-background query before completing the six-step post-primary plan;
+the v1 profile remains at zero post-primary queries. Unit fixtures separately
+cover every post-primary query module, threshold, failure, repair, and total
+budget branch.
 
 Do not use the production v1 PVC to test cross-profile rejection. The smoke
 uses only its ephemeral fixture volume.

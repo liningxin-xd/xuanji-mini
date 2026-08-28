@@ -3,22 +3,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.transport_security import TransportSecuritySettings
 
-from runtime.contracts import RepositoryContracts
-from runtime.query_builder import QueryBuilder
-from tests.runtime_result_fixtures import _bucket_rows
+from runtime.runner import AttributionRunner
+from tests.runtime_result_fixtures import (
+    raw_result_for_ticket,
+    self_reported_result_event,
+)
 
 
 def main() -> None:
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.transport_security import TransportSecuritySettings
+
     port = int(os.environ["XUANJI_SMOKE_DVIEW_PORT"])
     count_path = Path(os.environ["XUANJI_SMOKE_DVIEW_COUNT_FILE"])
+    analysis_profile = os.environ["XUANJI_SMOKE_ANALYSIS_PROFILE"]
     query_spec = yaml.safe_load(
         (
             Path(__file__).resolve().parents[1]
@@ -29,7 +34,7 @@ def main() -> None:
     )
     columns = query_spec["output"]["columns"]
     query_counts = {"root": 0, "primary": 0, "post_primary": 0}
-    primary_results = _primary_results()
+    attribution_results = _attribution_results(analysis_profile)
     mcp = FastMCP(
         name="Xuanji container smoke DView stub",
         host="0.0.0.0",
@@ -45,18 +50,17 @@ def main() -> None:
     async def query(sql: str, database_type: str, limit: int) -> dict[str, Any]:
         if database_type != "MaxCompute" or limit != 250:
             raise ToolError("container smoke query contract changed")
-        primary = primary_results.get(sql)
-        if primary is not None:
-            query_counts["primary"] += 1
+        attribution = attribution_results.get(sql)
+        if attribution is not None:
+            phase = attribution["phase"]
+            query_counts[phase] += 1
             count_path.write_text(
                 json.dumps(query_counts, sort_keys=True), encoding="utf-8"
             )
             return {
-                "query_id": (
-                    f"private-container-primary-{query_counts['primary']}"
-                ),
-                "columns": primary["columns"],
-                "rows": primary["rows"],
+                "query_id": f"private-container-{phase}-{query_counts[phase]}",
+                "columns": attribution["columns"],
+                "rows": attribution["rows"],
             }
 
         partition = re.search(r"SELECT\s+'(\d{4}-\d{2}-\d{2})'\s+AS alert_date", sql)
@@ -108,44 +112,70 @@ def main() -> None:
     mcp.run(transport="streamable-http")
 
 
-def _primary_results() -> dict[str, dict[str, Any]]:
+def _attribution_results(analysis_profile: str) -> dict[str, dict[str, Any]]:
+    if analysis_profile not in {"primary_v1", "primary_v2"}:
+        raise ValueError("container smoke analysis profile is invalid")
     root = Path(__file__).resolve().parents[1]
-    contracts = RepositoryContracts(root)
-    builder = QueryBuilder(contracts)
-    plan = contracts.select_plan("download", "app", "下载完成率")
-    state = {
-        "analysis_date": "2026-08-24",
-        "game_type": "app",
-        "metric": "下载完成率",
-    }
     results: dict[str, dict[str, Any]] = {}
-    for step in plan.steps:
-        binding = contracts.binding_for(
-            plan, step.id, state["metric"], state["game_type"]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        runner = AttributionRunner(
+            root,
+            runs_root=temp_dir,
+            analysis_profile=analysis_profile,
         )
-        built = builder.build(
-            binding,
-            {
-                "business_date": state["analysis_date"],
-                "game_type": state["game_type"],
-            },
+        run_id = "container-dview-fixture"
+        runner.init_run(
+            run_id=run_id,
+            chain="download",
+            game_type="app",
+            metric="下载完成率",
+            alert_date="2026-08-24",
+            receipt_mode="self_reported",
         )
-        schema = contracts.result_schema(binding.result_schema_id)
-        if schema.get("columns_from_query_spec"):
-            columns, _ = contracts.query_spec_result_contract(binding)
-        else:
-            columns = schema["columns"]
-        rows = _bucket_rows(
-            columns,
-            state,
-            business_kind=schema["business_bucket_kind"],
-            candidate=False,
-            source_audit=bool(schema.get("require_source_bucket_audit")),
-        )
-        results[built.sql] = {
-            "columns": list(columns),
-            "rows": [[row[name] for name in columns] for row in rows],
-        }
+        query_index = 0
+        while True:
+            ticket = runner.next_action(run_id)
+            if ticket["action"] == "queue_complete":
+                break
+            query_index += 1
+            step_id = ticket["step_id"]
+            raw_result = raw_result_for_ticket(
+                runner,
+                run_id,
+                ticket,
+                candidate=(
+                    analysis_profile == "primary_v2" and step_id == "game_id"
+                ),
+            )
+            columns = raw_result["columns"]
+            if ticket["rendered_sql"] in results:
+                raise RuntimeError("container smoke generated duplicate locked SQL")
+            results[ticket["rendered_sql"]] = {
+                "phase": (
+                    "post_primary"
+                    if step_id
+                    in {
+                        "secondary",
+                        "game_background",
+                        "error_code",
+                        "cross_dimension_overlap",
+                    }
+                    else "primary"
+                ),
+                "step_id": step_id,
+                "columns": list(columns),
+                "rows": [
+                    [row[name] for name in columns] for row in raw_result["rows"]
+                ],
+            }
+            runner.record(
+                run_id,
+                self_reported_result_event(
+                    ticket,
+                    raw_result,
+                    f"fixture-{analysis_profile}-{query_index}",
+                ),
+            )
     return results
 
 

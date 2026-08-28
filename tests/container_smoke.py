@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> None:
     dview_env = dict(os.environ)
     dview_env["XUANJI_SMOKE_DVIEW_PORT"] = str(dview_port)
     dview_env["XUANJI_SMOKE_DVIEW_COUNT_FILE"] = str(count_path)
+    dview_env["XUANJI_SMOKE_ANALYSIS_PROFILE"] = analysis_profile
     dview = subprocess.Popen(
         [sys.executable, str(ROOT / "tests" / "container_dview_stub.py")],
         cwd=ROOT,
@@ -89,9 +90,7 @@ def main(argv: list[str] | None = None) -> None:
         _assert_non_root_and_writable(container)
         first_task = asyncio.run(exercise_task(url, HOST_TOKEN, resumed=False))
         asyncio.run(exercise_snapshot_task(url, HOST_TOKEN, resumed=False))
-        _assert_dview_query_counts(
-            count_path, {"root": 8, "primary": 7, "post_primary": 0}
-        )
+        _assert_dview_query_counts(count_path, _expected_query_counts(analysis_profile))
         _assert_persisted_artifacts(container, analysis_profile)
 
         _run(["docker", "stop", container])
@@ -127,9 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         ):
             raise RuntimeError("signed pipeline handoff changed across restart")
         asyncio.run(exercise_snapshot_task(url, HOST_TOKEN, resumed=True))
-        _assert_dview_query_counts(
-            count_path, {"root": 8, "primary": 7, "post_primary": 0}
-        )
+        _assert_dview_query_counts(count_path, _expected_query_counts(analysis_profile))
     except Exception:
         _print_container_logs(container)
         dview_log.seek(0)
@@ -260,6 +257,14 @@ def _assert_dview_query_counts(path: Path, expected: dict[str, int]) -> None:
         raise RuntimeError(
             f"expected query counts {expected} across restart, received {actual}"
         )
+
+
+def _expected_query_counts(analysis_profile: str) -> dict[str, int]:
+    return {
+        "root": 8,
+        "primary": 7,
+        "post_primary": 2 if analysis_profile == "primary_v2" else 0,
+    }
 
 
 def _wait_for_unauthorized(url: str, container: str) -> None:
