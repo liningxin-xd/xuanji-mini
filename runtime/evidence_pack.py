@@ -108,6 +108,10 @@ class EvidencePackBuilder:
             for step in post_primary.get("steps", []):
                 if step.get("reason") == "profile_step_disabled":
                     continue
+                if step["id"] == "breadth_check" and step["status"] == (
+                    "skipped_by_policy"
+                ):
+                    continue
                 writer_step = {"step": step["id"], "status": step["status"]}
                 if step["status"] == "skipped_by_policy" and isinstance(
                     step.get("reason"), str
@@ -195,6 +199,37 @@ class EvidencePackBuilder:
                                 "lifecycle": candidate["lifecycle"],
                             }
                         )
+                if step["id"] == "breadth_check" and step["status"] == (
+                    "succeeded"
+                ):
+                    calibrations = step.get("calibrations")
+                    if not isinstance(calibrations, list):
+                        raise EvidencePackError(
+                            "succeeded breadth check lacks calibrations"
+                        )
+                    candidate_by_id = {
+                        item["candidate_id"]: item for item in exposed_candidates
+                    }
+                    for calibration in calibrations:
+                        if not isinstance(calibration, dict):
+                            raise EvidencePackError(
+                                "breadth calibration must be an object"
+                            )
+                        candidate = candidate_by_id.get(
+                            calibration.get("candidate_id")
+                        )
+                        if candidate is None:
+                            raise EvidencePackError(
+                                "breadth calibration lacks a writer candidate"
+                            )
+                        candidate["breadth_calibration"] = {
+                            field: calibration[field]
+                            for field in (
+                                "specificity_status",
+                                "supporting_bucket_count",
+                                "supporting_buckets",
+                            )
+                        }
                 if step["id"] == "game_background" and step["status"] in {
                     "succeeded",
                     "failed",

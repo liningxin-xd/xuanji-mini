@@ -187,7 +187,13 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         )
         profile = contracts.analysis_profile("primary_v2")
         self.assertEqual(
-            ["counterfactual", "secondary", "game_background", "error_code"],
+            [
+                "counterfactual",
+                "secondary",
+                "game_background",
+                "breadth_check",
+                "error_code",
+            ],
             profile["enabled_post_primary_steps"],
         )
         plan = contracts.post_primary_plan(profile["post_primary_plan"])
@@ -196,7 +202,13 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             "direction_enhancement_v1", plan["enhancement_priority_plan"]
         )
         self.assertEqual(
-            ["counterfactual", "secondary", "game_background", "error_code"],
+            [
+                "counterfactual",
+                "secondary",
+                "game_background",
+                "breadth_check",
+                "error_code",
+            ],
             [step["id"] for step in plan["steps"]],
         )
 
@@ -259,7 +271,13 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             0, state["post_primary"]["enhancement_plan"]["query_module_count"]
         )
         self.assertEqual(
-            ["succeeded", "succeeded", "succeeded", "skipped_by_policy"],
+            [
+                "succeeded",
+                "succeeded",
+                "succeeded",
+                "skipped_by_policy",
+                "skipped_by_policy",
+            ],
             [step["status"] for step in state["post_primary"]["steps"]],
         )
         encoded = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))

@@ -18,6 +18,18 @@ plans:
           dominant_counterfactual_max_games: 1
           cumulative_root_adverse_ratio: 0.50
           max_games: 3
+      - id: breadth_check
+        kind: deterministic
+        max_queries: 0
+        selection:
+          eligible_dimensions:
+            - channel_group
+            - device_brand
+            - os_major_version
+          minimum_other_buckets: 2
+          minimum_relative_rate_change: 0.50
+          max_focus_candidates_per_family: 3
+          max_supporting_buckets: 2
       - id: error_code
         kind: query
         max_queries: 1

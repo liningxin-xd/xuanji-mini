@@ -31,9 +31,12 @@ class ResultValidationOutcome:
     root_baseline_numerator: float | None
     root_baseline_denominator: float | None
     family_adverse_impact_bp: float | None
+    breadth_buckets: tuple[dict[str, Any], ...] = ()
 
 
 class ResultValidator:
+    BREADTH_DIMENSIONS = {"channel_group", "device_brand", "os_major_version"}
+
     def __init__(self, contracts: RepositoryContracts):
         self.contracts = contracts
 
@@ -209,6 +212,7 @@ class ResultValidator:
 
         warnings = self._bucket_warning_codes(rows)
         candidates: list[dict[str, Any]] = []
+        breadth_buckets: list[dict[str, Any]] = []
         if produces_candidates:
             row_by_identity = {
                 (row["bucket_kind"], str(row["dimension_value"])): row
@@ -232,6 +236,15 @@ class ResultValidator:
                     contribution.current_share, contribution.baseline_share
                 ) < float(defaults["minimum_share"]):
                     continue
+                if step_id in self.BREADTH_DIMENSIONS:
+                    breadth_buckets.append(
+                        {
+                            "value": contribution.dimension_value,
+                            "label": contribution.dimension_label,
+                            "current_rate": contribution.current_rate,
+                            "baseline_rate": contribution.baseline_rate,
+                        }
+                    )
                 if contribution.adverse_impact + 1e-15 < float(
                     defaults["minimum_adverse_impact"]
                 ):
@@ -253,6 +266,7 @@ class ResultValidator:
         candidates.sort(
             key=lambda item: (-item["adverse_impact_bp"], item["value"])
         )
+        breadth_buckets.sort(key=lambda item: item["value"])
         first = rows[0]
         root_current_value = (
             first["overall_current_numerator"]
@@ -279,6 +293,7 @@ class ResultValidator:
                 for item in contributions
                 if item.bucket_kind != "quality"
             ),
+            breadth_buckets=tuple(breadth_buckets),
         )
 
     def _validate_install_stage(

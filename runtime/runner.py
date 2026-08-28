@@ -230,6 +230,7 @@ class AttributionRunner:
                     "attempts": [],
                     "candidate_count": None,
                     "candidates": [],
+                    "breadth_buckets": [],
                     "root_current_value": None,
                     "root_baseline_value": None,
                     "root_delta": None,
@@ -504,6 +505,11 @@ class AttributionRunner:
                     step["status"] = StepStatus.SUCCEEDED.value
                     step["candidate_count"] = outcome.candidate_count
                     step["candidates"] = list(outcome.candidates)
+                    step["breadth_buckets"] = (
+                        list(outcome.breadth_buckets)
+                        if state.get("analysis_profile") == "primary_v2"
+                        else []
+                    )
                     step["root_current_value"] = outcome.root_current_value
                     step["root_baseline_value"] = outcome.root_baseline_value
                     step["root_delta"] = outcome.root_delta
@@ -1378,6 +1384,10 @@ class AttributionRunner:
                         step,
                         required=analysis_profile == "primary_v2",
                     )
+                    self._validate_private_breadth_buckets(
+                        step,
+                        required=analysis_profile == "primary_v2",
+                    )
                 elif any(value is not None for value in root_values):
                     raise RunnerError("diagnostic step cannot contain root metric facts")
                 elif any(
@@ -1395,6 +1405,8 @@ class AttributionRunner:
                 raise RunnerError("non-succeeded step cannot have candidate_count")
             elif step.get("candidates") != []:
                 raise RunnerError("non-succeeded step cannot have candidate details")
+            elif step.get("breadth_buckets", []) != []:
+                raise RunnerError("non-succeeded step cannot have breadth buckets")
             elif any(
                 step.get(field) is not None
                 for field in (
@@ -1636,6 +1648,59 @@ class AttributionRunner:
                 for value in counts.values()
             ):
                 raise RunnerError("primary candidate private counts are invalid")
+
+    def _validate_private_breadth_buckets(
+        self, step: dict[str, Any], *, required: bool
+    ) -> None:
+        eligible = step["id"] in {
+            "channel_group",
+            "device_brand",
+            "os_major_version",
+        }
+        buckets = step.get("breadth_buckets")
+        if not required or not eligible:
+            if buckets not in (None, []):
+                raise RunnerError("ineligible step contains breadth buckets")
+            return
+        if not isinstance(buckets, list):
+            raise RunnerError("breadth buckets must be an array")
+        by_value: dict[str, dict[str, Any]] = {}
+        for bucket in buckets:
+            if not isinstance(bucket, dict) or set(bucket) != {
+                "value",
+                "label",
+                "current_rate",
+                "baseline_rate",
+            }:
+                raise RunnerError("breadth bucket shape is invalid")
+            value = bucket["value"]
+            label = bucket["label"]
+            rates = (bucket["current_rate"], bucket["baseline_rate"])
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value in by_value
+                or not isinstance(label, str)
+                or not label.strip()
+                or any(
+                    isinstance(rate, bool)
+                    or not isinstance(rate, (int, float))
+                    or not math.isfinite(float(rate))
+                    or not 0 <= float(rate) <= 1
+                    for rate in rates
+                )
+            ):
+                raise RunnerError("breadth bucket value or rate is invalid")
+            by_value[value] = bucket
+        for candidate in step["candidates"]:
+            bucket = by_value.get(candidate["value"])
+            if bucket is None or any(
+                bucket[field] != candidate[field]
+                for field in ("label", "current_rate", "baseline_rate")
+            ):
+                raise RunnerError(
+                    "primary candidate no longer rehooks its breadth bucket"
+                )
 
     def _validate_secondary_runtime_state(
         self,

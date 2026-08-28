@@ -481,7 +481,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         state = runner.load_state("secondary-lower-is-better")
         self.assertTrue(state["post_primary"]["steps"][0]["result"]["dominant"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])
-        self.assertEqual("succeeded", state["post_primary"]["steps"][3]["status"])
+        self.assertEqual("succeeded", state["post_primary"]["steps"][4]["status"])
 
     def test_final_validator_rejects_forged_parent_and_child_candidate(self):
         runner, _ = self._complete("secondary-final")

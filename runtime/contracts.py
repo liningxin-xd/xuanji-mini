@@ -47,6 +47,7 @@ EXPECTED_POST_PRIMARY_STEPS = (
     "counterfactual",
     "secondary",
     "game_background",
+    "breadth_check",
     "error_code",
 )
 EXPECTED_ENHANCEMENT_MODULES = (
@@ -342,6 +343,22 @@ class RepositoryContracts:
             step.get("selection"), dict
         ):
             raise ContractError("game background selection policy is missing")
+        return deepcopy(step["selection"])
+
+    def breadth_check_policy(self) -> dict[str, Any]:
+        plan = self.post_primary_plan("post_primary_v1")
+        step = next(
+            (
+                item
+                for item in plan["steps"]
+                if item.get("id") == "breadth_check"
+            ),
+            None,
+        )
+        if not isinstance(step, dict) or not isinstance(
+            step.get("selection"), dict
+        ):
+            raise ContractError("breadth check selection policy is missing")
         return deepcopy(step["selection"])
 
     def error_code_capability(
@@ -870,6 +887,7 @@ class RepositoryContracts:
             "counterfactual": ("deterministic", 0),
             "secondary": ("query", 1),
             "game_background": ("query", 3),
+            "breadth_check": ("deterministic", 0),
             "error_code": ("query", 1),
         }
         for step in steps:
@@ -882,6 +900,18 @@ class RepositoryContracts:
                 "max_games": 3,
             }:
                 raise ContractError("game background selection policy changed")
+            if step.get("id") == "breadth_check" and step.get("selection") != {
+                "eligible_dimensions": [
+                    "channel_group",
+                    "device_brand",
+                    "os_major_version",
+                ],
+                "minimum_other_buckets": 2,
+                "minimum_relative_rate_change": 0.5,
+                "max_focus_candidates_per_family": 3,
+                "max_supporting_buckets": 2,
+            }:
+                raise ContractError("breadth check selection policy changed")
         if plan.get("max_additional_queries") != sum(
             item[1] for item in expected_queries.values()
         ):
@@ -903,6 +933,7 @@ class RepositoryContracts:
                 "counterfactual",
                 "secondary",
                 "game_background",
+                "breadth_check",
                 "error_code",
             ]
         ):

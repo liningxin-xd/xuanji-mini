@@ -277,7 +277,7 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
         self.assertEqual(["error_code"], enhancement_plan["selected_modules"])
         self.assertEqual(1, enhancement_plan["query_module_count"])
         self.assertEqual([], enhancement_plan["evidence_limits"])
-        error_code = state["post_primary"]["steps"][3]
+        error_code = state["post_primary"]["steps"][4]
         self.assertEqual("succeeded", error_code["status"])
         self.assertLessEqual(len(error_code["facts"]), 5)
         self.assertEqual(
@@ -319,7 +319,7 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
         )
         facts = runner.load_state("error-code-focus-budget")["post_primary"][
             "steps"
-        ][3]["facts"]
+        ][4]["facts"]
         overall = [fact for fact in facts if fact["scope"] == "overall"]
         focus = [fact for fact in facts if fact["scope"] == "focus_game"]
         self.assertEqual(3, len(overall))
@@ -361,7 +361,7 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
             error_code_mutator=break_closure,
         )
         state = runner.load_state("error-code-invalid")
-        error_code = state["post_primary"]["steps"][3]
+        error_code = state["post_primary"]["steps"][4]
         self.assertEqual("failed", error_code["status"])
         self.assertEqual("result_incomplete", error_code["failure_code"])
         self.assertTrue(state["ready_for_final_validation"])
@@ -411,7 +411,7 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
             error_code_failure=True,
         )
         state = runner.load_state("error-code-private-failure")
-        private_reason = state["post_primary"]["steps"][3]["reason"]
+        private_reason = state["post_primary"]["steps"][4]["reason"]
         self.assertIn("SELECT secret", private_reason)
         pack = runner.build_writer_pack("error-code-private-failure")
         encoded = json.dumps(pack, ensure_ascii=False)
@@ -522,9 +522,9 @@ class ErrorCodeRuntimeTest(unittest.TestCase):
             ),
         )
         state = runner.load_state("error-code-repair")
-        attempts = state["post_primary"]["steps"][3]["attempts"]
+        attempts = state["post_primary"]["steps"][4]["attempts"]
         self.assertEqual(2, len(attempts))
-        self.assertEqual("succeeded", state["post_primary"]["steps"][3]["status"])
+        self.assertEqual("succeeded", state["post_primary"]["steps"][4]["status"])
 
 
 if __name__ == "__main__":
