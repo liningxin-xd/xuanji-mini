@@ -26,7 +26,7 @@ def public_analysis_projection(value: Any) -> Any:
         return {
             key: public_analysis_projection(child)
             for key, child in value.items()
-            if key not in _PRIVATE_FIELDS
+            if key not in _PRIVATE_FIELDS and not key.endswith("_sha256")
         }
     if isinstance(value, list):
         return [public_analysis_projection(child) for child in value]

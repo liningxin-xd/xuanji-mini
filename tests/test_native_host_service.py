@@ -575,6 +575,8 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "WITH ",
                 "query_id",
                 "raw_result",
+                "primary_evidence_sha256",
+                "frozen_evidence_sha256",
                 "event_detail",
                 "source_snapshot_dt",
                 "/private/tmp/",

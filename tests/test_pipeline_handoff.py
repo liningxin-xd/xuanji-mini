@@ -32,13 +32,20 @@ def _artifact() -> dict:
                 "summary": "validated",
                 "queries": [{"query_id": "private-query"}],
                 "attribution_execution": {
+                    "primary_evidence_sha256": "e" * 64,
                     "steps": [
                         {
                             "step": "game_id",
                             "query_id": "private-step-query",
                             "candidate_count": 1,
                         }
-                    ]
+                    ],
+                    "post_primary": {
+                        "enhancement_plan": {
+                            "frozen_evidence_sha256": "f" * 64,
+                            "future_private_sha256": "0" * 64,
+                        }
+                    },
                 },
             }
         ],
@@ -79,6 +86,9 @@ class PipelineHandoffSignerTest(unittest.TestCase):
         encoded = json.dumps(preview, ensure_ascii=False)
         self.assertNotIn("query_id", encoded)
         self.assertNotIn("private-query", encoded)
+        self.assertNotIn("primary_evidence_sha256", encoded)
+        self.assertNotIn("frozen_evidence_sha256", encoded)
+        self.assertNotIn("future_private_sha256", encoded)
         self.assertEqual(canonical_sha256(preview), handoff["analysis_preview_sha256"])
         self.assertEqual("a" * 64, handoff["payload_sha256"])
 
