@@ -105,6 +105,13 @@ The complete task analysis and receipt are written atomically to:
 /var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json
 ```
 
+The file uses `contracts/task-result.schema.json` schema version 1. Its envelope
+contains only `schema_version`, `task_id`, `analysis`, and
+`validation_receipt`. A trusted consumer must verify `task_id`, canonical
+`payload_sha256`, canonical `analysis_sha256`, and
+`validation_receipt_sha256` before accepting the analysis. Internal analysis
+and receipt fields remain extensible; this handoff does not add a model tool.
+
 The model receives a recursively redacted preview and compact receipt hashes.
 SQL, raw rows, query IDs, raw-result hashes, and private receipts stay in Host
 state and machine-only sinks. The authoritative task receipt binds the compiled

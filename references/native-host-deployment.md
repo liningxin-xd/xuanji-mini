@@ -44,6 +44,12 @@ levels:
 
 Only a trusted pipeline writer may read that directory. It must never be
 exposed as another model tool or returned by an artifact download endpoint.
+`validated-task-result.json` is the versioned machine handoff defined by
+[`contracts/task-result.schema.json`](../contracts/task-result.schema.json).
+Consumers must require schema version 1, verify the immutable task and payload
+identity plus both receipt hashes, and treat `analysis_preview` from the model
+transcript as non-authoritative. The envelope is fixed while `analysis` and
+`validation_receipt` may gain fields without changing the three model tool APIs.
 
 The committed Kubernetes source is `deploy/primary-v1/manifests.yaml`. It is a
 fail-closed template: the placeholder image cannot pass the production gate.

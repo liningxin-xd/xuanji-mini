@@ -393,13 +393,52 @@ class ValidatedResultSinkTest(unittest.TestCase):
     def test_task_sink_is_idempotent_and_conflict_rejecting(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             sink = FileTaskResultSink(temp_dir)
-            analysis = {"overall_status": "completed", "investigations": []}
-            receipt = {"status": "valid"}
+            analysis = {
+                "overall_status": "completed",
+                "investigations": [],
+                "new_flow_metadata": {"version": 2},
+            }
+            receipt = {"status": "valid", "new_flow_metadata": {"opaque": True}}
             sink("task-1", analysis, receipt)
             sink("task-1", analysis, receipt)
-            self.assertEqual(analysis, sink.load("task-1")["analysis"])
+            artifact = sink.load("task-1")
+            self.assertEqual(1, artifact["schema_version"])
+            self.assertEqual(
+                {"schema_version", "task_id", "analysis", "validation_receipt"},
+                set(artifact),
+            )
+            self.assertEqual(analysis, artifact["analysis"])
             with self.assertRaisesRegex(RuntimeError, "conflicting content"):
                 sink("task-1", {"overall_status": "failed"}, receipt)
+
+    def test_task_sink_rejects_unversioned_or_unknown_schema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_root = Path(temp_dir) / "task-1"
+            task_root.mkdir()
+            target = task_root / "validated-task-result.json"
+            sink = FileTaskResultSink(temp_dir)
+            for payload in (
+                {
+                    "task_id": "task-1",
+                    "analysis": {},
+                    "validation_receipt": {},
+                },
+                {
+                    "schema_version": 2,
+                    "task_id": "task-1",
+                    "analysis": {},
+                    "validation_receipt": {},
+                },
+                {
+                    "schema_version": True,
+                    "task_id": "task-1",
+                    "analysis": {},
+                    "validation_receipt": {},
+                },
+            ):
+                target.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "artifact is invalid"):
+                    sink.load("task-1")
 
 
 if __name__ == "__main__":

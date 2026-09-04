@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taptap.com/contracts/xuanji-task-result.schema.json",
+  "title": "Xuanji validated task result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "analysis",
+    "validation_receipt"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "analysis": {
+      "type": "object"
+    },
+    "validation_receipt": {
+      "type": "object",
+      "required": [
+        "status",
+        "task_id",
+        "payload_sha256",
+        "definition_bundle_sha256",
+        "overall_status",
+        "investigation_count",
+        "successful_investigation_count",
+        "analysis_sha256",
+        "validation_receipt_sha256"
+      ],
+      "properties": {
+        "status": {
+          "const": "valid"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "definition_bundle_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "overall_status": {
+          "enum": ["completed", "partial", "failed"]
+        },
+        "investigation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successful_investigation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "analysis_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validation_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -215,7 +215,12 @@ class PrimaryV1ShadowAcceptanceTest(unittest.TestCase):
             / "tasks"
             / task_id
             / "validated-task-result.json",
-            {"task_id": task_id, "analysis": analysis, "validation_receipt": receipt},
+            {
+                "schema_version": 1,
+                "task_id": task_id,
+                "analysis": analysis,
+                "validation_receipt": receipt,
+            },
         )
         transcript = root / "model-transcript.jsonl"
         transcript.write_text(

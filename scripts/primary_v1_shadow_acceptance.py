@@ -62,6 +62,12 @@ _EXPECTED_SCENARIOS = {
         "root_snapshot_count": 2,
     },
 }
+_TASK_RESULT_FIELDS = {
+    "schema_version",
+    "task_id",
+    "analysis",
+    "validation_receipt",
+}
 
 
 class ShadowAcceptanceError(ValueError):
@@ -186,7 +192,10 @@ def _verify_sink(
     analysis = sink.get("analysis")
     receipt = sink.get("validation_receipt")
     if (
-        sink.get("task_id") != task_id
+        set(sink) != _TASK_RESULT_FIELDS
+        or isinstance(sink.get("schema_version"), bool)
+        or sink.get("schema_version") != 1
+        or sink.get("task_id") != task_id
         or not isinstance(analysis, dict)
         or not isinstance(receipt, dict)
         or receipt.get("status") != "valid"

@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+TASK_RESULT_SCHEMA_VERSION = 1
+_TASK_RESULT_FIELDS = {
+    "schema_version",
+    "task_id",
+    "analysis",
+    "validation_receipt",
+}
 
 
 class FileValidatedResultSink:
@@ -87,6 +94,7 @@ class FileTaskResultSink:
         if _RUN_ID.fullmatch(task_id) is None:
             raise ValueError("task_id is not safe for Host artifact storage")
         payload = {
+            "schema_version": TASK_RESULT_SCHEMA_VERSION,
             "task_id": task_id,
             "analysis": analysis,
             "validation_receipt": validation_receipt,
@@ -128,6 +136,18 @@ class FileTaskResultSink:
             payload = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError("task result sink artifact cannot be loaded") from exc
-        if not isinstance(payload, dict) or payload.get("task_id") != task_id:
-            raise RuntimeError("task result sink artifact is invalid")
+        _validate_task_result_payload(payload, task_id)
         return payload
+
+
+def _validate_task_result_payload(payload: Any, task_id: str) -> None:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _TASK_RESULT_FIELDS
+        or isinstance(payload.get("schema_version"), bool)
+        or payload.get("schema_version") != TASK_RESULT_SCHEMA_VERSION
+        or payload.get("task_id") != task_id
+        or not isinstance(payload.get("analysis"), dict)
+        or not isinstance(payload.get("validation_receipt"), dict)
+    ):
+        raise RuntimeError("task result sink artifact is invalid")
