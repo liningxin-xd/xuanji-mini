@@ -18,8 +18,27 @@ from .task_assembler import TaskAssembler, writer_pack_size
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_DAILY_PUSH_TASK_ID = re.compile(
+    r"daily-push-\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{64}"
+)
+
+
 class TaskCoordinatorError(ValueError):
     pass
+
+
+class TaskReferenceError(TaskCoordinatorError):
+    pass
+
+
+def validate_task_id(task_id: Any) -> None:
+    if not isinstance(task_id, str) or _TASK_ID.fullmatch(task_id) is None:
+        raise TaskReferenceError("task_id is invalid")
+    if (
+        task_id.startswith("daily-push-")
+        and _DAILY_PUSH_TASK_ID.fullmatch(task_id) is None
+    ):
+        raise TaskReferenceError("daily-push task_id is malformed")
 
 
 class InvestigationHost(Protocol):
@@ -80,7 +99,7 @@ class RegisteredAlertCoordinator:
             )
 
     def run_task(self, *, task_id: str, dqc_payload: Any) -> dict[str, Any]:
-        self._validate_task_id(task_id)
+        validate_task_id(task_id)
         payload_sha256 = self._payload_sha256(dqc_payload)
         state_path = self._state_path(task_id)
         if state_path.exists():
@@ -448,9 +467,11 @@ class RegisteredAlertCoordinator:
         }
 
     def _load_state(self, task_id: str) -> dict[str, Any]:
-        self._validate_task_id(task_id)
+        validate_task_id(task_id)
         try:
             state = json.loads(self._state_path(task_id).read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise TaskReferenceError(f"task state does not exist: {task_id}") from exc
         except (OSError, json.JSONDecodeError) as exc:
             raise TaskCoordinatorError(f"task state cannot be loaded: {task_id}") from exc
         if not isinstance(state, dict) or state.get("schema_version") != 1:
@@ -524,11 +545,6 @@ class RegisteredAlertCoordinator:
 
     def _state_path(self, task_id: str) -> Path:
         return self._task_root(task_id) / "state.json"
-
-    @staticmethod
-    def _validate_task_id(task_id: Any) -> None:
-        if not isinstance(task_id, str) or _TASK_ID.fullmatch(task_id) is None:
-            raise TaskCoordinatorError("task_id is invalid")
 
     @staticmethod
     def _payload_sha256(payload: Any) -> str:

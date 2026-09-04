@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class ContextBudgetContractTest(unittest.TestCase):
     def test_primary_profile_documents_stay_within_the_runtime_budget(self):
         skill = (ROOT / "SKILL.md").read_bytes()
+        coordinator = (ROOT / "references/task-coordinator.md").read_text(
+            encoding="utf-8"
+        )
         guide = (ROOT / "references/runtime-writing-guide.md").read_text(
             encoding="utf-8"
         )
@@ -23,6 +26,27 @@ class ContextBudgetContractTest(unittest.TestCase):
         self.assertNotIn("完整读取 [DQC 告警路由表]", decoded)
         self.assertNotIn("通过 `taptap-data-analysis` 的 manifest", decoded)
         self.assertIn("正常路径禁止模型读取", decoded)
+        self.assertIn("模型仍生成 repair/writer 内容", decoded)
+        self.assertIn("Continuation ID 由结构化状态注入", decoded)
+        self.assertIn(
+            "[Task Coordinator](references/task-coordinator.md)",
+            decoded,
+        )
+        for migrated_detail in (
+            "`contracts/dqc-routes.yaml`",
+            "routing Markdown",
+            "data-analysis knowledge-base",
+            "metric YAML",
+            "locked SQL assets",
+            "Runtime state",
+            "Playbook",
+        ):
+            with self.subTest(migrated_detail=migrated_detail):
+                self.assertIn(migrated_detail, coordinator)
+        self.assertIn(
+            "model still supplies the bounded repair or writer content",
+            coordinator,
+        )
 
     def test_writer_pack_stays_compact_and_excludes_internal_evidence(self):
         import tempfile

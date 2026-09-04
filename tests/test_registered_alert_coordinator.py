@@ -16,7 +16,11 @@ from runtime.contracts import RepositoryContracts
 from runtime.host_adapter import HostQueryResponse
 from runtime.root_preflight import RootPreflight, RootPreflightError, RootSnapshotError
 from runtime.route_resolver import DqcRouteRegistry, RouteResolver
-from runtime.task_coordinator import RegisteredAlertCoordinator, TaskCoordinatorError
+from runtime.task_coordinator import (
+    RegisteredAlertCoordinator,
+    TaskCoordinatorError,
+    TaskReferenceError,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -524,6 +528,47 @@ class TaskCoordinatorTest(unittest.TestCase):
             "definition_bundle_sha256",
             completed["validation_receipt"],
         )
+
+    def test_daily_push_task_id_round_trip_rejects_truncated_continuation(self):
+        task_id = (
+            "daily-push-20260904T053722Z-c45f1b58c591-"
+            "301314c0192ed133618c7b3eac5610cfa7c7ef028f34883a3c01cf38d7cc5d51"
+        )
+        truncated_task_id = (
+            "daily-push-20260904T053722Z-c45f1b58c591-"
+            "301314c0192ed133618c7b3eac01cf38d7cc5d51"
+        )
+        executor = FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)
+        coordinator = self.coordinator(executor)
+
+        pending = coordinator.run_task(
+            task_id=task_id,
+            dqc_payload=payload_for(ROUTES[0]),
+        )
+        self.assertEqual("write_conclusion", pending["action"])
+        self.assertEqual(task_id, pending["task_id"])
+        self.assertEqual(task_id, pending["writer_pack"]["task_id"])
+        self.assertEqual(8, len(executor.calls))
+
+        with self.assertRaisesRegex(
+            TaskReferenceError,
+            "daily-push task_id is malformed",
+        ):
+            coordinator.finalize(
+                task_id=truncated_task_id,
+                investigation_id=pending["investigation_id"],
+                writer_patch=writer_patch(),
+            )
+        self.assertEqual(8, len(executor.calls))
+
+        completed = coordinator.finalize(
+            task_id=task_id,
+            investigation_id=pending["investigation_id"],
+            writer_patch=writer_patch(),
+        )
+        self.assertEqual("task_complete", completed["action"])
+        self.assertEqual(task_id, completed["task_id"])
+        self.assertEqual(8, len(executor.calls))
 
     def test_same_scope_metrics_reuse_one_complete_root_snapshot(self):
         executor = FixtureRootExecutor(current_rate=0.74, historical_rate=0.75)

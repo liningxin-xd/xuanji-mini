@@ -27,7 +27,9 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 2. 将未改写的完整 DQC payload 作为 `dqc_payload` 交给 `xuanji_run_task`。
 3. 相同 `task_id` 只能与相同 payload 重试或恢复；不得补齐、重排或拆分 `ruleChecks`。
 
-正常路径禁止模型读取 `contracts/dqc-routes.yaml`、路由 Markdown、数据分析知识库 manifest/metric YAML、锁定 SQL 资产、Runtime state 或完整 Playbook。Host 是路由、定义和调查选择的唯一控制者。
+模型仍生成 repair/writer 内容；Continuation ID 由结构化状态注入，异常即停止；详见[Task Coordinator](references/task-coordinator.md)。
+
+正常路径禁止模型读取私有或锁定资产。Host 是路由、定义和调查选择的唯一控制者。
 
 ## `write_conclusion`
 

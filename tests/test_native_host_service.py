@@ -28,6 +28,7 @@ from runtime.host_adapter import DViewExecutionError
 from runtime.contracts import canonical_sha256
 from runtime.receipts import TrustedReceiptVerifier
 from runtime.runner import AttributionRunner
+from runtime.task_coordinator import TaskReferenceError
 from tests.runtime_result_fixtures import raw_result_for_ticket
 from tests.test_registered_alert_coordinator import FixtureRootExecutor
 
@@ -98,6 +99,7 @@ class _FixtureDViewClient:
         self._background_malformed_response = background_malformed_response
         self._background_empty_response = background_empty_response
         self._query_counts: dict[str, int] = {}
+        self.session_count = 0
         self._root_executor = FixtureRootExecutor(
             current_rate=root_current_rate,
             historical_rate=root_historical_rate,
@@ -105,6 +107,7 @@ class _FixtureDViewClient:
 
     @asynccontextmanager
     async def session(self):
+        self.session_count += 1
         yield self
 
     async def query(self, *, sql, database_type, limit):
@@ -531,6 +534,31 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("env-key-private", bundle_text)
         self.assertNotIn("authorization-private", bundle_text)
 
+    async def test_task_reference_error_is_distinct_at_tool_boundary(self):
+        runtime = _FakeRuntime()
+        runtime.finalize = AsyncMock(
+            side_effect=TaskReferenceError("daily-push task_id is malformed")
+        )
+        mcp = create_mcp(
+            _settings(Path(self.temp_dir.name)),
+            runtime=runtime,
+        )
+        tool = mcp._tool_manager._tools["xuanji_finalize"].fn
+
+        with self.assertLogs("host_service.tools", level="ERROR"):
+            with self.assertRaisesRegex(
+                Exception,
+                "xuanji Host rejected the task reference.*error_id=err-",
+            ):
+                await tool(
+                    task_id=(
+                        "daily-push-20260904T053722Z-c45f1b58c591-"
+                        "301314c0192ed133618c7b3eac01cf38d7cc5d51"
+                    ),
+                    investigation_id="inv-00-c328f2303a55",
+                    writer_patch={"summary": "summary"},
+                )
+
     async def test_exception_group_logs_only_bounded_type_tree(self):
         runtime = _FakeRuntime()
         runtime.run_task = AsyncMock(
@@ -566,6 +594,34 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_continuation_is_rejected_before_dview_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(Path(temp_dir))
+            client = _FixtureDViewClient(settings, Path(__file__).parents[1])
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+
+            cases = (
+                (
+                    "daily-push-20260904T053722Z-c45f1b58c591-"
+                    "301314c0192ed133618c7b3eac01cf38d7cc5d51",
+                    "daily-push task_id is malformed",
+                ),
+                (
+                    "daily-push-20260904T053722Z-c45f1b58c591-" + "a" * 64,
+                    "task state does not exist",
+                ),
+            )
+            for task_id, message in cases:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(TaskReferenceError, message):
+                        await runtime.finalize(
+                            task_id=task_id,
+                            investigation_id="inv-00-c328f2303a55",
+                            writer_patch={"summary": "summary"},
+                        )
+
+            self.assertEqual(0, client.session_count)
+
     async def test_primary_v2_empty_game_background_uses_registered_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = replace(

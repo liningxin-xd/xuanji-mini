@@ -12,6 +12,13 @@ from a Host process below the model/UI boundary:
   text-only writer patch. It advances to the next investigation or returns the
   completed task preview.
 
+The platform caller must retain task/action identities in structured execution
+state and inject them into continuation calls. Models generate only the bounded
+repair or writer content. Host responses and nested action packets are compared
+byte-for-byte with the immutable upstream task ID before continuing. Batch-bound
+daily-push IDs are format-checked, and malformed or missing continuation references
+are rejected before a DView session is opened. The Host never fuzzy-matches a task.
+
 `PrimaryInvestigationHost` remains an internal stable library. The task
 coordinator owns DQC normalization, deterministic registered binding, root preflight,
 newness gating, serial investigation order, and final task assembly. It creates

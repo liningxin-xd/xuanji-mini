@@ -13,6 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl, Field
+from runtime.task_coordinator import TaskReferenceError
 
 from .auth import StaticBearerTokenVerifier
 from .config import HostServiceSettings
@@ -194,9 +195,12 @@ async def _safe_call(
                 duration_ms=round((time.monotonic() - started) * 1000),
                 outer_exception_type=exception_type_name(exc),
             )
-            raise ToolError(
-                f"xuanji Host request failed (error_id={trace.error_id})"
-            ) from None
+            message = (
+                "xuanji Host rejected the task reference"
+                if isinstance(exc, TaskReferenceError)
+                else "xuanji Host request failed"
+            )
+            raise ToolError(f"{message} (error_id={trace.error_id})") from None
     if not isinstance(result, dict):
         trace.set_stage("boundary_result_validation")
         trace.capture_named_failure("InvalidResultEnvelope")

@@ -14,7 +14,11 @@ from runtime.host_adapter import ProductionDViewExecutor
 from runtime.query_observation import current_query_observation
 from runtime.root_preflight import RootPreflight
 from runtime.task_assembler import writer_pack_size
-from runtime.task_coordinator import RegisteredAlertCoordinator
+from runtime.task_coordinator import (
+    RegisteredAlertCoordinator,
+    TaskReferenceError,
+    validate_task_id,
+)
 
 from .config import HostServiceSettings
 from .dview_client import DViewMCPClient
@@ -65,6 +69,7 @@ class XuanjiHostRuntime:
 
     async def run_task(self, **kwargs: Any) -> dict[str, Any]:
         task_id = str(kwargs.get("task_id", ""))
+        validate_task_id(task_id)
         return await self._with_dview(
             task_id,
             phase="run_task",
@@ -74,6 +79,7 @@ class XuanjiHostRuntime:
 
     async def submit_repair(self, **kwargs: Any) -> dict[str, Any]:
         task_id = str(kwargs.get("task_id", ""))
+        self._require_existing_task(task_id)
         return await self._with_dview(
             task_id,
             phase="submit_repair",
@@ -83,12 +89,19 @@ class XuanjiHostRuntime:
 
     async def finalize(self, **kwargs: Any) -> dict[str, Any]:
         task_id = str(kwargs.get("task_id", ""))
+        self._require_existing_task(task_id)
         return await self._with_dview(
             task_id,
             phase="finalize",
             investigation_id=str(kwargs.get("investigation_id", "")),
             operation=lambda coordinator: coordinator.finalize(**kwargs),
         )
+
+    def _require_existing_task(self, task_id: str) -> None:
+        validate_task_id(task_id)
+        state_path = self._settings.tasks_root / task_id / "state.json"
+        if not state_path.is_file():
+            raise TaskReferenceError(f"task state does not exist: {task_id}")
 
     async def _with_dview(
         self,
