@@ -124,6 +124,9 @@ patch, state hash, or sink payload is rejected rather than overwritten.
 
 Classified DView failures continue through the typed analytical states. An
 unexpected Python exception, state corruption, or internal Host contract error
-does not create an analytical result. The outer MCP boundary records only the
-task ID, phase, and exception type, returns a generic ToolError, and leaves the
-task available for an identical retry.
+does not create an analytical result. The outer MCP boundary returns a generic
+ToolError with an opaque `error_id` and leaves the task available for an
+identical retry. Private structured telemetry records the safe task/query stage,
+counts, timings, and bounded exception class tree under the same operation; see
+[Operational Telemetry](operational-telemetry.md). It never records exception
+messages or private query evidence.

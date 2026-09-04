@@ -59,8 +59,11 @@ identical finalize retry is accepted, while a conflicting writer patch or sink
 payload is rejected.
 
 Unexpected Runtime exceptions cross only the outer MCP error boundary. That
-boundary writes a private compact operational record containing task ID, phase,
-and exception type, then returns a generic ToolError without exception text.
+boundary writes private structured operation/query telemetry and returns a
+generic ToolError with an opaque `error_id`, but without exception text. The
+Runtime captures the original exception class before MCP/AnyIO context teardown
+can wrap it in an `ExceptionGroup`; the boundary separately records the wrapper
+class. See [Operational Telemetry](operational-telemetry.md).
 Only `RootPreflightError` and already classified DView evidence may become an
 analytical blocked status.
 

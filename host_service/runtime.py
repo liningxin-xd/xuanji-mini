@@ -11,6 +11,7 @@ from typing import Any
 
 from host_integration import PrimaryInvestigationHost
 from runtime.host_adapter import ProductionDViewExecutor
+from runtime.query_observation import current_query_observation
 from runtime.root_preflight import RootPreflight
 from runtime.task_assembler import writer_pack_size
 from runtime.task_coordinator import RegisteredAlertCoordinator
@@ -19,6 +20,14 @@ from .config import HostServiceSettings
 from .dview_client import DViewMCPClient
 from .pipeline_handoff import PipelineHandoffError, PipelineHandoffSigner
 from .sink import FileTaskResultSink, FileValidatedResultSink
+from .telemetry import (
+    OperationTrace,
+    bind_trace,
+    current_trace,
+    emit_event,
+    exception_diagnostic,
+    exception_type_name,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 _LOGGER = logging.getLogger(__name__)
@@ -89,38 +98,172 @@ class XuanjiHostRuntime:
         investigation_id: str | None,
         operation: Callable[[RegisteredAlertCoordinator], dict[str, Any]],
     ) -> dict[str, Any]:
-        started = time.monotonic()
-        query_counts = {"root": 0, "attribution": 0}
-        async with self._lock_for(task_id), self._dview_client.session() as session:
-            loop = asyncio.get_running_loop()
-
-            def query_for(bucket: str) -> Callable[..., Any]:
-                def query(**kwargs: Any) -> Any:
-                    query_counts[bucket] += 1
-                    future = asyncio.run_coroutine_threadsafe(
-                        session.query(**kwargs),
-                        loop,
-                    )
-                    return future.result()
-
-                return query
-
-            coordinator = self._build_coordinator(
-                root_query=query_for("root"),
-                attribution_query=query_for("attribution"),
+        trace = current_trace()
+        if trace is None:
+            trace = OperationTrace.create(
+                task_id=task_id,
+                phase=phase,
+                boundary_owned=False,
+                analysis_profile=self._settings.analysis_profile,
             )
-            result = await asyncio.to_thread(operation, coordinator)
-            if result.get("action") == "task_complete":
-                result = self._attach_pipeline_handoff(task_id, result)
+            with bind_trace(trace):
+                emit_event(_LOGGER, logging.INFO, "operation_started", trace=trace)
+                return await self._execute_with_dview(
+                    trace=trace,
+                    task_id=task_id,
+                    phase=phase,
+                    investigation_id=investigation_id,
+                    operation=operation,
+                )
+        trace.analysis_profile = self._settings.analysis_profile
+        return await self._execute_with_dview(
+            trace=trace,
+            task_id=task_id,
+            phase=phase,
+            investigation_id=investigation_id,
+            operation=operation,
+        )
+
+    async def _execute_with_dview(
+        self,
+        *,
+        trace: OperationTrace,
+        task_id: str,
+        phase: str,
+        investigation_id: str | None,
+        operation: Callable[[RegisteredAlertCoordinator], dict[str, Any]],
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        trace.set_stage("task_lock_wait")
+        try:
+            async with self._lock_for(task_id):
+                trace.set_stage("dview_session_open")
+                async with self._dview_client.session() as session:
+                    loop = asyncio.get_running_loop()
+
+                    def query_for(bucket: str) -> Callable[..., Any]:
+                        def query(**kwargs: Any) -> Any:
+                            observation = current_query_observation()
+                            ordinal = trace.start_query(
+                                bucket=bucket,
+                                stage=(observation.stage if observation is not None else None),
+                                step_id=(
+                                    observation.step_id if observation is not None else None
+                                ),
+                                attempt_no=(
+                                    observation.attempt_no
+                                    if observation is not None
+                                    else None
+                                ),
+                            )
+                            query_started = time.monotonic()
+                            emit_event(
+                                _LOGGER,
+                                logging.INFO,
+                                "query_started",
+                                trace=trace,
+                                query_bucket=bucket,
+                                query_ordinal=ordinal,
+                                query_stage=trace.last_query_stage,
+                                query_step=trace.last_query_step,
+                                query_attempt=trace.last_query_attempt,
+                            )
+                            future = asyncio.run_coroutine_threadsafe(
+                                session.query(**kwargs),
+                                loop,
+                            )
+                            try:
+                                response = future.result()
+                            except Exception as exc:
+                                trace.set_stage("dview_query_response")
+                                emit_event(
+                                    _LOGGER,
+                                    logging.ERROR,
+                                    "query_failed",
+                                    trace=trace,
+                                    query_bucket=bucket,
+                                    query_ordinal=ordinal,
+                                    query_stage=trace.last_query_stage,
+                                    query_step=trace.last_query_step,
+                                    query_attempt=trace.last_query_attempt,
+                                    duration_ms=round(
+                                        (time.monotonic() - query_started) * 1000
+                                    ),
+                                    **exception_diagnostic(exc),
+                                )
+                                raise
+                            trace.set_stage("query_result_processing")
+                            emit_event(
+                                _LOGGER,
+                                logging.INFO,
+                                "query_succeeded",
+                                trace=trace,
+                                query_bucket=bucket,
+                                query_ordinal=ordinal,
+                                query_stage=trace.last_query_stage,
+                                query_step=trace.last_query_step,
+                                query_attempt=trace.last_query_attempt,
+                                duration_ms=round(
+                                    (time.monotonic() - query_started) * 1000
+                                ),
+                            )
+                            return response
+
+                        return query
+
+                    trace.set_stage("coordinator_build")
+                    coordinator = self._build_coordinator(
+                        root_query=query_for("root"),
+                        attribution_query=query_for("attribution"),
+                    )
+                    trace.set_stage("coordinator_execute")
+                    try:
+                        result = await asyncio.to_thread(operation, coordinator)
+                        if result.get("action") == "task_complete":
+                            trace.set_stage("pipeline_handoff")
+                            result = self._attach_pipeline_handoff(task_id, result)
+                    except Exception as exc:
+                        trace.capture_failure(exc)
+                        raise
+        except Exception as exc:
+            trace.capture_failure(exc)
+            self._enrich_trace_from_state(trace, task_id, investigation_id)
+            if not trace.boundary_owned:
+                self._log_operation_failure(
+                    trace=trace,
+                    task_id=task_id,
+                    requested_investigation_id=investigation_id,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    outer_exception=exc,
+                )
+            raise
+        trace.set_stage("operation_complete")
         self._log_operation(
+            trace=trace,
             task_id=task_id,
             phase=phase,
             requested_investigation_id=investigation_id,
             result=result,
-            query_counts=query_counts,
             duration_ms=round((time.monotonic() - started) * 1000),
         )
         return result
+
+    def _enrich_trace_from_state(
+        self,
+        trace: OperationTrace,
+        task_id: str,
+        investigation_id: str | None,
+    ) -> None:
+        observation = self._state_observation(task_id, investigation_id)
+        trace.investigation_id = observation.get("investigation_id")
+        trace.task_status = observation.get("task_status")
+        trace.current_investigation_index = observation.get(
+            "current_investigation_index"
+        )
+        trace.investigation_count = observation.get("investigation_count")
+        trace.investigation_status = observation.get("investigation_status")
+        trace.root_snapshot_reused = observation.get("root_snapshot_reused")
+        trace.root_snapshot_count = observation.get("root_snapshot_count")
 
     def _attach_pipeline_handoff(
         self,
@@ -183,11 +326,11 @@ class XuanjiHostRuntime:
     def _log_operation(
         self,
         *,
+        trace: OperationTrace,
         task_id: str,
         phase: str,
         requested_investigation_id: str | None,
         result: dict[str, Any],
-        query_counts: dict[str, int],
         duration_ms: int,
     ) -> None:
         investigation_id = result.get("investigation_id") or requested_investigation_id
@@ -200,6 +343,9 @@ class XuanjiHostRuntime:
         if investigation_status is None and isinstance(writer_pack, dict):
             investigation_status = writer_pack.get("result_status_hint")
         payload = {
+            "schema_version": 2,
+            "operation_id": trace.operation_id,
+            "error_id": None,
             "task_id": task_id if _SAFE_ID.fullmatch(task_id) else "invalid",
             "investigation_id": (
                 investigation_id
@@ -208,18 +354,72 @@ class XuanjiHostRuntime:
                 else None
             ),
             "phase": phase,
+            "analysis_profile": self._settings.analysis_profile,
+            "stage": trace.stage,
+            "failure_stage": None,
             "duration_ms": duration_ms,
-            "root_query_count": query_counts["root"],
-            "attribution_query_count": query_counts["attribution"],
+            "root_query_count": trace.query_counts["root"],
+            "attribution_query_count": trace.query_counts["attribution"],
             "root_snapshot_reused": state_observation.get(
                 "root_snapshot_reused", False
             ),
+            "root_snapshot_count": state_observation.get("root_snapshot_count"),
             "writer_pack_bytes": writer_bytes,
             "investigation_status": investigation_status,
             "overall_status": result.get("overall_status"),
             "exception_type": None,
+            "exception_wrapper_type": None,
+            "exception_types": [],
+            "exception_leaf_types": [],
+            "exception_group_depth": 0,
+            "last_query_bucket": trace.last_query_bucket,
+            "last_query_ordinal": trace.last_query_ordinal,
+            "last_query_stage": trace.last_query_stage,
+            "last_query_step": trace.last_query_step,
+            "last_query_attempt": trace.last_query_attempt,
+            "task_status": state_observation.get("task_status"),
+            "current_investigation_index": state_observation.get(
+                "current_investigation_index"
+            ),
+            "investigation_count": state_observation.get("investigation_count"),
         }
         _LOGGER.info(
+            "xuanji_operation %s",
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+
+    def _log_operation_failure(
+        self,
+        *,
+        trace: OperationTrace,
+        task_id: str,
+        requested_investigation_id: str | None,
+        duration_ms: int,
+        outer_exception: BaseException,
+    ) -> None:
+        state_observation = self._state_observation(
+            task_id, requested_investigation_id
+        )
+        payload = {
+            "schema_version": 2,
+            **trace.fields(),
+            "duration_ms": duration_ms,
+            "investigation_id": state_observation.get("investigation_id"),
+            "root_snapshot_reused": state_observation.get(
+                "root_snapshot_reused", False
+            ),
+            "root_snapshot_count": state_observation.get("root_snapshot_count"),
+            "writer_pack_bytes": 0,
+            "investigation_status": state_observation.get("investigation_status"),
+            "overall_status": None,
+            "task_status": state_observation.get("task_status"),
+            "current_investigation_index": state_observation.get(
+                "current_investigation_index"
+            ),
+            "investigation_count": state_observation.get("investigation_count"),
+            "exception_wrapper_type": exception_type_name(outer_exception),
+        }
+        _LOGGER.error(
             "xuanji_operation %s",
             json.dumps(payload, sort_keys=True, separators=(",", ":")),
         )
@@ -229,11 +429,7 @@ class XuanjiHostRuntime:
         task_id: str,
         investigation_id: Any,
     ) -> dict[str, Any]:
-        if (
-            _SAFE_ID.fullmatch(task_id) is None
-            or not isinstance(investigation_id, str)
-            or _SAFE_ID.fullmatch(investigation_id) is None
-        ):
+        if _SAFE_ID.fullmatch(task_id) is None:
             return {}
         try:
             state = json.loads(
@@ -243,23 +439,54 @@ class XuanjiHostRuntime:
             )
         except (OSError, json.JSONDecodeError):
             return {}
+        snapshot_root = self._settings.tasks_root / task_id / "root-snapshots"
+        try:
+            root_snapshot_count = sum(
+                1
+                for path in snapshot_root.iterdir()
+                if path.suffix == ".json" and path.is_file()
+            )
+        except OSError:
+            root_snapshot_count = 0
         investigations = state.get("investigations")
         if not isinstance(investigations, list):
             return {}
-        investigation = next(
-            (
-                item
-                for item in investigations
-                if isinstance(item, dict)
-                and item.get("investigation_id") == investigation_id
-            ),
-            None,
-        )
+        if not isinstance(investigation_id, str) or _SAFE_ID.fullmatch(
+            investigation_id
+        ) is None:
+            index = state.get("current_investigation_index")
+            investigation = (
+                investigations[index]
+                if isinstance(index, int) and 0 <= index < len(investigations)
+                else None
+            )
+        else:
+            investigation = next(
+                (
+                    item
+                    for item in investigations
+                    if isinstance(item, dict)
+                    and item.get("investigation_id") == investigation_id
+                ),
+                None,
+            )
         if not isinstance(investigation, dict):
-            return {}
+            return {
+                "task_status": state.get("status"),
+                "current_investigation_index": state.get(
+                    "current_investigation_index"
+                ),
+                "investigation_count": len(investigations),
+                "root_snapshot_count": root_snapshot_count,
+            }
         preflight = investigation.get("root_preflight")
         result = investigation.get("result")
         return {
+            "task_status": state.get("status"),
+            "current_investigation_index": state.get("current_investigation_index"),
+            "investigation_count": len(investigations),
+            "investigation_id": investigation.get("investigation_id"),
+            "root_snapshot_count": root_snapshot_count,
             "root_snapshot_reused": (
                 preflight.get("root_snapshot_reused", False)
                 if isinstance(preflight, dict)

@@ -55,7 +55,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 ## 失败与安全
 
 - 查询、权限或数据问题以 Host 返回的类型化状态为准；不把失败、NULL 或空结果写成零。
-- Host ToolError 表示运行异常；保留相同 task 供重试，不伪造 `query_failed` 调查。
+- Host ToolError 表示运行异常；用 `error_id` 按[遥测](references/operational-telemetry.md)排障；同 task 重试，不伪造结果。
 - 不输出或索取 SQL、raw rows、query ID、完整 receipt、私有 result hash、state 路径、token 或 secret；不得拆改或伪造 `pipeline_handoff` 中的公开校验字段。
 - 不把相关性、贡献或算术剔除写成已确认机制根因。
 - `primary_v1` 不执行后置模块；当前 `primary_v2` 不执行安装或沙盒错误码、下载恢复、三级归因、多父节点、严格漏斗、准实验、负对照、查询并行或通用缓存。

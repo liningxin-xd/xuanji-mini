@@ -1,15 +1,18 @@
 import base64
 import json
+import re
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
+import anyio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from host_service import server as server_module
 from host_service.auth import StaticBearerTokenVerifier
 from host_service.config import HostConfigurationError, HostServiceSettings
 from host_service.dview_client import (
@@ -156,6 +159,31 @@ class _FixtureDViewClient:
             raise AssertionError("native Host changed the DView query contract")
 
 
+class _FailingDViewClient:
+    def __init__(self, failure: Exception):
+        self._failure = failure
+
+    @asynccontextmanager
+    async def session(self):
+        async with anyio.create_task_group():
+            yield self
+
+    async def query(self, **kwargs):
+        raise self._failure
+
+
+class _ReturningDViewClient:
+    def __init__(self, response):
+        self._response = response
+
+    @asynccontextmanager
+    async def session(self):
+        yield self
+
+    async def query(self, **kwargs):
+        return self._response
+
+
 class NativeHostConfigurationTest(unittest.IsolatedAsyncioTestCase):
     def test_environment_is_fail_closed_and_secrets_are_not_represented(self):
         with self.assertRaisesRegex(
@@ -196,6 +224,48 @@ class NativeHostConfigurationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(access)
         self.assertEqual(["xuanji"], access.scopes)
 
+
+class NativeHostServiceTelemetryTest(unittest.TestCase):
+    def test_main_logs_start_and_clean_stop(self):
+        settings = _settings(Path("/private/tmp/xuanji-server-test"))
+        fake_mcp = SimpleNamespace(run=Mock())
+        with (
+            patch.object(
+                server_module.HostServiceSettings,
+                "from_env",
+                return_value=settings,
+            ),
+            patch.object(server_module, "create_mcp", return_value=fake_mcp),
+            self.assertLogs("host_service.server", level="INFO") as logs,
+        ):
+            server_module.main()
+
+        fake_mcp.run.assert_called_once_with(transport="streamable-http")
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn('"event":"service_started"', rendered_logs)
+        self.assertIn('"event":"service_stopped"', rendered_logs)
+        self.assertIn('"analysis_profile":"primary_v1"', rendered_logs)
+
+    def test_main_logs_startup_failure_without_exception_text(self):
+        with (
+            patch.object(
+                server_module.HostServiceSettings,
+                "from_env",
+                side_effect=HostConfigurationError(
+                    "token=private /private/tmp/secret"
+                ),
+            ),
+            self.assertLogs("host_service.server", level="CRITICAL") as logs,
+            self.assertRaises(HostConfigurationError),
+        ):
+            server_module.main()
+
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn('"event":"service_failed"', rendered_logs)
+        self.assertIn('"exception_type":"HostConfigurationError"', rendered_logs)
+        self.assertIn('"analysis_profile":null', rendered_logs)
+        self.assertNotIn("token=private", rendered_logs)
+        self.assertNotIn("/private/tmp/secret", rendered_logs)
 
 class DViewMCPBridgeTest(unittest.IsolatedAsyncioTestCase):
     async def test_structured_query_result_stays_structured(self):
@@ -346,15 +416,150 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SELECT secret", str(captured.exception))
         self.assertNotIn("private", str(captured.exception))
         self.assertNotIn("RuntimeError", str(captured.exception))
+        error_id = re.search(r"error_id=(err-[0-9a-f]{16})", str(captured.exception))
+        self.assertIsNotNone(error_id)
         rendered_logs = "\n".join(logs.output)
         self.assertIn('"task_id":"failed-shadow"', rendered_logs)
         self.assertIn('"phase":"run_task"', rendered_logs)
+        self.assertIn('"failure_stage":"tool_dispatch"', rendered_logs)
         self.assertIn('"exception_type":"RuntimeError"', rendered_logs)
+        self.assertIn('"exception_leaf_types":["RuntimeError"]', rendered_logs)
+        self.assertIn(error_id.group(1), rendered_logs)
+        self.assertRegex(rendered_logs, r'"operation_id":"op-[0-9a-f]{16}"')
         self.assertNotIn("SELECT secret", rendered_logs)
         self.assertNotIn("query_id=private", rendered_logs)
 
+    async def test_exception_group_logs_only_bounded_type_tree(self):
+        runtime = _FakeRuntime()
+        runtime.run_task = AsyncMock(
+            side_effect=ExceptionGroup(
+                "private group detail",
+                [
+                    RuntimeError("SELECT secret"),
+                    ValueError("query_id=private"),
+                ],
+            )
+        )
+        mcp = create_mcp(
+            _settings(Path(self.temp_dir.name)),
+            runtime=runtime,
+        )
+        tool = mcp._tool_manager._tools["xuanji_run_task"].fn
+        with self.assertLogs("host_service.tools", level="ERROR") as logs:
+            with self.assertRaisesRegex(Exception, "error_id=err-"):
+                await tool(
+                    task_id="failed-exception-group",
+                    dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
+                )
+
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn('"exception_type":"ExceptionGroup"', rendered_logs)
+        self.assertIn(
+            '"exception_leaf_types":["RuntimeError","ValueError"]',
+            rendered_logs,
+        )
+        self.assertIn('"exception_group_depth":1', rendered_logs)
+        for private in ("private group detail", "SELECT secret", "query_id=private"):
+            self.assertNotIn(private, rendered_logs)
+
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_result_processing_failure_is_distinct_from_dview_request(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(Path(temp_dir))
+            runtime = XuanjiHostRuntime(
+                settings,
+                dview_client=_ReturningDViewClient(
+                    {"private": "SELECT secret query_id=private"}
+                ),
+            )
+            mcp = create_mcp(settings, runtime=runtime)
+            tool = mcp._tool_manager._tools["xuanji_run_task"].fn
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+
+            with self.assertLogs("host_service", level="INFO") as logs:
+                with self.assertRaisesRegex(Exception, "error_id=err-"):
+                    await tool(task_id="tracked-result-failure", dqc_payload=payload)
+
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn('"event":"query_succeeded"', rendered_logs)
+        self.assertNotIn('"event":"query_failed"', rendered_logs)
+        self.assertIn('"failure_stage":"query_result_processing"', rendered_logs)
+        self.assertIn('"exception_type":"RunnerError"', rendered_logs)
+        self.assertIn('"last_query_stage":"root_preflight"', rendered_logs)
+        self.assertNotIn("SELECT secret", rendered_logs)
+        self.assertNotIn("query_id=private", rendered_logs)
+
+    async def test_unexpected_dview_failure_logs_the_exact_query_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(Path(temp_dir))
+            runtime = XuanjiHostRuntime(
+                settings,
+                dview_client=_FailingDViewClient(
+                    DViewMCPResponseError(
+                        "SELECT secret query_id=private /private/tmp/result.json"
+                    )
+                ),
+            )
+            mcp = create_mcp(settings, runtime=runtime)
+            tool = mcp._tool_manager._tools["xuanji_run_task"].fn
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": "ads_dmg_quality_platform_download_chain_monitor_1d",
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+
+            with self.assertLogs("host_service", level="INFO") as logs:
+                with self.assertRaisesRegex(Exception, "error_id=err-"):
+                    await tool(task_id="tracked-dview-failure", dqc_payload=payload)
+
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn('"event":"query_started"', rendered_logs)
+        self.assertIn('"event":"query_failed"', rendered_logs)
+        self.assertIn('"failure_stage":"dview_query_response"', rendered_logs)
+        self.assertIn('"last_query_stage":"root_preflight"', rendered_logs)
+        self.assertIn('"last_query_step":"root_snapshot_day"', rendered_logs)
+        self.assertIn('"last_query_ordinal":1', rendered_logs)
+        self.assertIn('"root_query_count":1', rendered_logs)
+        self.assertIn('"exception_type":"DViewMCPResponseError"', rendered_logs)
+        self.assertIn('"exception_wrapper_type":"ExceptionGroup"', rendered_logs)
+        for private in (
+            "SELECT secret",
+            "query_id=private",
+            "/private/tmp/result.json",
+        ):
+            self.assertNotIn(private, rendered_logs)
+
     async def test_registered_task_completes_through_async_bridge(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = _settings(Path(temp_dir))

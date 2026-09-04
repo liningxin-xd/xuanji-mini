@@ -12,6 +12,11 @@ endpoint. This is a server-to-server call: DView SQL, rows, query IDs, receipts,
 and result hashes remain inside the Host process and its private artifacts. The
 model never invokes the nested DView tool.
 
+Process, operation, and query lifecycle logging follows
+[Operational Telemetry](operational-telemetry.md). Retain the structured records
+in the normal platform log sink and index `error_id` plus `operation_id`; do not
+enable raw traceback, HTTP body, or SQL logging to investigate a failure.
+
 ## Deployment Contract
 
 Build the repository `Dockerfile` and configure the variables documented in

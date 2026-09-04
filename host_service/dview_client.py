@@ -12,6 +12,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from runtime.host_adapter import DViewExecutionError
 
+from .telemetry import current_trace
+
 _QUERY_ID_PATTERNS = (
     re.compile(r"查询ID\s*:?\s*`(?P<query_id>[^`]+)`"),
     re.compile(r"\bquery_id=(?P<query_id>[A-Za-z0-9._:-]+)\b", re.IGNORECASE),
@@ -76,23 +78,36 @@ class DViewMCPClient:
             write=30.0,
             pool=30.0,
         )
-        async with (
-            httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self._bearer_token}"},
-                timeout=timeout,
-            ) as http_client,
-            streamable_http_client(
+        trace = current_trace()
+        if trace is not None:
+            trace.set_stage("dview_http_client_open")
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            timeout=timeout,
+        ) as http_client:
+            if trace is not None:
+                trace.set_stage("dview_transport_open")
+            async with streamable_http_client(
                 self._url,
                 http_client=http_client,
-            ) as (read_stream, write_stream, _),
-            ClientSession(
-                read_stream,
-                write_stream,
-                read_timeout_seconds=timedelta(seconds=self._read_timeout_seconds),
-            ) as session,
-        ):
-            await session.initialize()
-            yield DViewQuerySession(session)
+            ) as (read_stream, write_stream, _):
+                if trace is not None:
+                    trace.set_stage("dview_client_session_open")
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=self._read_timeout_seconds),
+                ) as session:
+                    if trace is not None:
+                        trace.set_stage("dview_initialize")
+                    await session.initialize()
+                    if trace is not None:
+                        trace.set_stage("dview_ready")
+                    try:
+                        yield DViewQuerySession(session)
+                    finally:
+                        if trace is not None:
+                            trace.set_stage("dview_session_close")
 
 
 def _text_content(result: Any) -> str:

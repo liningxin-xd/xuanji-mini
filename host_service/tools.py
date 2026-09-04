@@ -17,6 +17,7 @@ from pydantic import AnyHttpUrl, Field
 from .auth import StaticBearerTokenVerifier
 from .config import HostServiceSettings
 from .runtime import XuanjiHostRuntime
+from .telemetry import OperationTrace, bind_trace, emit_event, exception_type_name
 
 _HOST_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
@@ -70,6 +71,7 @@ def create_mcp(
             phase="run_task",
             task_id=task_id,
             investigation_id=None,
+            analysis_profile=settings.analysis_profile,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -103,6 +105,7 @@ def create_mcp(
             phase="submit_repair",
             task_id=task_id,
             investigation_id=investigation_id,
+            analysis_profile=settings.analysis_profile,
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -125,6 +128,7 @@ def create_mcp(
             phase="finalize",
             task_id=task_id,
             investigation_id=investigation_id,
+            analysis_profile=settings.analysis_profile,
         )
 
     return mcp
@@ -136,56 +140,66 @@ async def _safe_call(
     phase: str,
     task_id: str,
     investigation_id: str | None,
+    analysis_profile: str,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    try:
-        result = await operation
-    except Exception as exc:  # noqa: BLE001
-        _log_failure(
-            task_id=task_id,
-            investigation_id=investigation_id,
-            phase=phase,
-            duration_ms=round((time.monotonic() - started) * 1000),
-            exception_type=type(exc).__name__,
-        )
-        raise ToolError("xuanji Host request failed") from None
+    trace = OperationTrace.create(
+        task_id=task_id,
+        phase=phase,
+        boundary_owned=True,
+        analysis_profile=analysis_profile,
+    )
+    with bind_trace(trace):
+        emit_event(_LOGGER, logging.INFO, "operation_started", trace=trace)
+        try:
+            result = await operation
+        except Exception as exc:  # noqa: BLE001
+            trace.capture_failure(exc)
+            _log_failure(
+                trace=trace,
+                investigation_id=investigation_id,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                outer_exception_type=exception_type_name(exc),
+            )
+            raise ToolError(
+                f"xuanji Host request failed (error_id={trace.error_id})"
+            ) from None
     if not isinstance(result, dict):
+        trace.set_stage("boundary_result_validation")
+        trace.capture_named_failure("InvalidResultEnvelope")
         _log_failure(
-            task_id=task_id,
+            trace=trace,
             investigation_id=investigation_id,
-            phase=phase,
             duration_ms=round((time.monotonic() - started) * 1000),
-            exception_type="InvalidResultEnvelope",
+            outer_exception_type="InvalidResultEnvelope",
         )
-        raise ToolError("xuanji Host returned an invalid result envelope")
+        raise ToolError(
+            f"xuanji Host returned an invalid result envelope "
+            f"(error_id={trace.error_id})"
+        )
     return result
 
 
 def _log_failure(
     *,
-    task_id: str,
+    trace: OperationTrace,
     investigation_id: str | None,
-    phase: str,
     duration_ms: int,
-    exception_type: str,
+    outer_exception_type: str,
 ) -> None:
     payload = {
-        "task_id": task_id if _LOG_TASK_ID.fullmatch(task_id) else "invalid",
+        "schema_version": 2,
+        **trace.fields(),
         "investigation_id": (
             investigation_id
             if isinstance(investigation_id, str)
             and _LOG_TASK_ID.fullmatch(investigation_id)
-            else None
+            else trace.investigation_id
         ),
-        "phase": phase,
         "duration_ms": duration_ms,
-        "root_query_count": None,
-        "attribution_query_count": None,
-        "root_snapshot_reused": None,
         "writer_pack_bytes": 0,
-        "investigation_status": None,
         "overall_status": None,
-        "exception_type": exception_type,
+        "exception_wrapper_type": outer_exception_type,
     }
     _LOGGER.error(
         "xuanji_operation %s",

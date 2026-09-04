@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from .contracts import canonical_sha256
+from .query_observation import observe_query
 from .receipts import TrustedReceiptVerifier
 from .runner import AttributionRunner, RunnerError
 
@@ -277,39 +278,46 @@ class HostDViewAdapter:
     def _execute_ticket(
         self, run_id: str, ticket: dict[str, Any]
     ) -> dict[str, Any]:
-        response = self.executor.execute_read_only(ticket["rendered_sql"])
-        common = {
-            "step_id": ticket["step_id"],
-            "attempt_no": ticket["attempt_no"],
-            "receipt_type": "trusted_host_receipt",
-            "receipt_key_id": self.receipt_signer.key_id,
-            "receipt_id": response.receipt_id,
-            "submitted_sql_sha256": ticket["rendered_sql_sha256"],
-            "query_id": response.query_id,
-        }
-        if response.raw_result is not None:
-            event = {
-                "event": "query_returned",
-                **common,
-                "raw_result": response.raw_result,
-                "raw_result_sha256": canonical_sha256(response.raw_result),
+        with observe_query(
+            stage="attribution",
+            step_id=ticket["step_id"],
+            attempt_no=ticket["attempt_no"],
+        ):
+            response = self.executor.execute_read_only(ticket["rendered_sql"])
+            common = {
+                "step_id": ticket["step_id"],
+                "attempt_no": ticket["attempt_no"],
+                "receipt_type": "trusted_host_receipt",
+                "receipt_key_id": self.receipt_signer.key_id,
+                "receipt_id": response.receipt_id,
+                "submitted_sql_sha256": ticket["rendered_sql_sha256"],
+                "query_id": response.query_id,
             }
-        else:
-            error_fields = (
-                response.error_class,
-                response.error_code,
-                response.error_message,
-            )
-            if not all(isinstance(value, str) and value.strip() for value in error_fields):
-                raise RunnerError(
-                    "Host query response must contain raw_result or a complete raw error"
+            if response.raw_result is not None:
+                event = {
+                    "event": "query_returned",
+                    **common,
+                    "raw_result": response.raw_result,
+                    "raw_result_sha256": canonical_sha256(response.raw_result),
+                }
+            else:
+                error_fields = (
+                    response.error_class,
+                    response.error_code,
+                    response.error_message,
                 )
-            event = {
-                "event": "query_error",
-                **common,
-                "error_class": response.error_class,
-                "error_code": response.error_code,
-                "error_message": response.error_message,
-            }
-        event["receipt_signature"] = self.receipt_signer.sign(run_id, event)
-        return self.runner.record(run_id, event)
+                if not all(
+                    isinstance(value, str) and value.strip() for value in error_fields
+                ):
+                    raise RunnerError(
+                        "Host query response must contain raw_result or a complete raw error"
+                    )
+                event = {
+                    "event": "query_error",
+                    **common,
+                    "error_class": response.error_class,
+                    "error_code": response.error_code,
+                    "error_message": response.error_message,
+                }
+            event["receipt_signature"] = self.receipt_signer.sign(run_id, event)
+            return self.runner.record(run_id, event)

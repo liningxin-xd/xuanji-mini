@@ -87,11 +87,11 @@ may persist the public projection only after verifying the paired
 
 ## Logs And Exit Gate
 
-Retain only the structured `xuanji_operation` fields: `task_id`,
-`investigation_id`, `phase`, `duration_ms`, `root_query_count`,
-`attribution_query_count`, `root_snapshot_reused`, `writer_pack_bytes`,
-`investigation_status`, `overall_status`, and `exception_type`. SQL, rows,
-query IDs, receipts, hashes, paths, and credentials are forbidden in logs.
+Retain the structured `xuanji_service`, `xuanji_event`, and schema-v2
+`xuanji_operation` records defined by
+[Operational Telemetry](operational-telemetry.md). SQL, rows, query IDs,
+receipts, hashes, paths, payloads, exception messages, and credentials remain
+forbidden in logs.
 
 Collect 10 to 20 real tasks or three to five consecutive days. Proceed to a
 small canary only when every shadow passes routing, query reuse, fixed-queue,

@@ -14,6 +14,7 @@ import yaml
 
 from .contracts import RepositoryContracts, canonical_sha256, sha256_bytes
 from .host_adapter import DViewQueryExecutor
+from .query_observation import observe_query
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,9 +236,13 @@ class RootPreflight:
         private_queries: list[dict[str, str]] = []
         for offset in range(8):
             partition_date = alert_date - timedelta(days=offset)
-            response = self.executor.execute_read_only(
-                self._render_query(partition_date, game_type)
-            )
+            with observe_query(
+                stage="root_preflight",
+                step_id="root_snapshot_day",
+            ):
+                response = self.executor.execute_read_only(
+                    self._render_query(partition_date, game_type)
+                )
             query_evidence = {
                 "partition_date": partition_date.isoformat(),
                 "query_id": response.query_id,
