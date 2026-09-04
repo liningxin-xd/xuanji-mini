@@ -21,6 +21,11 @@ from tests.runtime_result_fixtures import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DVIEW_RESPONSE_PATH = ROOT / "tests/fixtures/runtime/dview-query-response.json"
+EMPTY_DVIEW_RESPONSE = (
+    "查询成功, 无返回数据。\n\n"
+    "- 查询ID: `8500ad6e-e2e1-40cd-a90a-0bd1cf28d2e3`\n"
+    "- 耗时: 20.08s"
+)
 
 
 class ResultValidatorRuntimeTest(unittest.TestCase):
@@ -346,6 +351,29 @@ class TrustedHostAdapterTest(unittest.TestCase):
         )
         self.assertEqual("MaxCompute", calls[0]["database_type"])
         self.assertEqual(250, calls[0]["limit"])
+
+    def test_production_executor_recognizes_empty_success_with_query_id(self):
+        response = ProductionDViewExecutor(
+            lambda **_: {"structuredContent": {"result": EMPTY_DVIEW_RESPONSE}}
+        ).execute_read_only("SELECT no_rows")
+        self.assertEqual(
+            "8500ad6e-e2e1-40cd-a90a-0bd1cf28d2e3", response.query_id
+        )
+        self.assertTrue(response.empty_result)
+        self.assertIsNone(response.raw_result)
+
+    def test_production_executor_rejects_empty_success_without_valid_query_id(self):
+        responses = (
+            "查询成功, 无返回数据。\n\n- 耗时: 20.08s",
+            "查询成功, 无返回数据。\n\n- 查询ID: `   `\n- 耗时: 20.08s",
+        )
+        for response in responses:
+            with self.subTest(response=response), self.assertRaisesRegex(
+                RunnerError, "query ID footer"
+            ):
+                ProductionDViewExecutor(
+                    lambda **_: {"result": response}
+                ).execute_read_only("SELECT no_rows")
 
     def test_production_executor_normalizes_structured_transport_types(self):
         response = ProductionDViewExecutor(

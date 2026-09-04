@@ -19,6 +19,7 @@ class HostQueryResponse:
     query_id: str
     receipt_id: str
     raw_result: dict[str, Any] | None = None
+    empty_result: bool = False
     error_class: str | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -42,6 +43,11 @@ class ProductionDViewExecutor:
 
     _QUERY_FOOTER = re.compile(
         r"\*查询ID `(?P<query_id>[^`]+)`, 共 (?P<row_count>\d+) 行, 耗时 [^*]+\*"
+    )
+    _EMPTY_RESULT = re.compile(
+        r"\A\s*查询成功,\s*无返回数据。\s*\n+"
+        r"\s*-\s*查询ID:\s*`(?P<query_id>[^`\s]+)`\s*\n"
+        r"\s*-\s*耗时:\s*[^\r\n]+\s*\Z"
     )
     _INTEGER = re.compile(r"[-+]?\d+")
     _NUMBER = re.compile(
@@ -91,8 +97,9 @@ class ProductionDViewExecutor:
 
     def _normalize_response(self, response: Any) -> HostQueryResponse:
         payload = self._unwrap_payload(response)
+        empty_result = False
         if isinstance(payload, str):
-            query_id, raw_result = self._parse_markdown_result(payload)
+            query_id, raw_result, empty_result = self._parse_markdown_result(payload)
         elif isinstance(payload, Mapping):
             query_id = self._required_text(payload, "query_id")
             columns = self._ordered_column_names(payload.get("columns"))
@@ -104,6 +111,7 @@ class ProductionDViewExecutor:
             query_id=query_id,
             receipt_id=query_id,
             raw_result=raw_result,
+            empty_result=empty_result,
         )
 
     def _unwrap_payload(self, response: Any) -> Any:
@@ -116,7 +124,12 @@ class ProductionDViewExecutor:
             return response["result"]
         return response
 
-    def _parse_markdown_result(self, content: str) -> tuple[str, dict[str, Any]]:
+    def _parse_markdown_result(
+        self, content: str
+    ) -> tuple[str, dict[str, Any] | None, bool]:
+        empty_result = self._EMPTY_RESULT.fullmatch(content)
+        if empty_result is not None:
+            return empty_result.group("query_id"), None, True
         footer = self._QUERY_FOOTER.search(content)
         if footer is None:
             raise RunnerError("DView MCP response lacks its query ID footer")
@@ -149,7 +162,7 @@ class ProductionDViewExecutor:
         declared_count = int(footer.group("row_count"))
         if declared_count != len(rows):
             raise RunnerError("DView MCP footer row count does not match the table")
-        return footer.group("query_id"), {"columns": columns, "rows": rows}
+        return footer.group("query_id"), {"columns": columns, "rows": rows}, False
 
     def _split_markdown_row(self, line: str) -> list[str]:
         body = line.strip()[1:-1]
@@ -285,6 +298,30 @@ class HostDViewAdapter:
             run_id=run_id,
         ):
             response = self.executor.execute_read_only(ticket["rendered_sql"])
+            raw_result = response.raw_result
+            if response.empty_result:
+                if raw_result is not None or any(
+                    value is not None
+                    for value in (
+                        response.error_class,
+                        response.error_code,
+                        response.error_message,
+                    )
+                ):
+                    raise RunnerError("empty DView result has conflicting evidence")
+                columns = ticket.get("result_columns")
+                if (
+                    not isinstance(columns, list)
+                    or not columns
+                    or not all(
+                        isinstance(column, str) and column for column in columns
+                    )
+                    or len(columns) != len(set(columns))
+                ):
+                    raise RunnerError(
+                        "empty DView result lacks registered result columns"
+                    )
+                raw_result = {"columns": list(columns), "rows": []}
             common = {
                 "step_id": ticket["step_id"],
                 "attempt_no": ticket["attempt_no"],
@@ -294,12 +331,12 @@ class HostDViewAdapter:
                 "submitted_sql_sha256": ticket["rendered_sql_sha256"],
                 "query_id": response.query_id,
             }
-            if response.raw_result is not None:
+            if raw_result is not None:
                 event = {
                     "event": "query_returned",
                     **common,
-                    "raw_result": response.raw_result,
-                    "raw_result_sha256": canonical_sha256(response.raw_result),
+                    "raw_result": raw_result,
+                    "raw_result_sha256": canonical_sha256(raw_result),
                 }
             else:
                 error_fields = (

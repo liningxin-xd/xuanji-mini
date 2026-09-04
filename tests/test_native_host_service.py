@@ -87,6 +87,7 @@ class _FixtureDViewClient:
         game_candidate: bool = False,
         background_failure: bool = False,
         background_malformed_response: bool = False,
+        background_empty_response: bool = False,
         root_current_rate: float = 0.79,
         root_historical_rate: float = 0.80,
     ):
@@ -95,6 +96,7 @@ class _FixtureDViewClient:
         self._game_candidate = game_candidate
         self._background_failure = background_failure
         self._background_malformed_response = background_malformed_response
+        self._background_empty_response = background_empty_response
         self._query_counts: dict[str, int] = {}
         self._root_executor = FixtureRootExecutor(
             current_rate=root_current_rate,
@@ -155,6 +157,19 @@ class _FixtureDViewClient:
                         }
                     ],
                     "debug_token": "raw-response-private",
+                }
+            if (
+                self._background_empty_response
+                and ticket["step_id"] == "game_background"
+            ):
+                return {
+                    "structuredContent": {
+                        "result": (
+                            "查询成功, 无返回数据。\n\n"
+                            "- 查询ID: `8500ad6e-e2e1-40cd-a90a-0bd1cf28d2e3`\n"
+                            "- 耗时: 20.08s"
+                        )
+                    }
                 }
             raw_result = raw_result_for_ticket(
                 runner,
@@ -551,6 +566,92 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_primary_v2_empty_game_background_uses_registered_columns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(
+                settings,
+                Path(__file__).parents[1],
+                game_candidate=True,
+                background_empty_response=True,
+            )
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": (
+                        "ads_dmg_quality_platform_download_chain_monitor_1d"
+                    ),
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+            with self.assertLogs("host_service.runtime", level="INFO") as logs:
+                result = await runtime.run_task(
+                    task_id="native-v2-empty-game-background",
+                    dqc_payload=payload,
+                )
+
+            self.assertEqual("write_conclusion", result["action"])
+            background = result["writer_pack"]["game_background"][0]
+            self.assertEqual([], background["facts"])
+            self.assertIn(
+                "game_id:12345:no_registered_event",
+                result["writer_pack"]["evidence_limits"],
+            )
+            private_runner = AttributionRunner(
+                Path(__file__).parents[1],
+                runs_root=settings.runs_root,
+                trusted_receipt_verifier=TrustedReceiptVerifier(
+                    key_id=settings.receipt_key_id,
+                    secret=settings.receipt_secret,
+                ),
+                analysis_profile="primary_v2",
+            )
+            private_state = private_runner.load_state(result["run_id"])
+            item = private_state["post_primary"]["steps"][2]["items"][0]
+            self.assertEqual("succeeded", item["status"])
+            self.assertEqual(
+                "8500ad6e-e2e1-40cd-a90a-0bd1cf28d2e3",
+                item["attempts"][-1]["query_id"],
+            )
+            event = json.loads(
+                (
+                    settings.runs_root
+                    / result["run_id"]
+                    / item["attempts"][-1]["event_path"]
+                ).read_text(encoding="utf-8")
+            )
+            binding = private_runner._binding_from_step(item)
+            columns, _ = private_runner.contracts.query_spec_result_contract(
+                binding
+            )
+            self.assertEqual(
+                {"columns": list(columns), "rows": []}, event["raw_result"]
+            )
+            public_text = json.dumps(result, ensure_ascii=False)
+            log_text = "\n".join(logs.output)
+            for private in (
+                "8500ad6e-e2e1-40cd-a90a-0bd1cf28d2e3",
+                "query_id",
+                "raw_result",
+                "SELECT ",
+            ):
+                self.assertNotIn(private, public_text)
+                self.assertNotIn(private, log_text)
+
     async def test_game_background_failure_bundle_captures_full_run_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = replace(

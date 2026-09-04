@@ -898,6 +898,9 @@ class AttributionRunner:
             "query_asset_sha256": binding.asset_sha256,
             "binding_sha256": step["binding_sha256"],
             "result_schema_id": binding.result_schema_id,
+            "result_columns": self._registered_result_columns(
+                binding, chain=state["chain"]
+            ),
             "rendered_sql_sha256": attempt["sql_sha256"],
             "parameters": parameters,
             "rendered_sql": sql,
@@ -914,6 +917,21 @@ class AttributionRunner:
             ticket,
         )
         return ticket
+
+    def _registered_result_columns(
+        self, binding: QueryBinding, *, chain: str
+    ) -> list[str]:
+        if binding.asset_kind == "query_spec":
+            columns, _ = self.contracts.query_spec_result_contract(binding)
+        else:
+            schema = self.contracts.result_schema(binding.result_schema_id)
+            if isinstance(schema.get("columns_by_chain"), dict):
+                columns = schema["columns_by_chain"].get(chain)
+            else:
+                columns = schema.get("columns")
+        if not isinstance(columns, dict) or not columns:
+            raise RunnerError("registered result columns are unavailable")
+        return list(columns)
 
     def _repair_ticket(
         self, state: dict[str, Any], step: dict[str, Any]

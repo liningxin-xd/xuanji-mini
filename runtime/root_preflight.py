@@ -248,13 +248,31 @@ class RootPreflight:
                 "query_id": response.query_id,
                 "receipt_id": response.receipt_id,
             }
-            if response.raw_result is None:
+            raw_result = response.raw_result
+            if response.empty_result:
+                if raw_result is not None or any(
+                    value is not None
+                    for value in (
+                        response.error_class,
+                        response.error_code,
+                        response.error_message,
+                    )
+                ):
+                    raise RootPreflightError(
+                        "insufficient_data",
+                        "registered root returned conflicting empty evidence",
+                    )
+                raw_result = {
+                    "columns": list(self._query_spec["output"]["columns"]),
+                    "rows": [],
+                }
+            if raw_result is None:
                 status = self._query_failure_status(response.error_class)
                 raise RootPreflightError(
                     status,
                     f"registered root query failed for required day ({response.error_class})",
                 )
-            raw_result = deepcopy(response.raw_result)
+            raw_result = deepcopy(raw_result)
             row = self._validate_one_row(
                 raw_result,
                 partition_date=partition_date,
