@@ -22,6 +22,7 @@ from host_service.dview_client import (
 from host_service.pipeline_handoff import PipelineHandoffSigner
 from host_service.runtime import XuanjiHostRuntime
 from host_service.sink import FileTaskResultSink, FileValidatedResultSink
+from host_service.telemetry import OperationTrace, bind_trace
 from host_service.tools import create_mcp
 from runtime.host_adapter import DViewExecutionError
 from runtime.contracts import canonical_sha256
@@ -85,6 +86,7 @@ class _FixtureDViewClient:
         *,
         game_candidate: bool = False,
         background_failure: bool = False,
+        background_malformed_response: bool = False,
         root_current_rate: float = 0.79,
         root_historical_rate: float = 0.80,
     ):
@@ -92,6 +94,7 @@ class _FixtureDViewClient:
         self._repository_root = repository_root
         self._game_candidate = game_candidate
         self._background_failure = background_failure
+        self._background_malformed_response = background_malformed_response
         self._query_counts: dict[str, int] = {}
         self._root_executor = FixtureRootExecutor(
             current_rate=root_current_rate,
@@ -138,6 +141,21 @@ class _FixtureDViewClient:
                         "/private/tmp/private-background-result.json"
                     ),
                 )
+            if (
+                self._background_malformed_response
+                and ticket["step_id"] == "game_background"
+            ):
+                return {
+                    "query_id": "private-game-background-query",
+                    "columns": ["analysis_date"],
+                    "rows": [
+                        {
+                            "analysis_date": "2026-08-24",
+                            "unexpected": "retained-value",
+                        }
+                    ],
+                    "debug_token": "raw-response-private",
+                }
             raw_result = raw_result_for_ticket(
                 runner,
                 run_root.name,
@@ -325,6 +343,37 @@ class DViewMCPBridgeTest(unittest.IsolatedAsyncioTestCase):
             captured.exception.error_message,
         )
 
+    async def test_query_transport_response_is_retained_for_failure_diagnostics(self):
+        result = SimpleNamespace(
+            isError=True,
+            content=[SimpleNamespace(type="text", text="permission denied")],
+            structuredContent=None,
+        )
+        query = DViewQuerySession(
+            SimpleNamespace(call_tool=AsyncMock(return_value=result))
+        )
+        trace = OperationTrace.create(
+            task_id="transport-response-diagnostic",
+            phase="run_task",
+            boundary_owned=True,
+        )
+        trace.start_query(
+            bucket="root",
+            stage="root_preflight",
+            step_id="root_snapshot_day",
+            attempt_no=0,
+            run_id=None,
+        )
+        with bind_trace(trace):
+            with self.assertRaises(DViewMCPResponseError):
+                await query.query(
+                    sql="SELECT 1",
+                    database_type="MaxCompute",
+                    limit=250,
+                )
+        self.assertTrue(trace.private_last_query_transport_response_received)
+        self.assertIs(result, trace.private_last_query_transport_response)
+
     async def test_unverifiable_tool_error_does_not_invent_query_id(self):
         result = SimpleNamespace(
             isError=True,
@@ -399,7 +448,9 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         runtime = _FakeRuntime()
         runtime.run_task = AsyncMock(
             side_effect=RuntimeError(
-                "SELECT secret FROM table query_id=private raw_result=rows"
+                "SELECT secret FROM table query_id=private raw_result=rows "
+                "client_secret=trace-private XUANJI_API_KEY=env-key-private "
+                "Authorization: Basic authorization-private"
             )
         )
         mcp = create_mcp(
@@ -411,7 +462,12 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Exception, "xuanji Host request failed") as captured:
                 await tool(
                     task_id="failed-shadow",
-                    dqc_payload={"ruleChecks": [{"ruleName": "registered"}]},
+                    dqc_payload={
+                        "api_token": "tool-input-private",
+                        "apiKey": "camel-key-private",
+                        "business_context": "retain-full-business-context",
+                        "ruleChecks": [{"ruleName": "registered"}],
+                    },
                 )
         self.assertNotIn("SELECT secret", str(captured.exception))
         self.assertNotIn("private", str(captured.exception))
@@ -426,8 +482,39 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"exception_leaf_types":["RuntimeError"]', rendered_logs)
         self.assertIn(error_id.group(1), rendered_logs)
         self.assertRegex(rendered_logs, r'"operation_id":"op-[0-9a-f]{16}"')
+        self.assertIn('"diagnostic_bundle_status":"written"', rendered_logs)
         self.assertNotIn("SELECT secret", rendered_logs)
         self.assertNotIn("query_id=private", rendered_logs)
+        bundle_path = (
+            Path(self.temp_dir.name)
+            / "results"
+            / "diagnostics"
+            / f"{error_id.group(1)}.json"
+        )
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        bundle_text = json.dumps(bundle, ensure_ascii=False)
+        self.assertEqual(0o600, bundle_path.stat().st_mode & 0o777)
+        self.assertEqual(0o700, bundle_path.parent.stat().st_mode & 0o777)
+        self.assertEqual(
+            "[REDACTED]",
+            bundle["tool_input"]["dqc_payload"]["api_token"],
+        )
+        self.assertEqual(
+            "[REDACTED]",
+            bundle["tool_input"]["dqc_payload"]["apiKey"],
+        )
+        self.assertEqual(
+            "retain-full-business-context",
+            bundle["tool_input"]["dqc_payload"]["business_context"],
+        )
+        self.assertIn("SELECT secret", bundle_text)
+        self.assertIn("query_id=private", bundle_text)
+        self.assertIn("raw_result=rows", bundle_text)
+        self.assertIn("RuntimeError", bundle["exception"]["traceback"])
+        self.assertNotIn("tool-input-private", bundle_text)
+        self.assertNotIn("trace-private", bundle_text)
+        self.assertNotIn("env-key-private", bundle_text)
+        self.assertNotIn("authorization-private", bundle_text)
 
     async def test_exception_group_logs_only_bounded_type_tree(self):
         runtime = _FakeRuntime()
@@ -464,6 +551,92 @@ class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_game_background_failure_bundle_captures_full_run_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = replace(
+                _settings(Path(temp_dir)), analysis_profile="primary_v2"
+            )
+            client = _FixtureDViewClient(
+                settings,
+                Path(__file__).parents[1],
+                game_candidate=True,
+                background_malformed_response=True,
+            )
+            runtime = XuanjiHostRuntime(settings, dview_client=client)
+            mcp = create_mcp(settings, runtime=runtime)
+            tool = mcp._tool_manager._tools["xuanji_run_task"].fn
+            task_id = "diagnostic-game-background-" + "a" * 64
+            payload = {
+                "projectName": "tap_dw",
+                "dqcEntityQuality": {
+                    "entityName": (
+                        "ads_dmg_quality_platform_download_chain_monitor_1d"
+                    ),
+                    "actualExpression": "dt=2026-08-24",
+                },
+                "ruleChecks": [
+                    {
+                        "ruleName": "【apk下载完成率】最近1天_低于80%",
+                        "tableName": (
+                            "ads_dmg_quality_platform_download_chain_monitor_1d"
+                        ),
+                        "actualExpression": "dt=2026-08-24",
+                        "op": ">=",
+                        "expectValue": 0.8,
+                    }
+                ],
+            }
+
+            with self.assertLogs("host_service", level="INFO") as logs:
+                with self.assertRaisesRegex(Exception, "error_id=err-") as captured:
+                    await tool(task_id=task_id, dqc_payload=payload)
+
+            error_id = re.search(
+                r"error_id=(err-[0-9a-f]{16})",
+                str(captured.exception),
+            )
+            self.assertIsNotNone(error_id)
+            bundle_path = (
+                settings.results_root
+                / "diagnostics"
+                / f"{error_id.group(1)}.json"
+            )
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+        rendered_logs = "\n".join(logs.output)
+        bundle_text = json.dumps(bundle, ensure_ascii=False)
+        self.assertIn('"last_query_step":"game_background"', rendered_logs)
+        self.assertIn('"diagnostic_bundle_status":"written"', rendered_logs)
+        self.assertNotIn("private-game-background-query", rendered_logs)
+        self.assertEqual("game_background", bundle["query"]["step"])
+        self.assertEqual(0, bundle["query"]["attempt"])
+        self.assertIsNotNone(bundle["query"]["run_id"])
+        self.assertRegex(
+            bundle["query"]["request"]["sql"],
+            r"\b(SELECT|WITH)\b",
+        )
+        self.assertEqual(
+            "private-game-background-query",
+            bundle["query"]["raw_response"]["query_id"],
+        )
+        self.assertEqual(
+            "retained-value",
+            bundle["query"]["raw_response"]["rows"][0]["unexpected"],
+        )
+        self.assertEqual(
+            "[REDACTED]",
+            bundle["query"]["raw_response"]["debug_token"],
+        )
+        self.assertIn("_normalize_rows", bundle["exception"]["traceback"])
+        self.assertIn("does not match columns", bundle["exception"]["traceback"])
+        self.assertEqual("collected", bundle["run_artifacts"]["status"])
+        artifact_names = set(bundle["run_artifacts"]["files"])
+        self.assertIn("state.json", artifact_names)
+        self.assertTrue(any(name.startswith("tickets/") for name in artifact_names))
+        self.assertTrue(any(name.startswith("events/") for name in artifact_names))
+        self.assertTrue(any(name.startswith("sql/") for name in artifact_names))
+        self.assertNotIn("raw-response-private", bundle_text)
+
     async def test_result_processing_failure_is_distinct_from_dview_request(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = _settings(Path(temp_dir))
@@ -495,8 +668,20 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
             }
 
             with self.assertLogs("host_service", level="INFO") as logs:
-                with self.assertRaisesRegex(Exception, "error_id=err-"):
+                with self.assertRaisesRegex(Exception, "error_id=err-") as captured:
                     await tool(task_id="tracked-result-failure", dqc_payload=payload)
+
+            error_id = re.search(
+                r"error_id=(err-[0-9a-f]{16})",
+                str(captured.exception),
+            )
+            self.assertIsNotNone(error_id)
+            bundle_path = (
+                settings.results_root
+                / "diagnostics"
+                / f"{error_id.group(1)}.json"
+            )
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
 
         rendered_logs = "\n".join(logs.output)
         self.assertIn('"event":"query_succeeded"', rendered_logs)
@@ -504,8 +689,17 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"failure_stage":"query_result_processing"', rendered_logs)
         self.assertIn('"exception_type":"RunnerError"', rendered_logs)
         self.assertIn('"last_query_stage":"root_preflight"', rendered_logs)
+        self.assertIn('"diagnostic_bundle_status":"written"', rendered_logs)
         self.assertNotIn("SELECT secret", rendered_logs)
         self.assertNotIn("query_id=private", rendered_logs)
+        self.assertTrue(bundle["query"]["response_received"])
+        self.assertEqual(
+            {"private": "SELECT secret query_id=private"},
+            bundle["query"]["raw_response"],
+        )
+        self.assertRegex(bundle["query"]["request"]["sql"], r"\b(SELECT|WITH)\b")
+        self.assertIn("RunnerError", bundle["exception"]["traceback"])
+        self.assertEqual("collected", bundle["task_artifacts"]["status"])
 
     async def test_unexpected_dview_failure_logs_the_exact_query_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:

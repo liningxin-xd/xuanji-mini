@@ -33,6 +33,7 @@ class OperationTrace:
     last_query_stage: str | None = None
     last_query_step: str | None = None
     last_query_attempt: int | None = None
+    last_query_run_id: str | None = None
     investigation_id: str | None = None
     task_status: str | None = None
     current_investigation_index: int | None = None
@@ -46,6 +47,17 @@ class OperationTrace:
     exception_types: list[str] = field(default_factory=list)
     exception_leaf_types: list[str] = field(default_factory=list)
     exception_group_depth: int = 0
+    diagnostic_bundle_status: str | None = None
+    diagnostic_bundle_file: str | None = None
+    diagnostic_bundle_error_type: str | None = None
+    private_tool_input: Any = field(default=None, repr=False)
+    private_last_query_request: Any = field(default=None, repr=False)
+    private_last_query_transport_response: Any = field(default=None, repr=False)
+    private_last_query_transport_response_received: bool = field(
+        default=False, repr=False
+    )
+    private_last_query_response: Any = field(default=None, repr=False)
+    private_last_query_response_received: bool = field(default=False, repr=False)
 
     @classmethod
     def create(
@@ -76,6 +88,7 @@ class OperationTrace:
         stage: str | None,
         step_id: str | None,
         attempt_no: int | None,
+        run_id: str | None,
     ) -> int:
         safe_bucket = _safe_name(bucket)
         self.query_counts[safe_bucket] = self.query_counts.get(safe_bucket, 0) + 1
@@ -84,8 +97,28 @@ class OperationTrace:
         self.last_query_stage = _optional_safe_name(stage)
         self.last_query_step = _optional_safe_name(step_id)
         self.last_query_attempt = attempt_no if isinstance(attempt_no, int) else None
+        self.last_query_run_id = _optional_safe_id(run_id)
+        self.private_last_query_request = None
+        self.private_last_query_transport_response = None
+        self.private_last_query_transport_response_received = False
+        self.private_last_query_response = None
+        self.private_last_query_response_received = False
         self.set_stage("dview_query")
         return self.last_query_ordinal
+
+    def capture_tool_input(self, value: Any) -> None:
+        self.private_tool_input = value
+
+    def capture_query_request(self, value: Any) -> None:
+        self.private_last_query_request = value
+
+    def capture_query_transport_response(self, value: Any) -> None:
+        self.private_last_query_transport_response = value
+        self.private_last_query_transport_response_received = True
+
+    def capture_query_response(self, value: Any) -> None:
+        self.private_last_query_response = value
+        self.private_last_query_response_received = True
 
     def capture_failure(self, exc: BaseException) -> None:
         if self.error_id is not None:
@@ -124,6 +157,7 @@ class OperationTrace:
             "last_query_stage": self.last_query_stage,
             "last_query_step": self.last_query_step,
             "last_query_attempt": self.last_query_attempt,
+            "last_query_run_id": self.last_query_run_id,
             "investigation_id": self.investigation_id,
             "task_status": self.task_status,
             "current_investigation_index": self.current_investigation_index,
@@ -135,6 +169,9 @@ class OperationTrace:
             "exception_types": list(self.exception_types),
             "exception_leaf_types": list(self.exception_leaf_types),
             "exception_group_depth": self.exception_group_depth,
+            "diagnostic_bundle_status": self.diagnostic_bundle_status,
+            "diagnostic_bundle_file": self.diagnostic_bundle_file,
+            "diagnostic_bundle_error_type": self.diagnostic_bundle_error_type,
         }
 
 
@@ -257,3 +294,9 @@ def _optional_safe_name(value: Any) -> str | None:
     if value is None:
         return None
     return _safe_name(value)
+
+
+def _optional_safe_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value if isinstance(value, str) and _SAFE_ID.fullmatch(value) else "invalid"

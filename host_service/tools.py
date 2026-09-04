@@ -16,6 +16,7 @@ from pydantic import AnyHttpUrl, Field
 
 from .auth import StaticBearerTokenVerifier
 from .config import HostServiceSettings
+from .diagnostics import FailureBundleWriter
 from .runtime import XuanjiHostRuntime
 from .telemetry import OperationTrace, bind_trace, emit_event, exception_type_name
 
@@ -55,6 +56,11 @@ def create_mcp(
         transport_security=_transport_security(settings.public_url),
     )
     host_runtime = runtime or XuanjiHostRuntime(settings)
+    failure_bundle_writer = FailureBundleWriter(
+        diagnostics_root=settings.results_root / "diagnostics",
+        tasks_root=settings.tasks_root,
+        runs_root=settings.runs_root,
+    )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
     async def xuanji_run_task(
@@ -72,6 +78,8 @@ def create_mcp(
             task_id=task_id,
             investigation_id=None,
             analysis_profile=settings.analysis_profile,
+            failure_bundle_writer=failure_bundle_writer,
+            tool_input={"task_id": task_id, "dqc_payload": dqc_payload},
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -106,6 +114,17 @@ def create_mcp(
             task_id=task_id,
             investigation_id=investigation_id,
             analysis_profile=settings.analysis_profile,
+            failure_bundle_writer=failure_bundle_writer,
+            tool_input={
+                "task_id": task_id,
+                "investigation_id": investigation_id,
+                "run_id": run_id,
+                "step_id": step_id,
+                "repair_attempt": repair_attempt,
+                "repair_reason": repair_reason,
+                "error_evidence": error_evidence,
+                "repaired_sql": repaired_sql,
+            },
         )
 
     @mcp.tool(annotations=_HOST_ANNOTATIONS)
@@ -129,6 +148,12 @@ def create_mcp(
             task_id=task_id,
             investigation_id=investigation_id,
             analysis_profile=settings.analysis_profile,
+            failure_bundle_writer=failure_bundle_writer,
+            tool_input={
+                "task_id": task_id,
+                "investigation_id": investigation_id,
+                "writer_patch": writer_patch,
+            },
         )
 
     return mcp
@@ -141,6 +166,8 @@ async def _safe_call(
     task_id: str,
     investigation_id: str | None,
     analysis_profile: str,
+    failure_bundle_writer: FailureBundleWriter,
+    tool_input: dict[str, Any],
 ) -> dict[str, Any]:
     started = time.monotonic()
     trace = OperationTrace.create(
@@ -149,12 +176,18 @@ async def _safe_call(
         boundary_owned=True,
         analysis_profile=analysis_profile,
     )
+    trace.capture_tool_input(tool_input)
     with bind_trace(trace):
         emit_event(_LOGGER, logging.INFO, "operation_started", trace=trace)
         try:
             result = await operation
         except Exception as exc:  # noqa: BLE001
             trace.capture_failure(exc)
+            _write_failure_bundle(
+                failure_bundle_writer,
+                trace=trace,
+                exc=exc,
+            )
             _log_failure(
                 trace=trace,
                 investigation_id=investigation_id,
@@ -167,6 +200,13 @@ async def _safe_call(
     if not isinstance(result, dict):
         trace.set_stage("boundary_result_validation")
         trace.capture_named_failure("InvalidResultEnvelope")
+        invalid_result = TypeError("Host returned an invalid result envelope")
+        _write_failure_bundle(
+            failure_bundle_writer,
+            trace=trace,
+            exc=invalid_result,
+            result=result,
+        )
         _log_failure(
             trace=trace,
             investigation_id=investigation_id,
@@ -188,7 +228,7 @@ def _log_failure(
     outer_exception_type: str,
 ) -> None:
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         **trace.fields(),
         "investigation_id": (
             investigation_id
@@ -205,6 +245,23 @@ def _log_failure(
         "xuanji_operation %s",
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
     )
+
+
+def _write_failure_bundle(
+    writer: FailureBundleWriter,
+    *,
+    trace: OperationTrace,
+    exc: BaseException,
+    result: Any = None,
+) -> None:
+    try:
+        path = writer.write(trace=trace, exc=exc, result=result)
+    except Exception as diagnostic_exc:  # noqa: BLE001
+        trace.diagnostic_bundle_status = "write_failed"
+        trace.diagnostic_bundle_error_type = exception_type_name(diagnostic_exc)
+    else:
+        trace.diagnostic_bundle_status = "written"
+        trace.diagnostic_bundle_file = path.name
 
 
 def _transport_security(public_url: str) -> TransportSecuritySettings:

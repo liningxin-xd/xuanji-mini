@@ -155,7 +155,13 @@ class XuanjiHostRuntime:
                                     if observation is not None
                                     else None
                                 ),
+                                run_id=(
+                                    observation.run_id
+                                    if observation is not None
+                                    else None
+                                ),
                             )
+                            trace.capture_query_request(dict(kwargs))
                             query_started = time.monotonic()
                             emit_event(
                                 _LOGGER,
@@ -192,6 +198,7 @@ class XuanjiHostRuntime:
                                     **exception_diagnostic(exc),
                                 )
                                 raise
+                            trace.capture_query_response(response)
                             trace.set_stage("query_result_processing")
                             emit_event(
                                 _LOGGER,
@@ -343,7 +350,7 @@ class XuanjiHostRuntime:
         if investigation_status is None and isinstance(writer_pack, dict):
             investigation_status = writer_pack.get("result_status_hint")
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "operation_id": trace.operation_id,
             "error_id": None,
             "task_id": task_id if _SAFE_ID.fullmatch(task_id) else "invalid",
@@ -377,6 +384,7 @@ class XuanjiHostRuntime:
             "last_query_stage": trace.last_query_stage,
             "last_query_step": trace.last_query_step,
             "last_query_attempt": trace.last_query_attempt,
+            "last_query_run_id": trace.last_query_run_id,
             "task_status": state_observation.get("task_status"),
             "current_investigation_index": state_observation.get(
                 "current_investigation_index"
@@ -401,7 +409,7 @@ class XuanjiHostRuntime:
             task_id, requested_investigation_id
         )
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             **trace.fields(),
             "duration_ms": duration_ms,
             "investigation_id": state_observation.get("investigation_id"),

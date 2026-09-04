@@ -46,6 +46,9 @@ class DViewQuerySession:
                 "limit": limit,
             },
         )
+        trace = current_trace()
+        if trace is not None:
+            trace.capture_query_transport_response(result)
         text = _text_content(result)
         if bool(getattr(result, "isError", False)) or text.startswith("**查询失败**"):
             _raise_typed_query_error(text)

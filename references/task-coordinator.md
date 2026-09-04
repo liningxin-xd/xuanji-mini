@@ -128,5 +128,7 @@ does not create an analytical result. The outer MCP boundary returns a generic
 ToolError with an opaque `error_id` and leaves the task available for an
 identical retry. Private structured telemetry records the safe task/query stage,
 counts, timings, and bounded exception class tree under the same operation; see
-[Operational Telemetry](operational-telemetry.md). It never records exception
-messages or private query evidence.
+[Operational Telemetry](operational-telemetry.md). Normal logs never record
+exception messages or private query evidence. A separate mode-`0600` failure
+bundle retains the original task/query material and traceback for trusted local
+diagnosis while recursively redacting credential values.

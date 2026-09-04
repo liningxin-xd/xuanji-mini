@@ -14,8 +14,10 @@ model never invokes the nested DView tool.
 
 Process, operation, and query lifecycle logging follows
 [Operational Telemetry](operational-telemetry.md). Retain the structured records
-in the normal platform log sink and index `error_id` plus `operation_id`; do not
-enable raw traceback, HTTP body, or SQL logging to investigate a failure.
+in the normal platform log sink and index `error_id` plus `operation_id`.
+Unexpected operation failures write raw diagnostic material to the private Host
+results volume instead of the platform log sink; do not mirror those bundles to
+ordinary logs or expose them through MCP.
 
 ## Deployment Contract
 
@@ -52,10 +54,14 @@ levels:
 /var/lib/xuanji/runs/<run-id>/...
 /var/lib/xuanji/results/<run-id>/validated-result.json
 /var/lib/xuanji/results/tasks/<task-id>/validated-task-result.json
+/var/lib/xuanji/results/diagnostics/<error-id>.json
 ```
 
-Only a trusted pipeline writer may read that directory. It must never be
-exposed as another model tool or returned by an artifact download endpoint.
+Only a trusted pipeline writer or operator may read that directory. Diagnostic
+bundles intentionally contain raw payloads, SQL, DView responses, query IDs,
+tracebacks, and task/run artifacts with credential values redacted. They must
+never be exposed as another model tool or returned by an artifact download
+endpoint.
 The model-facing fallback uses the signed public projection documented in
 [Signed Pipeline Handoff](pipeline-handoff.md); it does not expose this volume.
 

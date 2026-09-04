@@ -282,6 +282,7 @@ class HostDViewAdapter:
             stage="attribution",
             step_id=ticket["step_id"],
             attempt_no=ticket["attempt_no"],
+            run_id=run_id,
         ):
             response = self.executor.execute_read_only(ticket["rendered_sql"])
             common = {
