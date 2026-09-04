@@ -17,9 +17,11 @@ class EvidencePackBuilder:
         *,
         max_candidates_per_family: int = 3,
         max_bytes: int = 12 * 1024,
+        metric_polarity: str = "unknown",
     ):
         self.max_candidates_per_family = max_candidates_per_family
         self.max_bytes = max_bytes
+        self.metric_polarity = metric_polarity
 
     def build(self, state: dict[str, Any]) -> dict[str, Any]:
         steps = state.get("steps")
@@ -76,6 +78,7 @@ class EvidencePackBuilder:
             "analysis_profile": analysis_profile,
             "run_id": state["run_id"],
             "metric": state["metric"],
+            "metric_polarity": self.metric_polarity,
             "analysis_date": state["analysis_date"],
             "game_type": state["game_type"],
             "execution_mode": state["execution_mode"],
@@ -152,6 +155,7 @@ class EvidencePackBuilder:
                     pack["counterfactual"] = {
                         field: result[field]
                         for field in (
+                            "candidate_id",
                             "dimension",
                             "value",
                             "label",

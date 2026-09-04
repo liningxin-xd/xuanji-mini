@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .analysis_v5 import ANALYSIS_SCHEMA_VERSION, build_public_facts
+
 
 class FinalAssemblyError(ValueError):
     pass
@@ -27,6 +29,7 @@ class FinalAssembler:
         self,
         *,
         writer_pack: dict[str, Any],
+        machine_state: dict[str, Any] | None = None,
         attribution_execution: dict[str, Any],
         writer_patch: dict[str, Any],
         analysis_context: dict[str, Any],
@@ -128,7 +131,34 @@ class FinalAssembler:
                 field: deepcopy(counterfactual[field]) for field in required
             }
 
+        public_facts = build_public_facts(
+            writer_pack=writer_pack,
+            machine_state=machine_state,
+            attribution_execution=attribution_execution,
+            writer_patch=patch,
+        )
+        narrative = public_facts["user_narrative"]
+        investigation["public_facts"] = public_facts
+        if status in {"completed", "no_dominant_slice"}:
+            investigation["summary"] = narrative["summary"]
+            investigation["evidence_limits"] = self._merge_evidence_limits(
+                writer_pack.get("evidence_limits"), narrative["evidence_limits"]
+            )
+            investigation["recommended_action"] = narrative["recommended_action"]
+            finding_texts = narrative["finding_texts"]
+            for finding in investigation.get("top_findings", []):
+                candidate_id = self._candidate_id(finding)
+                if candidate_id in finding_texts:
+                    finding["finding"] = finding_texts[candidate_id]
+        else:
+            investigation["reason"] = narrative["summary"]
+            investigation["action"] = narrative["recommended_action"]
+            investigation["evidence_limits"] = self._merge_evidence_limits(
+                writer_pack.get("evidence_limits"), narrative["evidence_limits"]
+            )
+
         return {
+            "schema_version": ANALYSIS_SCHEMA_VERSION,
             "source": context["source"],
             "project": context["project"],
             "table": context["table"],
@@ -140,6 +170,16 @@ class FinalAssembler:
             ),
             "investigations": [investigation],
         }
+
+    @staticmethod
+    def _candidate_id(finding: dict[str, Any]) -> str:
+        if finding.get("attribution_level") == "secondary":
+            return (
+                f"secondary:{finding['parent_dimension']}:"
+                f"{finding['parent_value']}:{finding['dimension']}:"
+                f"{finding['value']}"
+            )
+        return f"{finding['dimension']}:{finding['value']}"
 
     def _validate_patch(self, patch: Any) -> dict[str, Any]:
         if not isinstance(patch, dict) or set(patch) != self.PATCH_FIELDS:

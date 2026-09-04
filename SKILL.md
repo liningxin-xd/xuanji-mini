@@ -33,7 +33,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## `write_conclusion`
 
-只读当前响应的 `writer_pack` 和 [Runtime 文案指南](references/runtime-writing-guide.md)。不得加载 Playbook 或为其他 investigation 预先生成文案。
+只读当前 `writer_pack` 和 [Runtime 文案指南](references/runtime-writing-guide.md)，不加载 Playbook 或预写其他 investigation。公开 schema v5 见 [契约](references/public-analysis-v5.md)。
 
 调用 `xuanji_finalize` 时，`writer_patch` 必须且只能包含：
 
@@ -50,7 +50,7 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## `task_complete`
 
-以 Host 返回的 `analysis_preview`、`pipeline_handoff`、`overall_status` 和紧凑 validation receipt 摘要作为任务结果。不得重算状态、重组 investigations 或用旧 run/batch 补齐证据。完整交接协议见 [Pipeline Handoff](references/pipeline-handoff.md)。
+以 Host 返回的 schema-v5 `analysis_preview`、`pipeline_handoff`、`overall_status` 和紧凑 validation receipt 摘要作为任务结果。不得重算状态、重组 investigations 或用旧 run/batch 补齐证据。完整交接协议见 [Pipeline Handoff](references/pipeline-handoff.md)。
 
 完整已校验 analysis 保留在 Host 内部 task sink。模型可见 preview 单独出现时不是权威产物；只有当前同一 `task_complete` 返回的 preview 与 `pipeline_handoff` 原样配对，并由上层 writer 验签、核对 task/payload 身份后，才是允许提交的公开派生产物。
 

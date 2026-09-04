@@ -3,6 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .analysis_v5 import (
+    ANALYSIS_SCHEMA_VERSION,
+    build_blocked_facts,
+    build_existing_anomaly_facts,
+)
 from .contracts import canonical_sha256
 
 
@@ -106,6 +111,10 @@ class TaskAssembler:
                     },
                 }
             )
+            result["public_facts"] = build_existing_anomaly_facts(
+                investigation=investigation,
+                writer_patch=patch,
+            )
         else:
             result.update(
                 {
@@ -129,6 +138,10 @@ class TaskAssembler:
                 analysis_date = investigation.get("analysis_date")
                 if isinstance(analysis_date, str):
                     result["analysis_date"] = analysis_date
+            result["public_facts"] = build_blocked_facts(
+                investigation=investigation,
+                writer_patch=patch,
+            )
         return result
 
     def assemble_task(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -162,6 +175,7 @@ class TaskAssembler:
             overall_status = "failed"
         alert = state["normalized_alert"]
         analysis = {
+            "schema_version": ANALYSIS_SCHEMA_VERSION,
             "source": "dataworks_dqc",
             "project": alert.get("project") or "unknown",
             "table": self._qualified_table(alert),

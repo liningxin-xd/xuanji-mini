@@ -4,6 +4,13 @@ from collections import Counter
 import math
 from typing import Any
 
+from .analysis_v5 import (
+    ANALYSIS_SCHEMA_VERSION,
+    NARRATIVE_SCHEMA_VERSION,
+    AnalysisV5Error,
+    build_public_facts,
+    public_machine_projection,
+)
 from .contracts import canonical_sha256
 from .evidence_pack import EvidencePackBuilder, EvidencePackError
 from .models import StepStatus, TERMINAL_STEP_STATUSES
@@ -23,6 +30,9 @@ class FinalEvidenceValidator:
         "unsupported_drilldown",
     }
 
+    def __init__(self, *, metric_polarity: str | None = None):
+        self.metric_polarity = metric_polarity
+
     def validate(
         self,
         state: dict[str, Any],
@@ -38,6 +48,8 @@ class FinalEvidenceValidator:
             raise FinalValidationError("run contains a non-terminal queue step")
         if not isinstance(analysis, dict):
             raise FinalValidationError("analysis JSON must contain an object")
+        if analysis.get("schema_version") != ANALYSIS_SCHEMA_VERSION:
+            raise FinalValidationError("analysis schema_version must be 5")
         investigations = analysis.get("investigations")
         if not isinstance(investigations, list):
             raise FinalValidationError("analysis.investigations must be an array")
@@ -301,6 +313,12 @@ class FinalEvidenceValidator:
                 "all candidate families failed; a successful investigation status is illegal"
             )
 
+        self._validate_public_facts(
+            state,
+            investigation,
+            execution,
+        )
+
         evidence_hash = state.get("evidence_export_sha256")
         if isinstance(evidence_hash, str) and canonical_sha256(execution) != evidence_hash:
             raise FinalValidationError(
@@ -316,6 +334,143 @@ class FinalEvidenceValidator:
             "validated_step_count": len(actual_steps),
             "validated_query_id_count": len(self._query_ids_in(investigation)),
         }
+
+    def _validate_public_facts(
+        self,
+        state: dict[str, Any],
+        investigation: dict[str, Any],
+        execution: dict[str, Any],
+    ) -> None:
+        public_facts = investigation.get("public_facts")
+        if not isinstance(public_facts, dict):
+            raise FinalValidationError("schema-v5 investigation lacks public_facts")
+        narrative = public_facts.get("user_narrative")
+        if not isinstance(narrative, dict):
+            raise FinalValidationError("public_facts.user_narrative must be an object")
+        required_narrative = {
+            "schema_version",
+            "summary",
+            "finding_texts",
+            "evidence_limits",
+            "recommended_action",
+            "fallback_status",
+        }
+        if not required_narrative.issubset(narrative):
+            raise FinalValidationError("public user narrative is incomplete")
+        if narrative.get("schema_version") != NARRATIVE_SCHEMA_VERSION:
+            raise FinalValidationError("public user narrative schema is invalid")
+        for field in ("summary", "recommended_action"):
+            self._require_text(narrative, field)
+        self._validate_text_array(narrative, "evidence_limits")
+        fallback_status = narrative.get("fallback_status")
+        if fallback_status not in {"not_used", "partial", "used"}:
+            raise FinalValidationError("public user narrative fallback_status is invalid")
+        if fallback_status == "not_used" and (
+            "fallback_reason" in narrative or "fallback_candidate_ids" in narrative
+        ):
+            raise FinalValidationError("non-fallback narrative contains fallback metadata")
+        if fallback_status in {"partial", "used"}:
+            self._require_text(narrative, "fallback_reason")
+
+        finding_texts = narrative.get("finding_texts")
+        if not isinstance(finding_texts, dict):
+            raise FinalValidationError("public user narrative finding_texts is invalid")
+        findings = public_facts.get("findings")
+        if not isinstance(findings, list):
+            raise FinalValidationError("public_facts.findings must be an array")
+        expected_candidate_ids = []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise FinalValidationError("public finding must be an object")
+            candidate_id = self._require_text(finding, "candidate_id")
+            expected_candidate_ids.append(candidate_id)
+            text = self._require_text(finding, "narrative_text")
+            if finding_texts.get(candidate_id) != text:
+                raise FinalValidationError(
+                    "public finding narrative does not match user_narrative"
+                )
+        if set(finding_texts) != set(expected_candidate_ids) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in finding_texts.values()
+        ):
+            raise FinalValidationError(
+                "public user narrative must cover every frozen candidate exactly once"
+            )
+        if fallback_status == "partial":
+            fallback_ids = narrative.get("fallback_candidate_ids")
+            if (
+                not isinstance(fallback_ids, list)
+                or not fallback_ids
+                or any(item not in expected_candidate_ids for item in fallback_ids)
+                or len(fallback_ids) != len(set(fallback_ids))
+            ):
+                raise FinalValidationError("partial narrative fallback IDs are invalid")
+
+        combined_text = "\n".join(
+            [
+                narrative["summary"],
+                narrative["recommended_action"],
+                *finding_texts.values(),
+                *narrative["evidence_limits"],
+            ]
+        )
+        if any(
+            term in combined_text
+            for term in ("CardKit", "主卡", "副卡", "回复卡", "本消息线程")
+        ):
+            raise FinalValidationError("public narrative contains channel-specific language")
+
+        recommendations = public_facts.get("recommendations")
+        if not isinstance(recommendations, list) or not recommendations:
+            raise FinalValidationError("public recommendations must be a non-empty array")
+        if any(
+            not isinstance(item, dict)
+            or item.get("display_text") != narrative["recommended_action"]
+            for item in recommendations
+        ):
+            raise FinalValidationError(
+                "public recommendation display text does not match user narrative"
+            )
+
+        metric_polarity = self.metric_polarity
+        if metric_polarity is None:
+            metric = public_facts.get("metric")
+            metric_polarity = metric.get("polarity") if isinstance(metric, dict) else None
+        try:
+            pack = EvidencePackBuilder(metric_polarity=str(metric_polarity)).build(state)
+            expected = build_public_facts(
+                writer_pack=pack,
+                machine_state=state,
+                attribution_execution=execution,
+                writer_patch={
+                    "summary": narrative["summary"],
+                    "finding_texts": finding_texts,
+                    "evidence_limits": narrative["evidence_limits"],
+                    "recommended_action": narrative["recommended_action"],
+                },
+            )
+        except (AnalysisV5Error, EvidencePackError, KeyError, TypeError, ValueError) as exc:
+            raise FinalValidationError(f"public facts cannot be reconstructed: {exc}") from exc
+        if public_machine_projection(public_facts) != public_machine_projection(expected):
+            raise FinalValidationError(
+                "public machine facts do not match the frozen investigation state"
+            )
+        if investigation.get("status") in {"completed", "no_dominant_slice"}:
+            if investigation.get("summary") != narrative["summary"]:
+                raise FinalValidationError("legacy summary differs from the public narrative")
+            if investigation.get("recommended_action") != narrative[
+                "recommended_action"
+            ]:
+                raise FinalValidationError(
+                    "legacy recommended_action differs from the public narrative"
+                )
+        elif (
+            investigation.get("reason") != narrative["summary"]
+            or investigation.get("action") != narrative["recommended_action"]
+        ):
+            raise FinalValidationError(
+                "legacy failure narrative differs from public_facts"
+            )
 
     def _require_text(self, value: dict[str, Any], field: str) -> str:
         text = value.get(field)

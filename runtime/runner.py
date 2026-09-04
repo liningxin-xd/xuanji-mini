@@ -640,7 +640,11 @@ class AttributionRunner:
     def build_writer_pack(self, run_id: str) -> dict[str, Any]:
         self.export(run_id)
         state = self._load_state(run_id)
-        pack = EvidencePackBuilder().build(state)
+        pack = EvidencePackBuilder(
+            metric_polarity=self.contracts.metric_definition(state["metric"])[
+                "direction"
+            ]
+        ).build(state)
         self._atomic_write_json(
             self._run_dir(run_id) / "exports/writer-pack.json", pack
         )
@@ -656,6 +660,7 @@ class AttributionRunner:
         pack = self.build_writer_pack(run_id)
         analysis = FinalAssembler().assemble(
             writer_pack=pack,
+            machine_state=self._load_state(run_id),
             attribution_execution=execution,
             writer_patch=writer_patch,
             analysis_context=analysis_context,
@@ -692,7 +697,11 @@ class AttributionRunner:
             raise RunnerError("run must be queue_complete before final validation")
         if not isinstance(state.get("evidence_export_sha256"), str):
             raise RunnerError("export attribution evidence before final validation")
-        validation = FinalEvidenceValidator().validate(
+        validation = FinalEvidenceValidator(
+            metric_polarity=self.contracts.metric_definition(state["metric"])[
+                "direction"
+            ]
+        ).validate(
             state, analysis, investigation_index
         )
         receipt = {

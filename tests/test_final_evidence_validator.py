@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from runtime.final_assembler import FinalAssembler
 from runtime.final_validator import FinalEvidenceValidator, FinalValidationError
 from runtime.runner import AttributionRunner
 from tests.runtime_result_fixtures import (
@@ -64,31 +65,46 @@ class FinalEvidenceValidatorTest(unittest.TestCase):
         return self.runner.load_state("final-run"), execution
 
     def _analysis(self, status, execution, findings=None):
-        investigation = {
-            "status": status,
-            "metric": "下载完成率",
-            "analysis_date": "2026-08-22",
-            "attribution_execution": execution,
-        }
-        if status in {"completed", "no_dominant_slice"}:
-            state = self.runner.load_state("final-run")
-            root_step = next(
-                (
-                    step
-                    for step in state["steps"]
-                    if step["status"] == "succeeded"
-                    and step["produces_candidates"]
-                ),
-                None,
+        state = self.runner.load_state("final-run")
+        pack = self.runner.build_writer_pack("final-run")
+        actual_status = pack["result_status_hint"]
+        assembly_status = status if status in self.validator.ALLOWED_FULL_QUEUE_STATUSES else actual_status
+        if assembly_status in {"completed", "no_dominant_slice"} and not isinstance(
+            pack.get("root_metric"), dict
+        ):
+            assembly_status = "query_failed"
+        pack["result_status_hint"] = assembly_status
+        finding_texts = {}
+        if assembly_status == "completed" and pack["candidates"]:
+            finding_texts[pack["candidates"][0]["candidate_id"]] = (
+                "The game slice is a validated adverse range."
             )
-            if root_step is not None:
-                investigation.update(
-                    {
-                        "current_value": root_step["root_current_value"],
-                        "baseline_value": root_step["root_baseline_value"],
-                        "delta_bp": root_step["root_delta"] * 10000,
-                    }
-                )
+        analysis = FinalAssembler().assemble(
+            writer_pack=pack,
+            machine_state=state,
+            attribution_execution=execution,
+            writer_patch={
+                "summary": "The registered primary queue is complete.",
+                "finding_texts": finding_texts,
+                "evidence_limits": [],
+                "recommended_action": "Review the validated primary evidence.",
+            },
+            analysis_context={
+                "source": "dataworks_dqc",
+                "project": "tap_dw",
+                "table": "tap_dw.monitor",
+                "partition": "dt=2026-08-22",
+                "investigation": {
+                    "rule_indexes": [0],
+                    "metric_hint": "下载完成率",
+                    "alert_partition": "dt=2026-08-22",
+                    "alert_rules": [{"rule_name": "下载完成率告警"}],
+                },
+            },
+        )
+        investigation = analysis["investigations"][0]
+        investigation["status"] = status
+        if status in {"completed", "no_dominant_slice"} and "summary" not in investigation:
             investigation.update(
                 {
                     "summary": "The registered primary queue is complete.",
@@ -96,16 +112,12 @@ class FinalEvidenceValidatorTest(unittest.TestCase):
                     "recommended_action": "Review the validated primary evidence.",
                 }
             )
-        elif status in self.validator.ALLOWED_FULL_QUEUE_STATUSES:
-            investigation.update(
-                {
-                    "reason": "Every registered candidate family failed.",
-                    "action": "Review the typed family failures.",
-                }
-            )
         if findings is not None:
-            investigation["top_findings"] = findings
-        return {"investigations": [investigation]}
+            if findings:
+                investigation["top_findings"] = findings
+            else:
+                investigation.pop("top_findings", None)
+        return analysis
 
     def _game_finding(self, state):
         candidate = state["steps"][0]["candidates"][0]

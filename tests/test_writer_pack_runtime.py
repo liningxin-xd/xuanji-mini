@@ -99,6 +99,58 @@ class WriterPackRuntimeTest(unittest.TestCase):
         ]
         self.assertEqual(3, len(game_candidates))
 
+    def test_public_v5_keeps_candidates_beyond_the_writer_context_cap(self):
+        state = self.runner.load_state("writer-run")
+        game_step = state["steps"][0]
+        base = game_step["candidates"][0]
+        game_step["candidates"] = [
+            {
+                **copy.deepcopy(base),
+                "value": f"slice-{index}",
+                "label": f"Slice {index}",
+            }
+            for index in range(4)
+        ]
+        game_step["candidate_count"] = 4
+        self.runner._write_state(state)
+
+        pack = self.runner.build_writer_pack("writer-run")
+        self.assertEqual(3, len(pack["candidates"]))
+        patch = self._patch(pack["candidates"][0]["candidate_id"])
+        analysis = self.runner.assemble_final("writer-run", patch, self._context())
+        public = analysis["investigations"][0]["public_facts"]
+        self.assertEqual(4, len(public["findings"]))
+        self.assertEqual("partial", public["user_narrative"]["fallback_status"])
+        self.assertEqual(
+            ["game_id:slice-1", "game_id:slice-2", "game_id:slice-3"],
+            public["user_narrative"]["fallback_candidate_ids"],
+        )
+        self.assertTrue(
+            all(item["narrative_text"] for item in public["findings"])
+        )
+
+    def test_channel_specific_writer_text_uses_a_signed_public_fallback(self):
+        pack = self.runner.build_writer_pack("writer-run")
+        patch = self._patch(pack["candidates"][0]["candidate_id"])
+        patch["summary"] = "主卡应展示这个候选。"
+        analysis = self.runner.assemble_final("writer-run", patch, self._context())
+        public = analysis["investigations"][0]["public_facts"]
+        narrative = public["user_narrative"]
+        self.assertEqual("used", narrative["fallback_status"])
+        self.assertEqual("channel_specific_language", narrative["fallback_reason"])
+        self.assertNotIn("主卡", json.dumps(analysis, ensure_ascii=False))
+
+    def test_channel_specific_evidence_limit_is_removed_by_public_fallback(self):
+        pack = self.runner.build_writer_pack("writer-run")
+        patch = self._patch(pack["candidates"][0]["candidate_id"])
+        patch["evidence_limits"] = ["仅供主卡展示。"]
+        analysis = self.runner.assemble_final("writer-run", patch, self._context())
+        narrative = analysis["investigations"][0]["public_facts"]["user_narrative"]
+        self.assertEqual("used", narrative["fallback_status"])
+        self.assertEqual("channel_specific_language", narrative["fallback_reason"])
+        self.assertEqual([], narrative["evidence_limits"])
+        self.assertNotIn("主卡", json.dumps(analysis, ensure_ascii=False))
+
     def test_assembler_owns_machine_fields_and_final_validator_accepts_them(self):
         pack = self.runner.build_writer_pack("writer-run")
         candidate = pack["candidates"][0]

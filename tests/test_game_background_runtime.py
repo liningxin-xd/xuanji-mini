@@ -251,6 +251,32 @@ class GameBackgroundRuntimeTest(unittest.TestCase):
                 for finding in investigation["top_findings"]
             )
         )
+        public = investigation["public_facts"]
+        self.assertEqual(2, len(public["background_signals"]))
+        self.assertEqual(
+            {"finding:game_id:12345", "finding:game_id:23456"},
+            {
+                signal["bound_finding_id"]
+                for signal in public["background_signals"]
+            },
+        )
+        self.assertTrue(
+            all(signal["event_at"] == "2026-08-22" for signal in public["background_signals"])
+        )
+
+        from runtime.final_validator import FinalEvidenceValidator, FinalValidationError
+
+        FinalEvidenceValidator(metric_polarity="higher_is_better").validate(
+            runner.load_state("background-two"), analysis, 0
+        )
+        tampered = copy.deepcopy(analysis)
+        tampered["investigations"][0]["public_facts"]["background_signals"][0][
+            "event_at"
+        ] = "2026-08-21"
+        with self.assertRaisesRegex(FinalValidationError, "public machine facts"):
+            FinalEvidenceValidator(metric_polarity="higher_is_better").validate(
+                runner.load_state("background-two"), tampered, 0
+            )
 
     def test_three_games_reach_threshold_and_first_failure_is_isolated(self):
         runner, query_count, background_ids = self._complete(

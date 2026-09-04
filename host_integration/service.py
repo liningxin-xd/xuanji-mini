@@ -147,6 +147,7 @@ class PrimaryInvestigationHost:
             analysis, receipt = self._load_finalized_artifacts(run_id)
             candidate = FinalAssembler().assemble(
                 writer_pack=self._runner.build_writer_pack(run_id),
+                machine_state=state,
                 attribution_execution=self._runner.export(run_id),
                 writer_patch=writer_patch,
                 analysis_context=analysis_context,

@@ -17,7 +17,7 @@ normal `task_complete` response adds:
 
 ```json
 {
-  "analysis_preview": {"overall_status": "completed", "investigations": []},
+  "analysis_preview": {"schema_version": 5, "overall_status": "completed", "investigations": []},
   "pipeline_handoff": {
     "schema_version": 1,
     "provider": "xuanji-mini",
@@ -51,6 +51,13 @@ or failed verification becomes `unverified_result`; it never falls back to an
 unsigned success. The complete task sink is not exposed as a model tool or an
 artifact download endpoint, and the signed projection contains no private
 query evidence.
+
+The current public projection is analysis schema v5. Each investigation carries `public_facts` with the complete
+user-safe root metric, typed measures, frozen findings, parent links, ordered steps, background signals, calibration
+results, audit codes, structured recommendations, channel-neutral narrative, and typed narrative fallback state.
+These fields are covered by `analysis_preview_sha256` and therefore by the handoff signature. The projection is not
+allowed to reduce machine facts to the Writer's bounded context or to omit a background/calibration fact because the
+Writer did not mention it. See [Public Analysis v5](public-analysis-v5.md).
 
 ## Troubleshooting
 
