@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from copy import deepcopy
 from typing import Any
 
 
 ANALYSIS_SCHEMA_VERSION = 5
-PUBLIC_FACTS_SCHEMA_VERSION = 1
+PUBLIC_FACTS_SCHEMA_VERSION = 2
+COUNTERFACTUAL_TOLERANCE = 1e-9
 NARRATIVE_SCHEMA_VERSION = 1
 
 
@@ -144,6 +146,12 @@ def build_existing_anomaly_facts(
     route = investigation.get("route")
     if not isinstance(preflight, dict) or not isinstance(route, dict):
         raise AnalysisV5Error("existing anomaly requires preflight and route facts")
+    if (
+        preflight.get("mode") != "existing_anomaly_stop"
+        or investigation.get("machine_mode") != "existing_anomaly_stop"
+        or investigation.get("result_status") != "no_dominant_slice"
+    ):
+        raise AnalysisV5Error("existing anomaly requires the typed machine stop state")
     metric = _required_text(preflight.get("metric"), "root_preflight.metric")
     polarity = preflight.get("direction")
     if polarity not in {"higher_is_better", "lower_is_better"}:
@@ -169,6 +177,7 @@ def build_existing_anomaly_facts(
     threshold = _absolute_threshold(route.get("rules"))
     anomaly_context: dict[str, Any] = {
         "state": "ongoing",
+        "stop_reason": "below_new_adverse_threshold",
         "previous_value": previous,
     }
     if threshold is not None:
@@ -743,11 +752,23 @@ def _build_calibrations(
             or f"{counterfactual.get('dimension')}:{counterfactual.get('value')}",
             "counterfactual.candidate_id",
         )
-        removal_delta = float(counterfactual["removal_delta_bp"])
-        restoration_ratio = float(counterfactual["restoration_ratio"])
-        if restoration_ratio > 0:
+        current_without = _finite(counterfactual.get("current_without"), "current_without")
+        baseline_without = _finite(counterfactual.get("baseline_without"), "baseline_without")
+        removal_delta = _finite(counterfactual.get("removal_delta_bp"), "removal_delta_bp")
+        restoration_ratio = _finite(counterfactual.get("restoration_ratio"), "restoration_ratio")
+        root = writer_pack.get("root_metric")
+        root_delta = _finite(root.get("delta_bp") if isinstance(root, dict) else None, "root delta_bp")
+        if root_delta == 0 or not math.isclose(
+            removal_delta, (current_without - baseline_without) * 10000,
+            rel_tol=0, abs_tol=COUNTERFACTUAL_TOLERANCE,
+        ) or not math.isclose(
+            restoration_ratio, 1 - abs(removal_delta) / abs(root_delta),
+            rel_tol=0, abs_tol=COUNTERFACTUAL_TOLERANCE,
+        ):
+            raise AnalysisV5Error("counterfactual values contradict the frozen root change")
+        if restoration_ratio > COUNTERFACTUAL_TOLERANCE:
             direction = "reduced"
-        elif restoration_ratio < 0:
+        elif restoration_ratio < -COUNTERFACTUAL_TOLERANCE:
             direction = "expanded"
         else:
             direction = "unchanged"
@@ -760,6 +781,28 @@ def _build_calibrations(
                 "operation": "remove_object",
                 "direction": direction,
                 "measures": [
+                    _measure(
+                        measure_id=f"counterfactual:{candidate_id}:current-without",
+                        semantic_type="counterfactual_current_value",
+                        value=current_without,
+                        unit="ratio",
+                        polarity=polarity,
+                        direction="unchanged",
+                        comparable_group=f"counterfactual:{candidate_id}:root-value",
+                        additive=False,
+                        display_precision=2,
+                    ),
+                    _measure(
+                        measure_id=f"counterfactual:{candidate_id}:baseline-without",
+                        semantic_type="counterfactual_baseline_value",
+                        value=baseline_without,
+                        unit="ratio",
+                        polarity=polarity,
+                        direction="unchanged",
+                        comparable_group=f"counterfactual:{candidate_id}:root-value",
+                        additive=False,
+                        display_precision=2,
+                    ),
                     _measure(
                         measure_id=f"counterfactual:{candidate_id}:remaining-change",
                         semantic_type="remaining_root_change",
@@ -1294,8 +1337,7 @@ def _measure(
     display_precision: int,
     denominator: str | None = None,
 ) -> dict[str, Any]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise AnalysisV5Error(f"{measure_id} value must be numeric")
+    value = _finite(value, measure_id)
     result: dict[str, Any] = {
         "measure_id": measure_id,
         "semantic_type": semantic_type,
@@ -1310,6 +1352,12 @@ def _measure(
     if denominator is not None:
         result["denominator"] = denominator
     return result
+
+
+def _finite(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise AnalysisV5Error(f"{field} value must be finite numeric")
+    return float(value)
 
 
 def _direction(delta: float) -> str:

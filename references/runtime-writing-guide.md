@@ -2,9 +2,9 @@
 
 本指南用于 Host 当前分析档案 writer pack 的一次文案生成。
 
-Runtime 已冻结状态、候选、日期、数值、query ID 和执行证据；不要重写或补充这些字段。
-结构化事实冻结后不执行独立二次润色，不改变 Runtime 已确定的状态或证据。
-最终公开 analysis 使用 schema v5；候选上限只约束 Writer，Host 从冻结 state 无损装配全部公开事实。
+Runtime 冻结状态、候选、日期、数值、query ID 和执行证据；不要重写或补充。结构化事实冻结后不执行独立二次润色，不改变 Runtime 已确定的状态或证据。公开 analysis 使用 schema v5；候选上限只约束 Writer，Host 从冻结 state 无损装配全部公开事实。
+public-facts v2 的两个剔除后 measure 与 ongoing stop reason 只由 Host 生成、校验；Writer 不得提交。
+用户确认的 v5.3 结论、方向、二级归因、反事实和游戏事件只由 Renderer 固定模板生成；四个文案字段不决定主卡句子或分支。“造成”仅表示统计贡献，不能扩写为机制根因。
 
 ## 输入
 

@@ -529,6 +529,30 @@ class TaskCoordinatorTest(unittest.TestCase):
             completed["validation_receipt"],
         )
 
+    def test_existing_anomaly_public_v2_stop_reason_is_machine_owned(self):
+        coordinator = self.coordinator(FixtureRootExecutor(current_rate=0.72, historical_rate=0.719))
+        pending = coordinator.run_task(task_id="v53-ongoing", dqc_payload=payload_for(ROUTES[6]))
+        completed = coordinator.finalize(
+            task_id="v53-ongoing", investigation_id=pending["investigation_id"],
+            writer_patch=writer_patch("当前观察已完成。"),
+        )
+        investigation = completed["analysis_preview"]["investigations"][0]
+        facts = investigation["public_facts"]
+        self.assertEqual(2, facts["schema_version"])
+        self.assertEqual("no_dominant_slice", investigation["status"])
+        self.assertEqual("existing_anomaly_stop", investigation["attribution_execution"]["mode"])
+        self.assertEqual([], facts["findings"])
+        self.assertEqual("ongoing", facts["anomaly_context"]["state"])
+        self.assertEqual("below_new_adverse_threshold", facts["anomaly_context"]["stop_reason"])
+        from runtime.analysis_v5 import AnalysisV5Error, build_existing_anomaly_facts
+        state = json.loads((Path(self.temp_dir.name) / ".tasks" / "v53-ongoing" / "state.json").read_text())
+        machine = state["investigations"][0]
+        for field, value in (("machine_mode", "full_queue"), ("result_status", "completed")):
+            changed = deepcopy(machine)
+            changed[field] = value
+            with self.assertRaises(AnalysisV5Error):
+                build_existing_anomaly_facts(investigation=changed, writer_patch=writer_patch())
+
     def test_daily_push_task_id_round_trip_rejects_truncated_continuation(self):
         task_id = (
             "daily-push-20260904T053722Z-c45f1b58c591-"

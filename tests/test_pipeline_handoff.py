@@ -118,6 +118,27 @@ class PipelineHandoffSignerTest(unittest.TestCase):
         with self.assertRaisesRegex(PipelineHandoffError, "receipt hash"):
             self.signer.build(task_id="task-1", artifact=changed_receipt)
 
+    def test_public_v2_measures_and_stop_reason_are_signed_without_filtering(self):
+        artifact = _artifact()
+        facts = {
+            "schema_version": 2,
+            "calibration_results": [{"measures": [
+                {"semantic_type": "counterfactual_current_value", "value": 0.8},
+                {"semantic_type": "counterfactual_baseline_value", "value": 0.82},
+            ]}],
+            "anomaly_context": {"stop_reason": "below_new_adverse_threshold"},
+        }
+        artifact["analysis"]["investigations"][0]["public_facts"] = facts
+        receipt = artifact["validation_receipt"]
+        receipt["analysis_sha256"] = canonical_sha256(artifact["analysis"])
+        receipt.pop("validation_receipt_sha256")
+        receipt["validation_receipt_sha256"] = canonical_sha256(receipt)
+        preview, handoff = self.signer.build(task_id="task-1", artifact=artifact)
+        self.assertEqual(facts, preview["investigations"][0]["public_facts"])
+        self.assertEqual(canonical_sha256(preview), handoff["analysis_preview_sha256"])
+        preview["investigations"][0]["public_facts"]["calibration_results"][0]["measures"][0]["value"] = 0.9
+        self.assertNotEqual(canonical_sha256(preview), handoff["analysis_preview_sha256"])
+
     def test_operator_command_outputs_only_the_public_trust_anchor(self):
         stdout = StringIO()
         with patch.dict(

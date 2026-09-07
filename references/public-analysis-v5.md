@@ -24,15 +24,15 @@ investigations[]
 ```
 
 Each investigation retains `status`, non-overlapping `rule_indexes`, registered metric/date and request-bound rule
-identity, legacy narrative mirrors where applicable, and one required `public_facts` v1 object. Existing anomaly,
+identity, legacy narrative mirrors where applicable, and one required `public_facts` v2 object. Existing anomaly,
 blocked, unsupported, and completed investigations all use the same v5 envelope.
 
-## Public Facts v1
+## Public Facts v2
 
 `public_facts` has exactly these required fields and optional `anomaly_context`:
 
 ```text
-schema_version = 1
+schema_version = 2
 metric
 steps[]
 findings[]
@@ -133,6 +133,30 @@ Every calibration contains `calibration_id`, `calibration_type`, `bound_finding_
 types include counterfactual removal, breadth, error-code, and cross-dimension overlap results. Counterfactuals express
 arithmetic explanatory power only. `details` can contain nested JSON values but never NaN, Infinity, or private
 execution identity.
+
+Successful `counterfactual_removal` requires four unique measures. In addition to `remaining_root_change`
+and `restoration_ratio`, it publishes `counterfactual_current_value` and `counterfactual_baseline_value`
+from the frozen `current_without` and `baseline_without`. Their IDs are
+`counterfactual:<candidate_id>:current-without` and `counterfactual:<candidate_id>:baseline-without`;
+both use `unit=ratio`, root polarity, `direction=unchanged`,
+`comparable_group=counterfactual:<candidate_id>:root-value`, `additive=false`, and `display_precision=2`.
+No Writer field can supply or modify these values.
+
+Before rounding, remaining change in bp must equal `(current_without - baseline_without) * 10000`,
+and restoration must equal `1 - abs(remaining_change) / abs(root_change)` after unit normalization.
+Use `rel_tol=0`, `abs_tol=1e-9`; a zero root change cannot have a successful counterfactual.
+Calibration direction is `reduced` above `1e-9` restoration, `expanded` below `-1e-9`, and `unchanged`
+otherwise. This absorbs floating-point error; it is not a product change threshold. A consumer may only
+describe recovery/worsening when both anomaly magnitude and the current value along metric polarity agree.
+An otherwise valid result with no matching display branch stays in diagnosis and produces a presentation degradation.
+
+An existing-anomaly stop requires `status=no_dominant_slice`, empty findings,
+`anomaly_context.state=ongoing`, `anomaly_context.stop_reason=below_new_adverse_threshold`, and
+`attribution_execution.mode=existing_anomaly_stop`. The Host derives the stop reason from its typed machine
+state, never from Writer prose. Full-queue results cannot carry this stop context.
+
+Public-facts v1 is not accepted by the v5.3 consumer. Deploy and verify the v2 Host before daily-push
+`alert-v5.3`, then prepare a fresh batch; do not migrate, re-sign, or resend previous rendered batches.
 
 ### Recommendations and narrative
 

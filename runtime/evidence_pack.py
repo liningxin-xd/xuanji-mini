@@ -152,6 +152,13 @@ class EvidencePackBuilder:
                         raise EvidencePackError(
                             "succeeded counterfactual lacks its machine result"
                         )
+                    for field in (
+                        "current_without", "baseline_without",
+                        "removal_delta_bp", "restoration_ratio",
+                    ):
+                        value = result.get(field)
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                            raise EvidencePackError(f"counterfactual {field} must be finite numeric")
                     pack["counterfactual"] = {
                         field: result[field]
                         for field in (

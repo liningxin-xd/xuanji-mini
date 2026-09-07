@@ -7,6 +7,7 @@ from typing import Any
 from .analysis_v5 import (
     ANALYSIS_SCHEMA_VERSION,
     NARRATIVE_SCHEMA_VERSION,
+    PUBLIC_FACTS_SCHEMA_VERSION,
     AnalysisV5Error,
     build_public_facts,
     public_machine_projection,
@@ -344,6 +345,8 @@ class FinalEvidenceValidator:
         public_facts = investigation.get("public_facts")
         if not isinstance(public_facts, dict):
             raise FinalValidationError("schema-v5 investigation lacks public_facts")
+        if type(public_facts.get("schema_version")) is not int or public_facts["schema_version"] != PUBLIC_FACTS_SCHEMA_VERSION:
+            raise FinalValidationError("public_facts schema_version must be 2")
         narrative = public_facts.get("user_narrative")
         if not isinstance(narrative, dict):
             raise FinalValidationError("public_facts.user_narrative must be an object")

@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 
 from runtime.contracts import RepositoryContracts
+from runtime.analysis_v5 import AnalysisV5Error, build_public_facts
+from runtime.counterfactual import CounterfactualCalculator, CounterfactualError
+from runtime.evidence_pack import EvidencePackBuilder, EvidencePackError
 from runtime.final_validator import FinalEvidenceValidator, FinalValidationError
 from runtime.runner import AttributionRunner, RunnerError
 from tests.runtime_result_fixtures import (
@@ -314,6 +317,96 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         step = runner.load_state("v2-no-candidate")["post_primary"]["steps"][0]
         self.assertEqual("skipped_by_policy", step["status"])
         self.assertEqual("no_legal_game_candidate", step["reason"])
+
+    def test_public_v2_counterfactual_values_match_frozen_counts_and_validate(self):
+        runner, _ = self._complete("v53-values")
+        pack = runner.build_writer_pack("v53-values")
+        state = runner.load_state("v53-values")
+        analysis = runner.assemble_final("v53-values", self._patch(pack), self._context())
+        facts = analysis["investigations"][0]["public_facts"]
+        self.assertEqual(2, facts["schema_version"])
+        calibration = facts["calibration_results"][0]
+        measures = {m["semantic_type"]: m for m in calibration["measures"]}
+        game = next(step for step in state["steps"] if step["id"] == "game_id")
+        counts = game["candidates"][0]["private_counts"]
+        for period in ("current", "baseline"):
+            measure = measures[f"counterfactual_{period}_value"]
+            expected = (game[f"root_{period}_numerator"] - counts[f"{period}_numerator"]) / (game[f"root_{period}_denominator"] - counts[f"{period}_denominator"])
+            self.assertEqual(expected, measure["value"])
+            self.assertEqual(pack["counterfactual"][f"{period}_without"], measure["value"])
+            self.assertEqual("ratio", measure["unit"])
+            self.assertEqual("higher_is_better", measure["polarity"])
+            self.assertEqual("unchanged", measure["direction"])
+            self.assertEqual(calibration["calibration_id"] + ":root-value", measure["comparable_group"])
+            self.assertEqual(2, measure["display_precision"])
+            self.assertIs(False, measure["additive"])
+        mutations = [
+            lambda f: f.update(schema_version=1),
+            lambda f: f["calibration_results"][0]["measures"].pop(0),
+            lambda f: f["calibration_results"][0]["measures"].append(copy.deepcopy(f["calibration_results"][0]["measures"][0])),
+            lambda f: f.update(anomaly_context={"state": "ongoing", "stop_reason": "below_new_adverse_threshold"}),
+        ]
+        for field, value in (("value", 0.1), ("unit", "bp"), ("polarity", "lower_is_better"), ("semantic_type", "metric_value"), ("comparable_group", "wrong"), ("value", float("nan"))):
+            mutations.append(lambda f, field=field, value=value: f["calibration_results"][0]["measures"][0].update({field: value}))
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                changed = copy.deepcopy(analysis)
+                mutate(changed["investigations"][0]["public_facts"])
+                with self.assertRaises(FinalValidationError):
+                    FinalEvidenceValidator().validate(state, changed, 0)
+
+    def test_counterfactual_pack_rejects_missing_and_nonfinite_values(self):
+        runner, _ = self._complete("v53-pack")
+        runner.build_writer_pack("v53-pack")
+        state = runner.load_state("v53-pack")
+        for field in ("current_without", "baseline_without", "removal_delta_bp", "restoration_ratio"):
+            for value in (None, True, float("nan"), float("inf"), -float("inf")):
+                with self.subTest(field=field, value=value):
+                    changed = copy.deepcopy(state)
+                    result = changed["post_primary"]["steps"][0]["result"]
+                    if value is None:
+                        result.pop(field)
+                    else:
+                        result[field] = value
+                    with self.assertRaises(EvidencePackError):
+                        EvidencePackBuilder(metric_polarity="higher_is_better").build(changed)
+
+    def test_public_counterfactual_direction_uses_bounded_tolerance(self):
+        runner, _ = self._complete("v53-tolerance")
+        pack = runner.build_writer_pack("v53-tolerance")
+        for restoration, direction in ((0.5, "reduced"), (-0.5, "expanded"), (5e-10, "unchanged"), (-5e-10, "unchanged"), (2e-9, "reduced"), (-2e-9, "expanded")):
+            with self.subTest(restoration=restoration):
+                changed = copy.deepcopy(pack)
+                cf = changed["counterfactual"]
+                cf["baseline_without"] = 0.8
+                cf["current_without"] = 0.8 + changed["root_metric"]["delta_bp"] / 10000 * (1 - restoration)
+                cf["removal_delta_bp"] = (cf["current_without"] - cf["baseline_without"]) * 10000
+                cf["restoration_ratio"] = 1 - abs(cf["removal_delta_bp"]) / abs(changed["root_metric"]["delta_bp"])
+                facts = build_public_facts(writer_pack=changed, attribution_execution=runner.export("v53-tolerance"), writer_patch=self._patch(changed))
+                self.assertEqual(direction, facts["calibration_results"][0]["direction"])
+        for field, value in (("removal_delta_bp", 1), ("restoration_ratio", 0.3), ("current_without", None)):
+            changed = copy.deepcopy(pack)
+            changed["counterfactual"][field] = value
+            with self.assertRaises(AnalysisV5Error):
+                build_public_facts(writer_pack=changed, attribution_execution=runner.export("v53-tolerance"), writer_patch=self._patch(changed))
+        changed = copy.deepcopy(pack)
+        changed["root_metric"]["delta_bp"] = 0
+        with self.assertRaises(AnalysisV5Error):
+            build_public_facts(writer_pack=changed, attribution_execution=runner.export("v53-tolerance"), writer_patch=self._patch(changed))
+
+    def test_counterfactual_calculator_frozen_count_boundaries(self):
+        runner, _ = self._complete("v53-counts")
+        state = runner.load_state("v53-counts")
+        calculator = CounterfactualCalculator(RepositoryContracts(ROOT))
+        for period in ("current", "baseline"):
+            changed = copy.deepcopy(state)
+            game = next(step for step in changed["steps"] if step["id"] == "game_id")
+            game["candidates"][0]["private_counts"][f"{period}_denominator"] = game[f"root_{period}_denominator"]
+            self.assertEqual("non_positive_remaining_denominator", calculator.calculate(changed)["reason"])
+            for value in (float("inf"), float("nan"), -1):
+                game["candidates"][0]["private_counts"][f"{period}_numerator"] = value
+                with self.assertRaises(CounterfactualError):
+                    calculator.calculate(changed)
 
     def test_trigger_not_met_omits_counterfactual_without_deleting_candidate(self):
         runner, _ = self._complete(
