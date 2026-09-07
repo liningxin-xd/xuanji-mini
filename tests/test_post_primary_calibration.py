@@ -32,6 +32,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
         *,
         profile: str = "primary_v2",
         game_mode: str = "dominant",
+        canonical_root_metric: dict[str, float] | None = None,
     ) -> tuple[AttributionRunner, int]:
         runner = AttributionRunner(
             ROOT,
@@ -45,6 +46,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
             metric="下载完成率",
             alert_date="2026-08-22",
             receipt_mode="self_reported",
+            canonical_root_metric=canonical_root_metric,
         )
         query_count = 0
         while True:
@@ -66,6 +68,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 if game_mode != "none":
                     current_num, baseline_num, current_den, baseline_den = {
                         "dominant": (750, 800, 1000, 1000),
+                        "partial_recovery": (740, 800, 1000, 1000),
                         "trigger_not_met": (750, 800, 1000, 1000),
                         "non_positive_denominator": (700, 800, 1000, 1000),
                     }[game_mode]
@@ -92,6 +95,7 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
     def _set_game_scenario(raw_result: dict, mode: str) -> None:
         scenarios = {
             "dominant": ((500, 350), (500, 400), (500, 400), (500, 400)),
+            "partial_recovery": ((500, 350), (500, 400), (500, 390), (500, 400)),
             "trigger_not_met": (
                 (500, 390),
                 (500, 400),
@@ -354,6 +358,47 @@ class PostPrimaryCalibrationTest(unittest.TestCase):
                 mutate(changed["investigations"][0]["public_facts"])
                 with self.assertRaises(FinalValidationError):
                     FinalEvidenceValidator().validate(state, changed, 0)
+
+    def test_counterfactual_uses_canonical_root_within_family_alignment_tolerance(self):
+        for index, offset in enumerate((-5e-7, 5e-7)):
+            with self.subTest(offset=offset):
+                run_id = f"v53-root-alignment-{index}"
+                root = {
+                    "current_value": 0.74 + offset,
+                    "baseline_value": 0.8,
+                    "delta": 0.74 + offset - 0.8,
+                }
+                runner, _ = self._complete(
+                    run_id, game_mode="partial_recovery", canonical_root_metric=root
+                )
+                pack = runner.build_writer_pack(run_id)
+                state = runner.load_state(run_id)
+                self.assertTrue(all(step["status"] == "succeeded" for step in state["steps"]))
+                game = next(step for step in state["steps"] if step["id"] == "game_id")
+                self.assertNotEqual(game["root_delta"], root["delta"])
+                counterfactual = pack["counterfactual"]
+                self.assertEqual(0.78, counterfactual["current_without"])
+                self.assertEqual(0.8, counterfactual["baseline_without"])
+                expected_ratio = 1 - abs(0.78 - 0.8) / abs(root["delta"])
+                self.assertAlmostEqual(expected_ratio, counterfactual["restoration_ratio"], places=12)
+
+                analysis = runner.assemble_final(run_id, self._patch(pack), self._context())
+                self.assertEqual("valid", FinalEvidenceValidator().validate(state, analysis, 0)["status"])
+                facts = analysis["investigations"][0]["public_facts"]
+                measures = {m["semantic_type"]: m for m in facts["calibration_results"][0]["measures"]}
+                self.assertEqual(root["current_value"], facts["metric"]["current"]["value"])
+                self.assertEqual(counterfactual["restoration_ratio"], measures["restoration_ratio"]["value"])
+
+    def test_counterfactual_requires_finite_canonical_root_delta(self):
+        runner, _ = self._complete("v53-canonical-root")
+        state = runner.load_state("v53-canonical-root")
+        calculator = CounterfactualCalculator(RepositoryContracts(ROOT))
+        for root in (None, {}, {"delta": True}, {"delta": float("nan")}, {"delta": float("inf")}):
+            with self.subTest(root=root):
+                changed = copy.deepcopy(state)
+                changed["canonical_root_metric"] = root
+                with self.assertRaises(CounterfactualError):
+                    calculator.calculate(changed)
 
     def test_counterfactual_pack_rejects_missing_and_nonfinite_values(self):
         runner, _ = self._complete("v53-pack")

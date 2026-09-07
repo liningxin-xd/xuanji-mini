@@ -48,7 +48,12 @@ class CounterfactualCalculator:
                 "game family adverse impact must be positive when a candidate exists",
             )
         family_share = candidate_adverse_bp / family_adverse_bp
-        root_delta = self._finite(game_step.get("root_delta"), "root delta")
+        # Family roots allow alignment tolerance; use the public root for calibration.
+        canonical_root = state.get("canonical_root_metric")
+        root_delta = self._finite(
+            canonical_root.get("delta") if isinstance(canonical_root, dict) else None,
+            "canonical root delta",
+        )
         direction = self.contracts.metric_definition(state["metric"])["direction"]
         root_adverse_bp = max(
             (-root_delta if direction == "higher_is_better" else root_delta) * 10000,

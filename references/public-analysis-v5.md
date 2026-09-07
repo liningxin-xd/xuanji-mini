@@ -144,6 +144,9 @@ No Writer field can supply or modify these values.
 
 Before rounding, remaining change in bp must equal `(current_without - baseline_without) * 10000`,
 and restoration must equal `1 - abs(remaining_change) / abs(root_change)` after unit normalization.
+The calculator uses `canonical_root_metric.delta` for the root change, including trigger and dominance checks,
+so it shares the public metric's frozen root despite permitted family alignment differences. The removed
+current and baseline values still come from the game family's frozen numerator and denominator counts.
 Use `rel_tol=0`, `abs_tol=1e-9`; a zero root change cannot have a successful counterfactual.
 Calibration direction is `reduced` above `1e-9` restoration, `expanded` below `-1e-9`, and `unchanged`
 otherwise. This absorbs floating-point error; it is not a product change threshold. A consumer may only
