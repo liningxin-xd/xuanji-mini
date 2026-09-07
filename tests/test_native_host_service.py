@@ -3,6 +3,7 @@ import json
 import re
 import tempfile
 import unittest
+from importlib.metadata import version
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import anyio
+from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult, TextContent
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from host_service import server as server_module
@@ -413,6 +415,50 @@ class DViewMCPBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeHostToolSurfaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fastmcp_completed_text_preserves_float_representation(self):
+        self.assertEqual("1.26.0", version("mcp"))
+        values = [2.0, 4.0, 0.0, 2.0, 4.0, 0.0, 2.0, 4.0, 0.0, 2.0, 0.0]
+        response = {
+            "action": "task_complete",
+            "task_id": "synthetic-text-boundary",
+            "analysis_preview": {"synthetic_measures": values},
+            "pipeline_handoff": {"analysis_preview_sha256": canonical_sha256({"synthetic_measures": values})},
+        }
+        runtime = _FakeRuntime()
+        for method in ("run_task", "submit_repair", "finalize"):
+            setattr(runtime, method, AsyncMock(return_value=response))
+        mcp = create_mcp(_settings(Path(self.temp_dir.name)), runtime=runtime)
+        common = {"task_id": response["task_id"], "investigation_id": "inv-fixture"}
+        calls = {
+            "xuanji_run_task": {"task_id": response["task_id"], "dqc_payload": {}},
+            "xuanji_finalize": {**common, "writer_patch": {}},
+            "xuanji_submit_repair": {
+                **common, "run_id": "run-fixture", "step_id": "step-fixture",
+                "repair_attempt": 1, "repair_reason": "fixture",
+                "error_evidence": "fixture", "repaired_sql": "fixture",
+            },
+        }
+        for name, arguments in calls.items():
+            with self.subTest(tool=name):
+                result = (await mcp._mcp_server.request_handlers[CallToolRequest](
+                    CallToolRequest(params=CallToolRequestParams(name=name, arguments=arguments))
+                )).root
+                self.assertIsInstance(result, CallToolResult)
+                self.assertFalse(result.isError)
+                self.assertIsInstance(result.structuredContent, dict)
+                self.assertEqual(1, len(result.content))
+                self.assertIsInstance(result.content[0], TextContent)
+                raw = result.content[0].text
+                self.assertTrue(raw.strip())
+                parsed = json.loads(raw)
+                self.assertEqual(response, parsed)
+                self.assertTrue(all(type(v) is float for v in parsed["analysis_preview"]["synthetic_measures"]))
+                self.assertEqual(11, len(re.findall(r"\b(?:2|4|0)\.0\b", raw)))
+                self.assertEqual(
+                    response["pipeline_handoff"]["analysis_preview_sha256"],
+                    canonical_sha256(parsed["analysis_preview"]),
+                )
+
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addAsyncCleanup(self._cleanup_temp_dir)

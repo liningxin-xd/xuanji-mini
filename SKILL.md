@@ -50,9 +50,17 @@ description: 处理已注册的 TapTap Android 下载/安装 DQC 告警；通过
 
 ## `task_complete`
 
-以 Host 返回的 schema-v5 `analysis_preview`、`pipeline_handoff`、`overall_status` 和紧凑 validation receipt 摘要作为任务结果。不得重算状态、重组 investigations 或用旧 run/batch 补齐证据。完整交接协议见 [Pipeline Handoff](references/pipeline-handoff.md)。
+保留同一次 MCP CallToolResult 的唯一非空 `TextContent.text`，作为不透明 `task_complete_json` 字符串。
+上层成功信封只能是 `{request_id, task_complete_json}`；`structuredContent` 只用于 action 和
+continuation 身份门禁，不得重新序列化为 writer 输入。不得重算状态、重组 investigations 或用旧
+run/batch 补齐证据。完整交接协议见 [Pipeline Handoff](references/pipeline-handoff.md)。
 
 完整已校验 analysis 保留在 Host 内部 task sink。模型可见 preview 单独出现时不是权威产物；只有当前同一 `task_complete` 返回的 preview 与 `pipeline_handoff` 原样配对，并由上层 writer 验签、核对 task/payload 身份后，才是允许提交的公开派生产物。
+
+Python writer 从上述原始文本一次解析得到配对对象；旧/混合成功信封为 `contract_mismatch`，没有兼容
+fallback。外层数组可以 JSON.stringify，内层文本不能解析后重建。原始临时文件必须在 batch 外系统
+临时目录、权限 0600，成功和失败都清理且不记录全文。本修复保持 handoff v1、原 hash/Ed25519、
+request v3、analysis v5、public-facts v2 和 alert-v5.5，不需要修改或重启 Host。
 
 ## 失败与安全
 
