@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
+from pathlib import Path
 
 from scripts.primary_v1_deployment import (
     DEFAULT_MANIFEST as V1_MANIFEST,
@@ -18,6 +19,7 @@ from scripts.primary_v2_deployment import (
 
 
 IMAGE = "registry.example.test/xuanji-mini@sha256:" + "b" * 64
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrimaryV2DeploymentTest(unittest.TestCase):
@@ -88,6 +90,20 @@ class PrimaryV2DeploymentTest(unittest.TestCase):
         ][0]["persistentVolumeClaim"]["claimName"] = "xuanji-primary-v1-data"
         with self.assertRaises(DeploymentContractError):
             validate_documents(volume, allow_template_image=True)
+
+    def test_daily_push_boundary_uses_raw_task_complete_envelope(self):
+        runbook = (ROOT / "references/primary-v2-deployment-shadow.md").read_text(
+            encoding="utf-8"
+        )
+        boundary = runbook.split("## Daily-Push Boundary", 1)[1].split(
+            "## Real Read-Only Shadow", 1
+        )[0]
+
+        self.assertIn("{request_id, task_complete_json}", boundary)
+        self.assertIn("TextContent.text", boundary)
+        self.assertIn("analysis schema v5", boundary)
+        self.assertNotIn("Preserve only the `analysis_preview`", boundary)
+        self.assertNotIn("schema v4", boundary)
 
     @staticmethod
     def _document(documents, kind):

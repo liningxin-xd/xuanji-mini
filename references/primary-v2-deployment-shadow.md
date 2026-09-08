@@ -139,11 +139,17 @@ Host:
    batch-shaped `task_id`.
 2. Submit one unregistered synthetic rule. It must complete as bounded
    unsupported or `insufficient_definition` without a DView query.
-3. Preserve only the `analysis_preview` and `pipeline_handoff` returned by that
-   same `task_complete`, beside the immutable request ID.
-4. Use the formal daily-push launcher and workspace `.env` with
-   `write-alert-analysis`.
-5. Require schema v4, one success, zero failures, and no handoff degradation.
+3. Capture both representations from that same `task_complete` CallToolResult.
+   Use `structuredContent` only for action and identity gates, and preserve its
+   unique non-empty `TextContent.text` unchanged as the opaque
+   `task_complete_json` beside the immutable request ID. Do not parse and
+   re-stringify the inner text.
+4. Stringify only the outer `{request_id, task_complete_json}` result envelope,
+   write it to a mode-`0600` system temporary file outside the batch, and use
+   the formal daily-push launcher and workspace `.env` with
+   `write-alert-analysis`. Clean the temporary file after success or failure.
+5. Require analysis schema v5, one success, zero failures, and no handoff
+   degradation.
 6. Repeat preview, task, payload, and signature tamper cases and require
    `unverified_result`.
 
