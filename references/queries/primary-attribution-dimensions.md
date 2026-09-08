@@ -78,6 +78,7 @@ END)
 
 ```text
 device_brand           -> device_brand
+channel_group          -> channel_group
 storage_headroom_tier  -> storage_headroom_tier
 os_major_version       -> os_major_version
 apk_size_tier          -> apk_size_tier
@@ -86,6 +87,7 @@ apk_size_tier          -> apk_size_tier
 | 逻辑维度 | 质量匹配表达式 |
 |---|---|
 | `device_brand` | `device_dimension_matched` |
+| `channel_group` | `1` |
 | `storage_headroom_tier` | `device_dimension_matched` |
 | `os_major_version` | `active_os_matched` |
 | `apk_size_tier` | `1` |

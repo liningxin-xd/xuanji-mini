@@ -422,8 +422,8 @@ class TrustedHostAdapterTest(unittest.TestCase):
         scenarios = (
             ("host-download-candidate", "download", "app", "下载完成率", {"game_id"}, 7),
             ("host-download-flat", "download", "sandbox", "下载失败率", set(), 7),
-            ("host-install-app", "install", "app", "下载安装完成率", set(), 6),
-            ("host-install-sandbox", "install", "sandbox", "下载安装完成率", set(), 5),
+            ("host-install-app", "install", "app", "下载安装完成率", set(), 7),
+            ("host-install-sandbox", "install", "sandbox", "下载安装完成率", set(), 6),
         )
         for run_id, chain, game_type, metric, candidate_steps, expected_queries in scenarios:
             with self.subTest(run_id=run_id):

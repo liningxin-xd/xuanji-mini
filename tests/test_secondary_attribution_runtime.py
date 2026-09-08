@@ -451,7 +451,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             game_type="app",
             metric="下载安装完成率",
         )
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         state = runner.load_state("secondary-install")
         self.assertEqual("2026-08-20", state["analysis_date"])
         self.assertEqual("succeeded", state["post_primary"]["steps"][1]["status"])
@@ -475,7 +475,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             game_type="sandbox",
             metric="下载安装完成率",
         )
-        self.assertEqual(7, query_count)
+        self.assertEqual(8, query_count)
         state = runner.load_state("secondary-install-sandbox")
         self.assertEqual("succeeded", state["post_primary"]["steps"][2]["status"])
         self.assertEqual(
@@ -494,7 +494,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
             metric="下载安装完成率",
             secondary_mutator=change_bucket_window,
         )
-        self.assertEqual(8, query_count)
+        self.assertEqual(9, query_count)
         secondary = runner.load_state("secondary-install-immature")[
             "post_primary"
         ]["steps"][1]

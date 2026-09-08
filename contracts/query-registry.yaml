@@ -200,6 +200,11 @@ dimensions:
       quality_source_expression: device_dimension_matched
       normalizer: standard
       allowed_template: install_primary
+    channel_group:
+      source_field: channel_group
+      quality_source_expression: "1"
+      normalizer: standard
+      allowed_template: install_primary
     storage_headroom_tier:
       source_field: storage_headroom_tier
       quality_source_expression: device_dimension_matched

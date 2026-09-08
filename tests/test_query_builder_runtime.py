@@ -82,6 +82,31 @@ class QueryBuilderRuntimeTest(unittest.TestCase):
         self.assertIn("is_metric_anchor = 1", built.sql)
         self.assertNotIn("install_event_app_major_version", built.sql)
 
+    def test_install_channel_group_uses_one_isolated_official_projection(self):
+        for game_type in ("app", "sandbox"):
+            with self.subTest(game_type=game_type):
+                built = self._build(
+                    "install", game_type, "下载安装完成率", "channel_group"
+                )
+                self.assertEqual(
+                    1, built.sql.count("channel_group AS dimension_source")
+                )
+                for other_dimension in (
+                    "device_brand",
+                    "storage_headroom_tier",
+                    "os_major_version",
+                    "apk_size_tier",
+                ):
+                    self.assertNotIn(
+                        f"{other_dimension} AS dimension_source", built.sql
+                    )
+                self.assertIn("official_download_complete", built.sql)
+                self.assertIn("official_install_complete", built.sql)
+                self.assertIn("is_metric_anchor = 1", built.sql)
+                self.assertNotIn("install_event_app_major_version", built.sql)
+                self.assertNotIn(" LIMIT ", built.sql.upper())
+                self.assertNotIn("${", built.sql)
+
     def test_parameter_whitelist_rejects_missing_unknown_and_invalid_values(self):
         plan = self.contracts.select_plan("download", "app", "下载完成率")
         binding = self.contracts.binding_for(plan, "game_id", "下载完成率", "app")

@@ -28,6 +28,7 @@ EXPECTED_INSTALL = (
     "game_id",
     "install_stage",
     "device_brand",
+    "channel_group",
     "storage_headroom_tier",
     "os_major_version",
     "apk_size_tier",
@@ -73,7 +74,7 @@ class ExecutionPlanRuntimeTest(unittest.TestCase):
             playbook,
         )
         self.assertIn(
-            "game_id -> install_stage -> device_brand -> storage_headroom_tier\n"
+            "game_id -> install_stage -> device_brand -> channel_group -> storage_headroom_tier\n"
             "-> os_major_version -> apk_size_tier",
             playbook,
         )
@@ -205,6 +206,57 @@ class DeterministicQueueRunnerTest(unittest.TestCase):
         self.assertEqual("device_brand", brand["step_id"])
         state = self.runner.load_state("sandbox-install")
         self.assertEqual("skipped_not_applicable", state["steps"][1]["status"])
+
+    def test_install_channel_outcomes_do_not_truncate_later_families(self):
+        for outcome in ("failed", "no_candidate", "quality_only"):
+            run_id = f"install-channel-{outcome}"
+            with self.subTest(outcome=outcome):
+                self.runner.init_run(
+                    run_id=run_id,
+                    chain="install",
+                    game_type="app",
+                    metric="下载安装完成率",
+                    alert_date="2026-08-24",
+                    receipt_mode="self_reported",
+                )
+                issued = []
+                while True:
+                    ticket = self.runner.next_action(run_id)
+                    if ticket["action"] == "queue_complete":
+                        break
+                    issued.append(ticket["step_id"])
+                    raw = raw_result_for_ticket(self.runner, run_id, ticket)
+                    if ticket["step_id"] == "channel_group":
+                        if outcome == "failed":
+                            raw["rows"][0]["analysis_date"] = "2026-01-01"
+                        elif outcome == "quality_only":
+                            raw["rows"][0].update(
+                                bucket_kind="quality",
+                                dimension_value="unknown",
+                                dimension_label="unknown",
+                            )
+                    self.runner.record(
+                        run_id,
+                        self_reported_result_event(
+                            ticket, raw, f"query-{run_id}-{ticket['step_id']}"
+                        ),
+                    )
+
+                self.assertEqual(list(EXPECTED_INSTALL), issued)
+                state = self.runner.load_state(run_id)
+                channel = state["steps"][3]
+                self.assertEqual(
+                    "failed" if outcome == "failed" else "succeeded",
+                    channel["status"],
+                )
+                if outcome != "failed":
+                    self.assertEqual(0, channel["candidate_count"])
+                self.assertTrue(
+                    all(
+                        step["status"] == "succeeded"
+                        for step in state["steps"][4:]
+                    )
+                )
 
     def test_full_queue_exports_every_step_in_original_order(self):
         self._init_download()

@@ -69,7 +69,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
             self.playbook,
         )
         self.assertIn(
-            "game_id -> install_stage -> device_brand -> storage_headroom_tier\n"
+            "game_id -> install_stage -> device_brand -> channel_group -> storage_headroom_tier\n"
             "-> os_major_version -> apk_size_tier",
             self.playbook,
         )
@@ -91,12 +91,12 @@ class AttributionFallbackContractTest(unittest.TestCase):
 
     def test_install_stage_quality_does_not_gate_official_attribution(self):
         self.assertIn("链路键与阶段质量不得作为官方投影的前置门禁", self.playbook)
-        self.assertIn("逐个尝试完上述四个家族", self.playbook)
+        self.assertIn("逐个尝试完上述五个家族", self.playbook)
         self.assertIn("install-primary-attribution-template.md", self.playbook)
 
-    def test_install_fallback_order_prioritizes_brand_and_storage(self):
+    def test_install_fallback_order_places_channel_after_brand(self):
         expected_order = (
-            "`device_brand -> storage_headroom_tier -> "
+            "`device_brand -> channel_group -> storage_headroom_tier -> "
             "os_major_version -> apk_size_tier`"
         )
         self.assertIn(expected_order, self.playbook)
@@ -262,6 +262,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
             "apk_size_tier",
             "os_major_version",
             "device_brand",
+            "channel_group",
             "storage_headroom_tier",
         ):
             with self.subTest(dimension=dimension):
@@ -294,6 +295,7 @@ class AttributionFallbackContractTest(unittest.TestCase):
 
         expected_registry_order = (
             "device_brand           -> device_brand\n"
+            "channel_group          -> channel_group\n"
             "storage_headroom_tier  -> storage_headroom_tier\n"
             "os_major_version       -> os_major_version\n"
             "apk_size_tier          -> apk_size_tier"
@@ -308,7 +310,10 @@ class AttributionFallbackContractTest(unittest.TestCase):
         self.assertNotIn("不强制横扫", scenarios)
         self.assertNotIn("游戏不合法、无候选、解释不足", scenarios)
         self.assertIn("当前执行清单验收字段", scenarios)
-        self.assertIn("记录阶段限制并继续低基数官方维度队列", scenarios)
+        self.assertIn("记录当前家族限制并继续后续低基数官方维度队列", scenarios)
+        self.assertIn("brand -> channel_group -> storage -> OS -> apk_size", scenarios)
+        self.assertIn("单一安装渠道桶恶化", scenarios)
+        self.assertIn("至少两个其他安装渠道桶同向恶化", scenarios)
 
     def test_primary_risk_evidence_never_stops_the_dimension_queue(self):
         self.assertIn("不构成拒绝当前结果或停止后续维度的硬门禁", self.playbook)

@@ -44,6 +44,7 @@
       "game_id",
       "install_stage",
       "device_brand",
+      "channel_group",
       "storage_headroom_tier",
       "os_major_version",
       "apk_size_tier"
@@ -59,6 +60,7 @@
     "expected_query_steps": [
       "game_id",
       "device_brand",
+      "channel_group",
       "storage_headroom_tier",
       "os_major_version",
       "apk_size_tier"

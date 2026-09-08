@@ -120,7 +120,7 @@ class PrimaryHostIntegrationTest(unittest.TestCase):
     def test_download_and_apk_install_complete_behind_one_host_call(self):
         scenarios = (
             ("host-download-shadow", "download", "app", "下载完成率", 7),
-            ("host-install-shadow", "install", "app", "下载安装完成率", 6),
+            ("host-install-shadow", "install", "app", "下载安装完成率", 7),
         )
         for run_id, chain, game_type, metric, expected_queries in scenarios:
             with self.subTest(run_id=run_id):
@@ -155,6 +155,7 @@ class PrimaryHostIntegrationTest(unittest.TestCase):
                             "game_id",
                             "install_stage",
                             "device_brand",
+                            "channel_group",
                             "storage_headroom_tier",
                             "os_major_version",
                             "apk_size_tier",

@@ -143,6 +143,7 @@ class PrimaryV1ShadowAcceptanceTest(unittest.TestCase):
                     "game_id",
                     "install_stage",
                     "device_brand",
+                    "channel_group",
                     "storage_headroom_tier",
                     "os_major_version",
                     "apk_size_tier",

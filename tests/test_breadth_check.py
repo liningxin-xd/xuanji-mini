@@ -63,9 +63,44 @@ class BreadthSelectorTest(unittest.TestCase):
             "device_brand:brand-a", result["calibrations"][0]["candidate_id"]
         )
 
+    def test_install_single_channel_degradation_stays_specific(self):
+        state = self._state(
+            metric="下载安装完成率",
+            dimension="channel_group",
+            values=("paid_sem", "organic", "default"),
+            rates=((0.70, 0.80), (0.78, 0.80), (0.79, 0.80)),
+        )
+
+        self.assertEqual(
+            {"status": "skipped_by_policy", "reason": "no_broad_primary_family"},
+            self.selector.select(state),
+        )
+
+    def test_install_multi_channel_degradation_is_broad_without_query(self):
+        state = self._state(
+            metric="下载安装完成率",
+            dimension="channel_group",
+            values=("paid_sem", "organic", "default"),
+            rates=((0.70, 0.80), (0.74, 0.80), (0.75, 0.80)),
+        )
+
+        result = self.selector.select(state)
+
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual(0, result["query_count"])
+        calibration = result["calibrations"][0]
+        self.assertEqual("channel_group:paid_sem", calibration["candidate_id"])
+        self.assertEqual("broad_change", calibration["specificity_status"])
+        self.assertEqual(2, calibration["supporting_bucket_count"])
+
     @staticmethod
-    def _state(*, metric: str, rates: tuple[tuple[float, float], ...]) -> dict:
-        values = ("brand-a", "brand-b", "brand-c")
+    def _state(
+        *,
+        metric: str,
+        rates: tuple[tuple[float, float], ...],
+        dimension: str = "device_brand",
+        values: tuple[str, ...] = ("brand-a", "brand-b", "brand-c"),
+    ) -> dict:
         buckets = [
             {
                 "value": value,
@@ -79,13 +114,13 @@ class BreadthSelectorTest(unittest.TestCase):
             "metric": metric,
             "steps": [
                 {
-                    "id": "device_brand",
+                    "id": dimension,
                     "status": "succeeded",
                     "candidate_count": 1,
                     "candidates": [
                         {
-                            "value": "brand-a",
-                            "label": "Brand-A",
+                            "value": values[0],
+                            "label": values[0].title(),
                             "adverse_impact_bp": 100.0,
                         }
                     ],

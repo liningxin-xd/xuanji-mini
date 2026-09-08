@@ -270,12 +270,13 @@ game_id
 
 ```text
 device_brand
+channel_group
 storage_headroom_tier
 os_major_version
 apk_size_tier
 ```
 
-固定按 `device_brand -> storage_headroom_tier -> os_major_version -> apk_size_tier` 的顺序逐个尝试完上述四个家族。单个家族缺字段、查询失败、完整性不足或贡献不闭合时，记录该家族限制并继续下一个；只要官方根投影合法，就不得把单个家族失败升级为整个安装下钻不支持。阶段拆解显示 `S -> C` 同向不利变化达到 5bp 时，另按后文规则检查安装事件版本；不得把该版本检查插到 `game_id` 之前，也不得让它替代上述官方投影家族。
+固定按 `device_brand -> channel_group -> storage_headroom_tier -> os_major_version -> apk_size_tier` 的顺序逐个尝试完上述五个家族。渠道与其他一级维度平级，最终候选按未舍入 `adverse_impact` 平等竞争主卡 Top 3，查询顺序不提供展示优先级。单个家族缺字段、查询失败、无候选、只有质量桶、完整性不足或贡献不闭合时，记录该家族限制并继续下一个；只要官方根投影合法，就不得把单个家族失败升级为整个安装下钻不支持。阶段拆解显示 `S -> C` 同向不利变化达到 5bp 时，另按后文规则检查安装事件版本；不得把该版本检查插到 `game_id` 之前，也不得让它替代上述官方投影家族。
 
 人工解释顺序为 APK/沙盒、游戏贡献、游戏包版本/包大小、是否进入 `installStart`、完成/失败及失败原因、安装器类型/客户端版本、机型/OS/剩余存储。下载专属的预约自动下载、首次下载网络和地域不进入安装一级归因。
 
@@ -351,12 +352,12 @@ game_id -> is_reserve_auto_download -> device_brand -> channel_group
 -> app_major_version -> os_major_version -> apk_size_tier
 
 APK 安装:
-game_id -> install_stage -> device_brand -> storage_headroom_tier
+game_id -> install_stage -> device_brand -> channel_group -> storage_headroom_tier
 -> os_major_version -> apk_size_tier
 
 沙盒安装:
 game_id -> install_stage(skipped_not_applicable) -> device_brand
--> storage_headroom_tier -> os_major_version -> apk_size_tier
+-> channel_group -> storage_headroom_tier -> os_major_version -> apk_size_tier
 ```
 
 每个 `steps[]` 项固定包含 `step` 和 `status`：
