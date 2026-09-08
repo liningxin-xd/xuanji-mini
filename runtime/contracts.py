@@ -43,6 +43,21 @@ EXPECTED_PLAN_STEPS = {
 }
 
 EXPECTED_ANALYSIS_PROFILES = {"primary_v1", "primary_v2"}
+EXPECTED_MISSING_CHILD_DIMENSIONS = {
+    "download": {
+        "device_brand",
+        "channel_group",
+        "app_major_version",
+        "os_major_version",
+        "apk_size_tier",
+    },
+    "install": {
+        "device_brand",
+        "storage_headroom_tier",
+        "os_major_version",
+        "apk_size_tier",
+    },
+}
 EXPECTED_POST_PRIMARY_STEPS = (
     "counterfactual",
     "secondary",
@@ -224,6 +239,7 @@ class RepositoryContracts:
         self._metric_definition_by_name = self._validate_metric_definitions()
         self._validate_registry()
         self._validate_secondary_relations()
+        self._validate_missing_child_bucket_policy()
         self._validate_result_schemas()
 
     @property
@@ -544,6 +560,12 @@ class RepositoryContracts:
             )
         return tuple(children)
 
+    def missing_child_bucket_policy(
+        self, chain: str, child_dimension: str | None
+    ) -> dict[str, str] | None:
+        policy = self._registry["secondary"]["missing_child_bucket_policy"]
+        return deepcopy(policy.get(chain, {}).get(child_dimension))
+
     def secondary_binding(
         self,
         *,
@@ -564,6 +586,10 @@ class RepositoryContracts:
         parent_raw = secondary["parent_dimensions"][chain][parent_dimension]
         parent_config = self._materialize_dimension_config(parent_raw)
         child_config = self._dimension_config(chain, child_dimension)
+        if self.missing_child_bucket_policy(chain, child_dimension) is not None:
+            child_config = self._materialize_dimension_config(
+                {**child_config, "normalizer": "secondary_missing_child"}
+            )
         if chain == "download":
             metric_config = self._registry["download_metrics"].get(metric)
             if not isinstance(metric_config, dict):
@@ -1363,8 +1389,19 @@ class RepositoryContracts:
         if not isinstance(normalizers, dict) or set(normalizers) != {
             "standard",
             "reserve_binary",
+            "secondary_missing_child",
         }:
             raise ContractError("dimension normalizers are incomplete")
+        for name, normalizer in normalizers.items():
+            if (
+                not isinstance(normalizer, dict)
+                or set(normalizer) != {"value_expression", "label_expression"}
+                or any(
+                    not isinstance(value, str) or not value.strip()
+                    for value in normalizer.values()
+                )
+            ):
+                raise ContractError(f"invalid dimension normalizer: {name}")
         for chain, expected in expected_dimensions.items():
             chain_dimensions = dimensions.get(chain)
             if not isinstance(chain_dimensions, dict) or tuple(chain_dimensions) != expected:
@@ -1384,6 +1421,8 @@ class RepositoryContracts:
                     raise ContractError(f"invalid quality expression for {dimension}")
                 if config.get("normalizer") not in normalizers:
                     raise ContractError(f"unknown normalizer for {dimension}")
+                if config["normalizer"] == "secondary_missing_child":
+                    raise ContractError("missing child normalizer is secondary-only")
                 expected_template = (
                     "download_primary" if chain == "download" else "install_primary"
                 )
@@ -1394,6 +1433,7 @@ class RepositoryContracts:
         if not isinstance(secondary, dict) or set(secondary) != {
             "template",
             "parent_dimensions",
+            "missing_child_bucket_policy",
         }:
             raise ContractError("secondary query registry is invalid")
         template = secondary["template"]
@@ -1530,6 +1570,33 @@ class RepositoryContracts:
                 raise ContractError(
                     f"{chain} secondary relation references an unknown child"
                 )
+
+    def _validate_missing_child_bucket_policy(self) -> None:
+        policy = self._registry["secondary"]["missing_child_bucket_policy"]
+        if (
+            not isinstance(policy, dict)
+            or set(policy) != set(EXPECTED_MISSING_CHILD_DIMENSIONS)
+        ):
+            raise ContractError("missing child bucket policy chains are invalid")
+        for chain, expected in EXPECTED_MISSING_CHILD_DIMENSIONS.items():
+            entries = policy[chain]
+            if not isinstance(entries, dict) or set(entries) != expected:
+                raise ContractError(f"{chain} missing child bucket policy keys changed")
+            if not set(entries).issubset(self.secondary_relation_children(chain)):
+                raise ContractError("missing child bucket policy must be a relation subset")
+            for labels in entries.values():
+                if (
+                    not isinstance(labels, dict)
+                    or set(labels) != {"null_label", "blank_label"}
+                    or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in labels.values()
+                    )
+                    or labels["null_label"] == labels["blank_label"]
+                ):
+                    raise ContractError(
+                        "missing child bucket labels must be non-empty and distinct"
+                    )
 
     def _validate_query_config(
         self, name: str, config: Any, required_assets: tuple[str, ...]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,7 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         game_candidate: bool = True,
         non_dominant: bool = False,
         secondary_mutator=None,
+        game_mutator=None,
     ) -> tuple[AttributionRunner, int]:
         runner = self._new_runner(
             run_id, chain=chain, game_type=game_type, metric=metric
@@ -96,6 +98,8 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
                 )
             if ticket["step_id"] == "secondary" and secondary_mutator:
                 secondary_mutator(raw)
+            if ticket["step_id"] == "game_id" and game_mutator:
+                game_mutator(raw)
             runner.record(
                 run_id,
                 self_reported_result_event(
@@ -234,6 +238,31 @@ class SecondaryAttributionRuntimeTest(unittest.TestCase):
         ][1]
         self.assertEqual("skipped_by_policy", secondary["status"])
         self.assertEqual("no_legal_game_candidate", secondary["reason"])
+
+    def test_t10_missing_and_quality_games_never_start_secondary(self):
+        for index, value in enumerate((None, "", "   ", "__none__", "unmatched",
+                                       "__dimension_null__", "__dimension_blank__",
+                                       "__dimension_reserved_collision__")):
+            with self.subTest(value=value):
+                def replace_game(raw):
+                    expression = runner_contracts.registry["dimension_normalizers"]["standard"]["value_expression"]
+                    with sqlite3.connect(":memory:") as db:
+                        normalized = db.execute(
+                            "SELECT " + expression.replace(" AS STRING)", " AS TEXT)")
+                            + " FROM (SELECT ? AS dimension_source, 1 AS dimension_quality_matched)",
+                            (value,),
+                        ).fetchone()[0]
+                    raw["rows"][0].update(dimension_value=normalized,
+                                           dimension_label=normalized, bucket_kind="quality")
+                runner_contracts = RepositoryContracts(ROOT)
+                run_id = f"missing-parent-{index}"
+                runner, count = self._complete(run_id, game_mutator=replace_game)
+                state = runner.load_state(run_id)
+                secondary = state["post_primary"]["steps"][1]
+                self.assertEqual("skipped_by_policy", secondary["status"])
+                self.assertEqual("no_legal_game_candidate", secondary["reason"])
+                self.assertEqual(0, state["steps"][0]["candidate_count"])
+                self.assertEqual(7, count)
 
     def test_missing_outside_parent_fails_only_secondary(self):
         def remove_outside(raw):

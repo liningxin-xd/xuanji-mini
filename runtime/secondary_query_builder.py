@@ -151,7 +151,11 @@ class SecondaryQueryBuilder:
 
     @staticmethod
     def _scoped_expression(expression: str, scope: str) -> str:
-        return expression.replace("dimension_", f"{scope}_")
+        return re.sub(
+            r"\bdimension_(source|quality_matched)\b",
+            lambda match: f"{scope}_{match.group(1)}",
+            expression,
+        )
 
     @staticmethod
     def _quote(value: str) -> str:

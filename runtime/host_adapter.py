@@ -53,14 +53,13 @@ class ProductionDViewExecutor:
     _NUMBER = re.compile(
         r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?"
     )
+    _IDENTITY_TEXT_COLUMNS = {"parent_value", "dimension_value", "dimension_label"}
     _TEXT_COLUMNS = {
         "analysis_date",
         "game_type",
         "scope",
         "bucket_kind",
         "error_code",
-        "dimension_value",
-        "dimension_label",
     }
 
     def __init__(
@@ -186,6 +185,8 @@ class ProductionDViewExecutor:
         return cells
 
     def _markdown_scalar(self, value: str, column: str) -> Any:
+        if column in self._IDENTITY_TEXT_COLUMNS:
+            return value
         if value in {"None", "NULL", "null", "<null>"}:
             return None
         if column in self._TEXT_COLUMNS:

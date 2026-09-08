@@ -449,6 +449,9 @@ ambiguous_*
 __none__
 __other__
 __other_below_threshold__
+__dimension_null__
+__dimension_blank__
+__dimension_reserved_collision__
 ```
 
 质量桶不能成为业务候选；其占比突然扩大可以作为数据质量发现。维度匹配率和安装观察窗口没有新增的硬阈值，风险只限制措辞强度，不阻止其他已闭合业务桶按现有门槛形成候选，也不阻止继续下一个维度。高基数长尾必须在 SQL 内使用闭合残差桶收敛到 DView 结果预算以内，并保持其不可候选属性；不得先接收 1000 行截断结果再在 Host 侧合并。
@@ -477,6 +480,43 @@ restoration_ratio = 1 - abs(removal_delta) / abs(original_delta)
 
 仅当一级候选达到门槛、有足够解释力或明确业务价值、关系已注册、数据覆盖可靠且本次尚未做过二级时执行。只选一个父候选和一个合法子维度。
 
+当前 `primary_v2` 只允许已冻结的具体 `game_id` 字符串作父级。数字、前导零、超大整数及科学计数
+外观均保持原字符串；SQL NULL、空白、`unmatched` 或其他质量值不产生父候选。本节的局部缺失桶
+规则不改变一级归因、父级/子维度选择、查询数量、样本、占比、贡献门槛或游戏增强。
+
+二级子维度的缺失候选资格及标签只由 `contracts/query-registry.yaml` 的
+`secondary.missing_child_bucket_policy` 决定，不能从 relations 推导。当前登记 download 的
+`device_brand`、`channel_group`、`app_major_version`、`os_major_version`、`apk_size_tier`，以及 install 的
+`device_brand`、`storage_headroom_tier`、`os_major_version`、`apk_size_tier`。只新增 relation 不授予资格；
+未登记 policy 的子维度继续使用 `standard`，NULL/空白仍是不可候选质量值。
+
+只有已选中的子维度在实际二级 SQL 中使用 `secondary_missing_child`，在当前日与七日基线分组前区分：
+
+| 源状态 | SQL value/原始 label | 候选固定 label |
+| --- | --- | --- |
+| 关联不通过，优先于以下所有状态 | `unmatched` | 不成为候选 |
+| SQL NULL | `__dimension_null__` | `<维度名称>不适用或未包含` |
+| 空串或纯空白 | `__dimension_blank__` | `<维度名称>为空白` |
+| 父范围内源字符串恰好等于任一新保留值 | `__dimension_reserved_collision__` | 整项二级失败，不发布 |
+
+字面 `null`、`NULL`、`None`、`<null>` 是普通非空业务字符串。生产 Markdown adapter 仅对
+`parent_value`、`dimension_value`、`dimension_label` 先保留文本；其他文本列继续原 NULL 行为。
+结构化 transport 已携带类型，错误的 int/float/None 由 schema 拒绝，不能用 `str()` 补救。
+
+三个新保留值全局仍属于质量值。SecondaryResultValidator 仅在 chain/child 命中 policy、value 为
+null/blank sentinel 且原始 label 与 sentinel 相等时，局部允许其使用 `child` role。两桶各自经过
+现有 SQL 样本/占比门槛，未通过时进入统一 residual；通过后仍须满足指标质量、贡献、父/根计数、
+source bucket、行数和观察窗口门禁。仅最终候选由 validator 换成 policy 固定标签，普通标签不变，
+模型及下游不得改写。标签只描述字段状态，不证明埋点、客户端故障或业务根因。
+
+碰撞标记使用不可折叠的 quality role，即使低样本/低占比也保留到 validator；它以现有
+`failure_code=schema_invalid` 和稳定 reason `reserved_identity_collision` 拒绝本次二级，不进入
+public facts，不删除合法一级结果。二级质量输出至多为 `unmatched`、`__quality__`、碰撞标记三类；
+null/blank 计入最多 200 个 child，另加一个 residual 和恰好一个 `outside_parent`，静态上界仍为 205。
+
+未来网络环境等字段的 NULL 可能有分析价值，但当前不增加网络下钻或 NULL 游戏父级。启用前须另行
+登记业务含义、允许角色、数据粒度、门槛、标签和测试，不能把本次局部例外扩展为通用 identity 规则。
+
 命中条件后完整读取 [二级归因 SQL 模板](queries/secondary-attribution-template.md)，并按模板指向的 [归因维度登记](queries/primary-attribution-dimensions.md) 绑定一个父维度、父值和一个合法子维度。下载链路还必须按当前标准指标选择模板登记的唯一分子、分母和行级合法性表达式；安装链路固定使用官方锚点投影。不得临时手写另一套父子聚合、只查父范围内部，或省略 `outside_parent` 后继续归因。
 
 查询必须继承：
@@ -494,6 +534,13 @@ APK/沙盒
 二级查询必须在同一聚合中保留根范围总分子、总分母。一级父维度名和值只限定需要展开的子维度明细，不得把父范围分母重新称为大盘分母。二级完整家族由“父范围内的子维度桶 + 父范围外的 `outside_parent` 闭合残差桶”组成；`outside_parent` 只用于闭合，不能成为候选。
 
 二级沿用根范围尺度上的池化、分解、质量桶、样本、占比、5bp 和闭合门禁。子桶的 `adverse_impact_bp` 必须按根指标分母计算并达到全局 5bp，不能用父范围内的局部 5bp 替代。结束后立即停止维度层级扩展；禁止三级、多个父节点或临时组合。只有命中后文的明确条件时，才可进入不增加维度层级的方向增强验证。
+
+本修复须将 adapter、二级 builder 的字段绑定、SQL 模板、policy、validator、result schema 和 secondary
+asset lock 同时发布；registry/schema 继续绑定现有 contract hash。另行授权部署后重启 `primary_v2`
+Host，只创建 fresh task/batch 验证，不恢复跨版本 task，不改写、重签或重发旧结果。回滚也整体恢复
+该 Xuanji 发布单元并重启 Host。analysis v5、public-facts v2、handoff v1、原 hash/Ed25519 及
+alert-v5.5 不变；daily-push 无生产代码变化时无需运行时回滚。线上未触发二级或 missing 桶时必须明确
+报告未覆盖，合成离线测试不等于线上验收。
 
 ## 游戏背景
 

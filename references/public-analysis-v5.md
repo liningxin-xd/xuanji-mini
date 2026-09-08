@@ -104,6 +104,29 @@ Primary findings have no parent fields. A secondary finding has exactly one prim
 `parent_object_ref` equals that parent's object reference. All candidates from the frozen Host state are public when
 they pass the existing user-safety boundary. The Writer pack's per-family three-candidate cap does not cap this array.
 
+Secondary missing children use the existing string fields without a schema extension: `object.value` is
+`__dimension_null__` for SQL NULL or `__dimension_blank__` for empty/whitespace values. Only the explicit
+`secondary.missing_child_bucket_policy` in `contracts/query-registry.yaml` grants eligibility and supplies
+`object.display_name`: `<dimension name>不适用或未包含` and `<dimension name>为空白`, respectively.
+The Host validator assigns these labels after all existing candidate and closure gates. SQL raw labels must equal
+their sentinel. Ordinary literal `null`, `NULL`, `None`, and `<null>` strings retain their ordinary identity.
+Below-threshold missing buckets collapse into residual or produce no candidate; they do not publish missing labels.
+
+The parent remains a concrete frozen `game_id` string, including its original numeric-looking spelling.
+Markdown identity handling is limited to `parent_value`, `dimension_value`, and `dimension_label` before trusted
+receipt hashing. Structured numeric or null identities remain schema errors, without string coercion.
+`unmatched` is never a candidate. A source value equal to either missing sentinel or the reserved collision marker
+is rejected through `schema_invalid` / `reserved_identity_collision`; that marker never enters public facts.
+Global quality registration remains in force for primary and other consumers. No new object kind, key or quality
+field is introduced; analysis v5, public-facts v2, handoff v1, existing hashes/Ed25519 and alert-v5.5 remain unchanged.
+Writer and Renderer consume the signed labels without choosing new wording or implying a mechanism failure.
+
+Ship adapter, secondary SQL/binding, policy, validator, result registration and the secondary asset lock together.
+Contract hashes change; existing tasks/results must not be converted, resumed across versions or re-signed.
+After separately authorized deployment/restart, verify fresh tasks/batches; report secondary/missing cases absent
+from real input as not covered online. Roll back the whole Xuanji unit, also using fresh tasks. Potential future
+network NULL drilldown requires separate business/role/grain/threshold/label registration and is not enabled here.
+
 ### Steps
 
 Steps are contiguous and ordered from one. Every step contains `step_id`, `display_name`, `ordinal`, `status`,

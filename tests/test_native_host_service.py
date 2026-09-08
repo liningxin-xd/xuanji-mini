@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import re
 import tempfile
@@ -33,6 +34,7 @@ from runtime.runner import AttributionRunner
 from runtime.task_coordinator import TaskReferenceError
 from tests.runtime_result_fixtures import raw_result_for_ticket
 from tests.test_registered_alert_coordinator import FixtureRootExecutor
+from tests.test_result_validator_runtime import _markdown_result
 
 
 def _settings(root: Path) -> HostServiceSettings:
@@ -88,6 +90,7 @@ class _FixtureDViewClient:
         repository_root: Path,
         *,
         game_candidate: bool = False,
+        secondary_missing: bool = False,
         background_failure: bool = False,
         background_malformed_response: bool = False,
         background_empty_response: bool = False,
@@ -97,6 +100,8 @@ class _FixtureDViewClient:
         self._settings = settings
         self._repository_root = repository_root
         self._game_candidate = game_candidate
+        self._secondary_missing = secondary_missing
+        self.secondary_markdown_count = 0
         self._background_failure = background_failure
         self._background_malformed_response = background_malformed_response
         self._background_empty_response = background_empty_response
@@ -184,6 +189,11 @@ class _FixtureDViewClient:
                     self._game_candidate and ticket["step_id"] == "game_id"
                 ),
             )
+            if ticket["step_id"] == "secondary":
+                if self._secondary_missing:
+                    split_missing_children(raw_result)
+                self.secondary_markdown_count += 1
+                return {"result": _markdown_result(raw_result, f"private-{run_root.name}-{count}")}
             return {
                 "query_id": f"private-{run_root.name}-{count}",
                 "columns": raw_result["columns"],
@@ -195,6 +205,20 @@ class _FixtureDViewClient:
     def assert_query_contract(database_type, limit):
         if database_type != "MaxCompute" or limit != 250:
             raise AssertionError("native Host changed the DView query contract")
+
+
+def split_missing_children(raw_result):
+    child = next(row for row in raw_result["rows"] if row["bucket_kind"] == "child")
+    blank = copy.deepcopy(child)
+    for field in ("current_denominator", "current_numerator", "baseline_denominator",
+                  "baseline_numerator", "current_row_count", "baseline_row_count"):
+        blank[field] = child[field] // 2
+        child[field] -= blank[field]
+    child.update(dimension_value="__dimension_null__", dimension_label="__dimension_null__")
+    blank.update(dimension_value="__dimension_blank__", dimension_label="__dimension_blank__")
+    raw_result["rows"].append(blank)
+    for row in raw_result["rows"]:
+        row["source_bucket_count"] += 1
 
 
 class _FailingDViewClient:
@@ -1077,6 +1101,7 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 settings,
                 Path(__file__).parents[1],
                 game_candidate=True,
+                secondary_missing=True,
             )
             runtime = XuanjiHostRuntime(settings, dview_client=client)
             task_id = (
@@ -1140,6 +1165,13 @@ class NativeHostRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("task_complete", completed["action"])
             preview = completed["analysis_preview"]
             handoff = completed["pipeline_handoff"]
+            self.assertEqual(1, client.secondary_markdown_count)
+            children = [item for item in preview["investigations"][0]["public_facts"]["findings"]
+                        if item["level"] == "secondary"]
+            self.assertEqual({"__dimension_null__", "__dimension_blank__"},
+                             {item["object"]["value"] for item in children})
+            self.assertEqual({"设备品牌不适用或未包含", "设备品牌为空白"},
+                             {item["object"]["display_name"] for item in children})
             self.assertIn(marker, json.dumps(preview, ensure_ascii=False))
             self.assertEqual(task_id, handoff["task_id"])
             self.assertEqual(canonical_sha256(payload), handoff["payload_sha256"])

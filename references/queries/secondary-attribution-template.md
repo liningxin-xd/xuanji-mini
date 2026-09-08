@@ -10,6 +10,16 @@
 - 父、子字段、质量匹配表达式和标准化表达式只从 [归因维度登记](primary-attribution-dimensions.md) 取得，父子关系只从 Playbook 取得。
 - `outside_parent`、`quality` 和 `residual` 均不可成为候选。只有 `bucket_kind=child` 的子桶可以进入贡献门禁。
 - 禁止业务 Top、`LIMIT`、分页、笛卡尔积以及把父范围分母冒充根分母。低样本或低占比子桶统一收敛为 `__other_below_threshold__`，异常质量值统一收敛为至多三个质量桶；结果必须少于 250 行，不得依赖 DView 的 1000 行截断。
+- 只有 query registry 的独立 `secondary.missing_child_bucket_policy` 命中时，child 表达式使用
+  `secondary_missing_child`；父级仍为具体字符串相等谓词，其他 child 使用 `standard`。
+  匹配失败优先为 `unmatched`，SQL NULL 与空串/空白分别编码为 `__dimension_null__` 和
+  `__dimension_blank__`，字面 `null`/`NULL`/`None`/`<null>` 保留普通字符串身份。
+- 父范围内源值等于上述 sentinel 或 `__dimension_reserved_collision__` 时编码为碰撞标记，
+  使用不可折叠的 quality 身份保留到 validator，以 `schema_invalid` / `reserved_identity_collision`
+  拒绝。三个内部值的原始 label 均为 value 自身；中文标签只由 validator 对最终 missing 候选赋予。
+- null/blank 和普通 child 共用当前/基线 1%、样本 100 的既有门槛，未通过时进入统一 residual。
+  child 至多 100 + 100 = 200；quality 至多 unmatched、聚合质量桶、碰撞标记三类，另有一个 residual
+  和一个 outside_parent，因此静态上界仍为 205。碰撞标记不得被 residual 吞掉。
 
 ## 下载指标绑定
 
@@ -67,7 +77,8 @@ WITH raw_scoped_rows AS (
       WHEN parent_value <> ${parent_value} THEN 'outside_parent'
       WHEN child_value IN (
         'unknown', 'invalid', 'not_applicable', 'unmatched',
-        '__none__', '__other__', '__other_below_threshold__'
+        '__none__', '__other__', '__other_below_threshold__',
+        '__dimension_reserved_collision__'
       ) OR child_value LIKE 'invalid_%'
         OR child_value LIKE 'ambiguous_%' THEN 'quality'
       ELSE 'child'
@@ -135,7 +146,8 @@ WITH raw_scoped_rows AS (
       WHEN initial_bucket_kind = 'quality'
         AND dimension_value = 'unmatched' THEN 'unmatched'
       WHEN initial_bucket_kind = 'quality'
-        AND dimension_value = '__none__' THEN '__none__'
+        AND dimension_value = '__dimension_reserved_collision__'
+          THEN '__dimension_reserved_collision__'
       WHEN initial_bucket_kind = 'quality' THEN '__quality__'
       WHEN initial_bucket_kind = 'child' AND NOT (
         (
@@ -267,7 +279,8 @@ WITH raw_scoped_rows AS (
       WHEN parent_value <> ${parent_value} THEN 'outside_parent'
       WHEN child_value IN (
         'unknown', 'invalid', 'not_applicable', 'unmatched',
-        '__none__', '__other__', '__other_below_threshold__'
+        '__none__', '__other__', '__other_below_threshold__',
+        '__dimension_reserved_collision__'
       ) OR child_value LIKE 'invalid_%'
         OR child_value LIKE 'ambiguous_%' THEN 'quality'
       ELSE 'child'
@@ -360,7 +373,8 @@ WITH raw_scoped_rows AS (
       WHEN initial_bucket_kind = 'quality'
         AND dimension_value = 'unmatched' THEN 'unmatched'
       WHEN initial_bucket_kind = 'quality'
-        AND dimension_value = '__none__' THEN '__none__'
+        AND dimension_value = '__dimension_reserved_collision__'
+          THEN '__dimension_reserved_collision__'
       WHEN initial_bucket_kind = 'quality' THEN '__quality__'
       WHEN initial_bucket_kind = 'child' AND NOT (
         (
@@ -467,7 +481,7 @@ ORDER BY
 1. 所有占位符必须消失，父子关系和字段映射必须在登记中存在。
 2. `baseline_day_count = 7`，根分母为正，行级指标非法数、正式粒度重复数均为 0。
 3. 结果少于 250 行；每行 `source_bucket_count` 一致，`collapsed_source_bucket_count` 为正且合计等于源桶数；`child` 桶的合并数必须为 1，未单列的业务子桶必须进入残差。
-4. 所有输出桶的当前与基线分子、分母、行数分别合计回勾根总量；`outside_parent` 必须存在，除非父范围经一级结果证明就是完整根范围。
+4. 所有输出桶的当前与基线分子、分母、行数分别合计回勾根总量；`outside_parent` 必须恰好一行，缺失或重复均拒绝。
 5. 贡献计算必须包含 `child + residual + quality + outside_parent` 全部桶，并闭合到根变化；只有 `child` 桶允许成为候选。
 6. 子桶的占比、样本和 5bp 均使用根范围尺度。不得在父范围内部重新计算局部门槛。
 7. 任一门禁失败只淘汰本次父子家族并记录限制，不得删除已经合法形成的一级候选，也不得继续三级下钻。

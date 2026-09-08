@@ -56,7 +56,8 @@ class SecondaryResultValidator:
             raise ResultValidationError(
                 "quality_gate_failed", "secondary baseline_day_count must equal 7"
             )
-        self._validate_bucket_kinds(rows)
+        policy = self.contracts.missing_child_bucket_policy(chain, binding.dimension)
+        self._validate_bucket_kinds(rows, policy)
         metric_contract = self.contracts.metric_result_contract(metric)
         self.primary._validate_metric_counts(
             rows, numerator_subset=metric_contract["numerator_subset"]
@@ -86,13 +87,17 @@ class SecondaryResultValidator:
         }
         candidates: list[dict[str, Any]] = []
         for contribution in contributions:
-            if contribution.bucket_kind != "child" or self.primary._is_quality_value(
-                contribution.dimension_value
-            ):
+            if contribution.bucket_kind != "child":
                 continue
             row = row_by_identity[
                 (contribution.bucket_kind, contribution.dimension_value)
             ]
+            missing_label = self._missing_child_label(row, policy)
+            if (
+                self.primary._is_quality_value(contribution.dimension_value)
+                and missing_label is None
+            ):
+                continue
             if max(
                 float(row["current_denominator"]),
                 float(row["baseline_denominator"])
@@ -108,6 +113,8 @@ class SecondaryResultValidator:
             ):
                 continue
             candidate = contribution.as_candidate(binding.dimension or "secondary")
+            if missing_label is not None:
+                candidate["label"] = missing_label
             candidate["private_counts"] = {
                 "current_numerator": row["current_numerator"],
                 "current_denominator": row["current_denominator"],
@@ -144,7 +151,26 @@ class SecondaryResultValidator:
             ),
         )
 
-    def _validate_bucket_kinds(self, rows: list[dict[str, Any]]) -> None:
+    @staticmethod
+    def _missing_child_label(
+        row: dict[str, Any], policy: dict[str, str] | None
+    ) -> str | None:
+        if policy is None or row["dimension_label"] != row["dimension_value"]:
+            return None
+        key = {
+            "__dimension_null__": "null_label",
+            "__dimension_blank__": "blank_label",
+        }.get(row["dimension_value"])
+        return policy[key] if key is not None else None
+
+    def _validate_bucket_kinds(
+        self, rows: list[dict[str, Any]], policy: dict[str, str] | None
+    ) -> None:
+        if any(
+            row["dimension_value"] == "__dimension_reserved_collision__"
+            for row in rows
+        ):
+            raise ResultValidationError("schema_invalid", "reserved_identity_collision")
         allowed = {"child", "quality", "residual", "outside_parent"}
         outside = []
         for row in rows:
@@ -172,7 +198,11 @@ class SecondaryResultValidator:
                 raise ResultValidationError(
                     "schema_invalid", "secondary quality bucket is unregistered"
                 )
-            if kind == "child" and self.primary._is_quality_value(value):
+            if (
+                kind == "child"
+                and self.primary._is_quality_value(value)
+                and self._missing_child_label(row, policy) is None
+            ):
                 raise ResultValidationError(
                     "schema_invalid", "secondary child uses a quality identity"
                 )

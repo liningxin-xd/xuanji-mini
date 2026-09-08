@@ -89,6 +89,36 @@ install:
 secondary:
   template:
     path: references/queries/secondary-attribution-template.md
+  missing_child_bucket_policy:
+    download:
+      device_brand:
+        null_label: 设备品牌不适用或未包含
+        blank_label: 设备品牌为空白
+      channel_group:
+        null_label: 渠道不适用或未包含
+        blank_label: 渠道为空白
+      app_major_version:
+        null_label: 客户端大版本不适用或未包含
+        blank_label: 客户端大版本为空白
+      os_major_version:
+        null_label: 系统大版本不适用或未包含
+        blank_label: 系统大版本为空白
+      apk_size_tier:
+        null_label: 安装包大小分层不适用或未包含
+        blank_label: 安装包大小分层为空白
+    install:
+      device_brand:
+        null_label: 设备品牌不适用或未包含
+        blank_label: 设备品牌为空白
+      storage_headroom_tier:
+        null_label: 存储余量分层不适用或未包含
+        blank_label: 存储余量分层为空白
+      os_major_version:
+        null_label: 系统大版本不适用或未包含
+        blank_label: 系统大版本为空白
+      apk_size_tier:
+        null_label: 安装包大小分层不适用或未包含
+        blank_label: 安装包大小分层为空白
   parent_dimensions:
     download:
       game_id:
@@ -187,6 +217,27 @@ dimensions:
       allowed_template: install_primary
 
 dimension_normalizers:
+  secondary_missing_child:
+    value_expression: |-
+      CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source IS NULL THEN '__dimension_null__'
+        WHEN TRIM(CAST(dimension_source AS STRING)) = '' THEN '__dimension_blank__'
+        WHEN CAST(dimension_source AS STRING) IN (
+          '__dimension_null__', '__dimension_blank__', '__dimension_reserved_collision__'
+        ) THEN '__dimension_reserved_collision__'
+        ELSE CAST(dimension_source AS STRING)
+      END
+    label_expression: |-
+      MAX(CASE
+        WHEN COALESCE(dimension_quality_matched, 0) <> 1 THEN 'unmatched'
+        WHEN dimension_source IS NULL THEN '__dimension_null__'
+        WHEN TRIM(CAST(dimension_source AS STRING)) = '' THEN '__dimension_blank__'
+        WHEN CAST(dimension_source AS STRING) IN (
+          '__dimension_null__', '__dimension_blank__', '__dimension_reserved_collision__'
+        ) THEN '__dimension_reserved_collision__'
+        ELSE CAST(dimension_source AS STRING)
+      END)
   standard:
     value_expression: |-
       CASE

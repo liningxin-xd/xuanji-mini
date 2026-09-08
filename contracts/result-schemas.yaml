@@ -18,6 +18,9 @@ defaults:
     - __other__
     - __quality__
     - __other_below_threshold__
+    - __dimension_null__
+    - __dimension_blank__
+    - __dimension_reserved_collision__
 
 metrics:
   下载完成率:
