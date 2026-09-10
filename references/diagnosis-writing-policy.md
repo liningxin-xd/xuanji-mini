@@ -4,6 +4,11 @@
 
 ## 适用字段
 
+当前模型只按 [Runtime 文案指南](runtime-writing-guide.md) 提交 `summary`、`finding_texts`、
+`evidence_limits`、`recommended_action` 四个 writer_patch 字段。以下 `top_findings`、
+`counterfactual.finding`、`reason`、`action` 是完整输出或兼容镜像的措辞说明，不是新增模型输入字段。
+公开 v5 字段由 Host 装配，不能让模型手写完整 analysis 或改写机器状态。
+
 本规范适用于：
 
 ```text

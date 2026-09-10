@@ -118,7 +118,7 @@ receipt hashing. Structured numeric or null identities remain schema errors, wit
 `unmatched` is never a candidate. A source value equal to either missing sentinel or the reserved collision marker
 is rejected through `schema_invalid` / `reserved_identity_collision`; that marker never enters public facts.
 Global quality registration remains in force for primary and other consumers. No new object kind, key or quality
-field is introduced; analysis v5, public-facts v2, handoff v1, existing hashes/Ed25519 and alert-v5.5 remain unchanged.
+field is introduced; analysis v5, public-facts v2, handoff v1, existing hashes/Ed25519 and current alert-v5.6 are unaffected by this secondary identity fix.
 Writer and Renderer consume the signed labels without choosing new wording or implying a mechanism failure.
 
 Ship adapter, secondary SQL/binding, policy, validator, result registration and the secondary asset lock together.
@@ -181,8 +181,9 @@ An existing-anomaly stop requires `status=no_dominant_slice`, empty findings,
 `attribution_execution.mode=existing_anomaly_stop`. The Host derives the stop reason from its typed machine
 state, never from Writer prose. Full-queue results cannot carry this stop context.
 
-Public-facts v1 is not accepted by the v5.3 consumer. Deploy and verify the v2 Host before daily-push
-`alert-v5.3`, then prepare a fresh batch; do not migrate, re-sign, or resend previous rendered batches.
+The current daily-push `alert-v5.6` consumer requires public-facts v2 and rejects v1. Verify producer/consumer
+contracts together before preparing a fresh batch. Existing old-policy rendered batches remain byte-identical;
+do not migrate, re-sign, re-render or resend them. A presentation-only upgrade does not itself require a Host restart.
 
 ### Recommendations and narrative
 

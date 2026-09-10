@@ -1,5 +1,8 @@
 # Primary V1 Production Shadow
 
+> Compatibility/shadow runbook for v1; not evidence of a running production deployment. The current pipeline
+> targets primary_v2; see [Primary V2 Deployment And Shadow](primary-v2-deployment-shadow.md).
+
 This phase validates the frozen `primary_v1` path. It does not add analysis
 features, parallel queries, cross-task caches, or additional model tools.
 
@@ -87,7 +90,7 @@ may persist the public projection only after verifying the paired
 
 ## Logs And Exit Gate
 
-Retain the structured `xuanji_service`, `xuanji_event`, and schema-v2
+Retain the structured `xuanji_service`, `xuanji_event`, and schema-v3
 `xuanji_operation` records defined by
 [Operational Telemetry](operational-telemetry.md). SQL, rows, query IDs,
 receipts, hashes, paths, payloads, exception messages, and credentials remain

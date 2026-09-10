@@ -1,5 +1,9 @@
 # Local Primary V1 Shadow Runbook
 
+> Compatibility/shadow instructions for v1. The current local operator uses primary_v2 at port 8091;
+> do not run the v1 example over that endpoint. Choose an isolated unused port and data root for any v1 shadow.
+> Current v2 acceptance is in [Primary V2 Deployment And Shadow](primary-v2-deployment-shadow.md).
+
 This note covers a single-process macOS shadow when the Host, Codex session,
 and operator terminal run as separate processes. It is for local acceptance,
 not unattended production deployment.

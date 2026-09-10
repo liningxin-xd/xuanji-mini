@@ -1,7 +1,7 @@
 # Compiled Metric Definition Lock
 
 `contracts/metric-definitions.lock.json` is the Runtime definition bundle for
-the five `primary_v1` metrics. It contains only metric identity, adverse
+the five metrics shared by `primary_v1` and `primary_v2`. It contains only metric identity, adverse
 direction, app/sandbox observation windows, the external definition path, and
 source SHA-256. The external knowledge-base prose and SQL never enter model
 context or task execution.

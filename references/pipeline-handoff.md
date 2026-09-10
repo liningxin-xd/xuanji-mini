@@ -68,7 +68,7 @@ future fields are ignored and never persisted; only the signed preview supplies 
 Schema-v3 success input is a breaking consumer envelope change: old object and mixed envelopes are explicitly
 contract_mismatch with no dual-format fallback. Coordinate the consumer and all three repositories' instructions
 before starting new batches. Handoff v1, current Python hashes, unsigned signing bytes, key derivation, Ed25519,
-request v3, analysis v5, public-facts v2 and alert-v5.5 remain unchanged. No JCS, dependency or Host deployment change
+request v3, analysis v5, public-facts v2 and current alert-v5.6 are unaffected by raw-text ingestion. No JCS, dependency or Host deployment change
 is required. Existing batches stay byte-identical; never reconstruct missing raw text, migrate, re-sign or resend.
 Rollback must restore the consumer and all instructions together. Arbitrary manual payload 2.0/2 compatibility is
 outside this fix; input tests use the current DQC parser's production-shaped payload.

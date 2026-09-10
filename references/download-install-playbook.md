@@ -1,5 +1,13 @@
 # Android 下载与安装异常排查 Playbook
 
+## 当前实现范围
+
+本文件供开发与受信维护查阅；正常模型执行只读 task action 和 Runtime 文案指南，不加载完整 Playbook。
+路由、知识库定义 lock 和查询选择由 Host 控制。当前 `primary_v2` 按冻结 `post-primary-plan.yaml`
+执行反事实、最多一次二级查询、最多三款游戏背景、零查询广泛性校准及已启用的错误码/四象限增强。
+严格安装漏斗、同日新旧版本准实验和需要查询的同类负对照尚未启用；下文相关段落是后续设计约束，
+不是当前运行指令。多二级查询同样未实现且排除在本次 release 外；不得按本文设计自行增加查询。
+
 ## 目录
 
 - [共同规则](#共同规则)
@@ -540,7 +548,7 @@ APK/沙盒
 asset lock 同时发布；registry/schema 继续绑定现有 contract hash。另行授权部署后重启 `primary_v2`
 Host，只创建 fresh task/batch 验证，不恢复跨版本 task，不改写、重签或重发旧结果。回滚也整体恢复
 该 Xuanji 发布单元并重启 Host。analysis v5、public-facts v2、handoff v1、原 hash/Ed25519 及
-alert-v5.5 不变；daily-push 无生产代码变化时无需运行时回滚。线上未触发二级或 missing 桶时必须明确
+当前 alert-v5.6 不因本局部修复改变；daily-push 无生产代码变化时无需运行时回滚。线上未触发二级或 missing 桶时必须明确
 报告未覆盖，合成离线测试不等于线上验收。
 
 ## 游戏背景

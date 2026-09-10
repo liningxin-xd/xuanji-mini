@@ -5,6 +5,10 @@ It does not add analysis modules, change the daily-push request or writer
 contract, apply Kubernetes resources, route production traffic, render alert
 cards, or send Feishu messages.
 
+For the current local operator, `primary_v2` is bound to `127.0.0.1:8091/mcp`.
+The paired shadow ports below are fixture/isolation examples, not the current operator binding.
+A direct ECS deployment needs its own service configuration; do not apply Kubernetes YAML to a plain ECS host.
+
 ## Release Boundary
 
 `primary_v1` and `primary_v2` may use the same reviewed image digest. Their
@@ -144,7 +148,7 @@ Host:
    unique non-empty `TextContent.text` unchanged as the opaque
    `task_complete_json` beside the immutable request ID. Do not parse and
    re-stringify the inner text.
-4. Stringify only the outer `{request_id, task_complete_json}` result envelope,
+4. Stringify only the outer array of `{request_id, task_complete_json}` result envelopes,
    write it to a mode-`0600` system temporary file outside the batch, and use
    the formal daily-push launcher and workspace `.env` with
    `write-alert-analysis`. Clean the temporary file after success or failure.

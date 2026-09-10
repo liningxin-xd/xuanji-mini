@@ -60,7 +60,7 @@ run/batch 补齐证据。完整交接协议见 [Pipeline Handoff](references/pip
 Python writer 从上述原始文本一次解析得到配对对象；旧/混合成功信封为 `contract_mismatch`，没有兼容
 fallback。外层数组可以 JSON.stringify，内层文本不能解析后重建。原始临时文件必须在 batch 外系统
 临时目录、权限 0600，成功和失败都清理且不记录全文。本修复保持 handoff v1、原 hash/Ed25519、
-request v3、analysis v5、public-facts v2 和 alert-v5.5，不需要修改或重启 Host。
+request v3、analysis v5、public-facts v2 和 alert-v5.6，不需要修改或重启 Host。
 
 ## 失败与安全
 

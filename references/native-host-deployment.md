@@ -31,9 +31,9 @@ credentials are present:
 3. a Host-owned receipt secret of at least 32 bytes.
 
 `XUANJI_ANALYSIS_PROFILE` is deployment-owned and accepts only `primary_v1` or
-`primary_v2`. The existing production deployment remains explicitly pinned to
-`primary_v1`. The separate `deploy/primary-v2/manifests.yaml` template is an
-isolated release candidate and does not authorize cluster apply or traffic.
+`primary_v2`. The v1 template is retained for compatibility/shadow deployments; its presence is not evidence
+of a live production deployment. The current alert pipeline targets `primary_v2`, as specified by the operator.
+The separate `deploy/primary-v2/manifests.yaml` is a fail-closed template and does not authorize cluster apply or traffic.
 Its full gate is documented in
 [Primary V2 Deployment And Shadow](primary-v2-deployment-shadow.md).
 
@@ -79,8 +79,9 @@ Pin the returned key ID and public key in the daily-push workspace as
 changing it changes the accepted Host authority and must be reviewed. Do not
 run this derivation by putting the receipt secret on a command line.
 
-The existing production Kubernetes source is
-`deploy/primary-v1/manifests.yaml`. It is a fail-closed template: the
+The v1 compatibility Kubernetes source is
+`deploy/primary-v1/manifests.yaml`. The following example applies only to v1; use the linked v2 runbook for v2.
+Both are fail-closed templates: the
 placeholder image cannot pass the production gate.
 Render it with the exact image digest built from the release commit:
 
@@ -121,7 +122,8 @@ covered once, task ordering is stable, and the task sink agrees with the run
 sinks and returned receipt hashes. Failed or leaking shadows must not be
 resumed or used as evidence. The exact three-scenario procedure and artifact
 verifier are documented in
-[Primary V1 Production Shadow](primary-v1-production-shadow.md).
+[Primary V1 Production Shadow](primary-v1-production-shadow.md) for v1, and
+[Primary V2 Deployment And Shadow](primary-v2-deployment-shadow.md) for the current v2 target.
 
 ## Deployment Troubleshooting And Status
 
